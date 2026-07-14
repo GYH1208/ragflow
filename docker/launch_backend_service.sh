@@ -49,7 +49,12 @@ export http_proxy=""; export https_proxy=""; export no_proxy=""; export HTTP_PRO
 export PYTHONPATH=$(pwd)
 
 export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/
-JEMALLOC_PATH=$(pkg-config --variable=libdir jemalloc)/libjemalloc.so
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists jemalloc; then
+  JEMALLOC_PATH=$(pkg-config --variable=libdir jemalloc)/libjemalloc.so
+else
+  echo "Warning: jemalloc pkg-config metadata not found; starting without LD_PRELOAD."
+  JEMALLOC_PATH=""
+fi
 
 PY=python3
 
@@ -93,7 +98,11 @@ task_exe(){
     local retry_count=0
     while ! $STOP && [ $retry_count -lt $MAX_RETRIES ]; do
         echo "Starting task_executor.py for task $task_id (Attempt $((retry_count+1)))"
-        LD_PRELOAD=$JEMALLOC_PATH $PY rag/svr/task_executor.py -i "$task_id"
+        if [ -n "$JEMALLOC_PATH" ]; then
+            LD_PRELOAD=$JEMALLOC_PATH $PY rag/svr/task_executor.py -i "$task_id"
+        else
+            $PY rag/svr/task_executor.py -i "$task_id"
+        fi
         EXIT_CODE=$?
         if [ $EXIT_CODE -eq 0 ]; then
             echo "task_executor.py for task $task_id exited successfully."

@@ -241,3 +241,4 @@ bin/*
 # Local agent tooling state (per-developer; not for commit)
 .omc/
 .marscode/
+graphify-out/
