@@ -145,6 +145,7 @@ async def _release_server(host: str, port: int) -> None:
 
 class WeComChannel(Channel):
     channel_id = "wecom"
+    hides_reference_markers = True
 
     def __init__(self, account: WeComAccount) -> None:
         super().__init__()

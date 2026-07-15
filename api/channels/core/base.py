@@ -41,6 +41,7 @@ class Channel(ABC):
 
     channel_id: ClassVar[str]
     supports_reference_images: bool = False
+    hides_reference_markers: bool = False
     account_id: str
 
     def __init__(self) -> None:

@@ -1,4 +1,8 @@
-from api.channels.core.base import OutgoingImage, OutgoingMessage
+from api.channels.core.base import Channel, OutgoingImage, OutgoingMessage
+
+
+def test_channel_keeps_reference_markers_by_default():
+    assert Channel.hides_reference_markers is False
 
 
 def test_outgoing_message_remains_text_only_by_default():

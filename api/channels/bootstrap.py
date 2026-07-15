@@ -41,6 +41,8 @@ _CITATION_DIGIT_TRANSLATION = str.maketrans(
     "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
     "01234567890123456789",
 )
+_HORIZONTAL_WHITESPACE = " \t"
+_CITATION_TRAILING_PUNCTUATION = frozenset(",.;:!?，。；：！？、)]}）】")
 
 # Channel packages bundled under api/channels that self-register on import.
 _BUNDLED_CHANNELS = (
@@ -58,22 +60,50 @@ _BUNDLED_CHANNELS = (
 _RECONCILE_INTERVAL_SECS = 10
 
 
-def _extract_cited_images(answer: str, chunks: object) -> list[OutgoingImage]:
-    if not isinstance(chunks, list):
-        return []
+def _trim_output_horizontal_suffix(parts: list[str]) -> None:
+    while parts:
+        trimmed = parts[-1].rstrip(_HORIZONTAL_WHITESPACE)
+        if trimmed:
+            parts[-1] = trimmed
+            return
+        parts.pop()
 
-    images = []
-    seen = set()
-    for match in _CITATION_PATTERN.finditer(answer or ""):
+
+def _prepare_cited_output(answer: str, chunks: object) -> tuple[str, list[OutgoingImage]]:
+    text = answer or ""
+    valid_chunks = chunks if isinstance(chunks, list) else []
+    parts: list[str] = []
+    images: list[OutgoingImage] = []
+    seen: set[str] = set()
+    cursor = 0
+
+    for match in _CITATION_PATTERN.finditer(text):
+        segment = text[cursor : match.start()]
+        if segment:
+            parts.append(segment)
+        cursor = match.end()
+
         index = int(match.group(1).translate(_CITATION_DIGIT_TRANSLATION))
-        if index >= len(chunks) or not isinstance(chunks[index], dict):
-            continue
-        image_id = str(chunks[index].get("image_id") or "")
-        if not image_id or image_id in seen:
-            continue
-        seen.add(image_id)
-        images.append(OutgoingImage(image_id=image_id))
-    return images
+        if index < len(valid_chunks) and isinstance(valid_chunks[index], dict):
+            image_id = str(valid_chunks[index].get("image_id") or "")
+            if image_id and image_id not in seen:
+                seen.add(image_id)
+                images.append(OutgoingImage(image_id=image_id))
+
+        space_end = cursor
+        while space_end < len(text) and text[space_end] in _HORIZONTAL_WHITESPACE:
+            space_end += 1
+
+        next_char = text[space_end : space_end + 1]
+        last_char = parts[-1][-1] if parts else ""
+        if not next_char or next_char in "\r\n" or next_char in _CITATION_TRAILING_PUNCTUATION:
+            _trim_output_horizontal_suffix(parts)
+            cursor = space_end
+        elif last_char in _HORIZONTAL_WHITESPACE or not last_char or last_char in "\r\n":
+            cursor = space_end
+
+    parts.append(text[cursor:])
+    return "".join(parts), images
 
 
 def _register_channels() -> None:
@@ -185,9 +215,11 @@ def _make_chat_handler(ch):
                 chat_kwargs["knowledge"] = ""
             async for ans in async_chat(dia, history, False, **chat_kwargs):
                 structure_answer(conv, ans, message_id, conv.id)
-                answer_text = (ans or {}).get("answer", "") or ""
+                raw_answer = (ans or {}).get("answer", "") or ""
                 reference = (ans or {}).get("reference") or {}
-                answer_images = _extract_cited_images(answer_text, reference.get("chunks"))
+                prepared_text, cited_images = _prepare_cited_output(raw_answer, reference.get("chunks"))
+                answer_text = prepared_text if ch.hides_reference_markers else raw_answer
+                answer_images = cited_images if ch.supports_reference_images else []
                 ConversationService.update_by_id(conv.id, conv.to_dict())
                 break
         except Exception as ex:

@@ -25,6 +25,10 @@ def make_channel():
     return channel
 
 
+def test_wecom_hides_reference_markers():
+    assert make_channel().hides_reference_markers is True
+
+
 @pytest.mark.asyncio
 async def test_ws_request_resolves_matching_response():
     channel = make_channel()
