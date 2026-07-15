@@ -1,104 +1,104 @@
-# WeCom WebSocket Reference Images Design
+# 企业微信 WebSocket 引用图片回复设计
 
-## Goal
+## 目标
 
-When a RAG answer is delivered through a WeCom channel configured for WebSocket connectivity, send the cropped images belonging to the chunks actually cited in the answer. Keep the existing Markdown answer and send the cited images afterward in first-citation order.
+当 RAG 回答通过 WebSocket 模式的企业微信 Channel 发送时，把回答正文实际引用的知识块裁剪图片一并发送到企业微信。保留现有 Markdown 文字回答，并在文字之后按照图片在正文中的首次引用顺序依次发送。
 
-## Scope
+## 范围
 
-- Only the WeCom WebSocket connection mode gains image delivery.
-- Only chunks cited with the current `[ID:n]` citation syntax are eligible.
-- Citation indices are zero-based, matching the existing chat UI and retrieval pipeline.
-- A cited chunk is sent only when its formatted reference contains a non-empty `image_id`.
-- Duplicate `image_id` values are sent once, at their first citation position.
-- Retrieved but uncited images are not sent.
-- The stored crop is sent without rendering the web UI's CSS-only `Fig. n` label into the bitmap.
-- Existing text-only behavior remains unchanged for every other channel and for WeCom webhook mode.
+- 仅为企业微信 WebSocket 连接模式增加图片发送能力。
+- 只有使用当前 `[ID:n]` 格式在回答正文中被引用的知识块才有资格发送图片。
+- 引用编号从 0 开始，与现有聊天页面和检索链路保持一致。
+- 仅当被引用知识块的格式化引用数据中存在非空 `image_id` 时才发送图片。
+- 相同的 `image_id` 只发送一次，发送位置以它在正文中第一次被引用的位置为准。
+- 检索到但没有被回答正文引用的图片不发送。
+- 发送对象存储中的原始裁剪图片，不把网页通过 CSS 展示的 `Fig. n` 标签绘制到图片中。
+- 其他 Channel 以及企业微信 Webhook 模式继续保持现有纯文字行为。
 
-## Architecture
+## 架构设计
 
-### Outgoing message model
+### 出站消息模型
 
-Extend the common outgoing message model with an optional list of storage-backed image references. An image reference contains the composite RAGFlow `image_id`; channel implementations that do not support images can continue to use only the existing text fields.
+扩展公共出站消息模型，增加可选的对象存储图片引用列表。每个图片引用包含 RAGFlow 的复合 `image_id`。不支持图片的 Channel 可以继续只使用现有文字字段，不需要改变原有行为。
 
-### Citation selection
+### 引用图片筛选
 
-After `async_chat` returns its final answer, the channel bootstrap handler retains the formatted `reference.chunks` produced by `structure_answer`. A focused helper scans the answer for `[ID:n]` markers, normalizes supported Arabic/Persian digits, validates indices, filters chunks without an `image_id`, and removes duplicates without changing first-citation order.
+`async_chat` 返回最终答案后，Channel 启动层保留经 `structure_answer` 格式化后的 `reference.chunks`。新增一个职责单一的辅助函数，用于扫描回答中的 `[ID:n]` 标记、规范化受支持的阿拉伯语和波斯语数字、校验引用下标、过滤没有 `image_id` 的知识块，并在不改变首次引用顺序的情况下去重。
 
-The resulting image references are attached to the same `OutgoingMessage` as the Markdown answer. Selection is independent of WeCom protocol handling and can be unit tested without a live connection or object store.
+筛选出的图片引用与 Markdown 回答放入同一个 `OutgoingMessage`。引用筛选逻辑独立于企业微信协议实现，因此不需要真实 WebSocket 连接或对象存储即可进行单元测试。
 
-### Storage loading
+### 对象存储读取
 
-The WeCom adapter resolves each composite `image_id` into its bucket and object key using the existing storage identifier convention, then reads the original bytes from `settings.STORAGE_IMPL`. Invalid identifiers, missing objects, and unsupported data are logged and skipped without failing the text reply or later images.
+企业微信适配器使用现有对象存储标识规则，把每个复合 `image_id` 解析为 bucket 和 object key，再通过 `settings.STORAGE_IMPL` 读取原始图片二进制。对于非法标识、不存在的对象和不可用的数据，仅记录日志并跳过当前图片，不影响文字回答及后续图片。
 
-### WebSocket request-response routing
+### WebSocket 请求与响应关联
 
-The current receive loop logs command responses but cannot return them to a sender. Add a pending-request map keyed by `headers.req_id`. A request helper will:
+当前接收循环只记录命令响应日志，无法把响应返回给发起请求的调用方。新增一个以 `headers.req_id` 为键的待处理请求映射。请求辅助方法执行以下步骤：
 
-1. Allocate a unique request ID.
-2. Register a Future before sending the frame under the existing WebSocket send lock.
-3. Wait for the matching response with a bounded timeout.
-4. Raise a protocol error when `errcode` is non-zero or the response shape is invalid.
-5. Always remove the pending entry.
+1. 生成唯一的请求 ID。
+2. 在发送消息前创建并登记 Future，并继续使用现有 WebSocket 发送锁。
+3. 在限定时间内等待具有相同请求 ID 的响应。
+4. 当 `errcode` 非零或响应结构不合法时抛出协议异常。
+5. 无论成功或失败，都移除待处理请求记录。
 
-The receive handler resolves matching Futures before applying existing callback/event handling. When the socket disconnects or the channel stops, all pending Futures are failed and cleared.
+接收处理器先尝试解析并完成匹配的 Future，再执行现有的消息回调和事件处理逻辑。WebSocket 断开或 Channel 停止时，所有等待中的 Future 都会以异常结束并被清理。
 
-### Media upload and delivery
+### 素材上传与图片发送
 
-For each selected image, the adapter performs the official long-connection upload sequence:
+对于每一张筛选出的图片，企业微信适配器按照官方长连接协议依次执行：
 
-1. `aibot_upload_media_init` with type `image`, filename, byte size, chunk count, and MD5.
-2. `aibot_upload_media_chunk` for each Base64-encoded chunk, numbered from 1.
-3. `aibot_upload_media_finish` to receive the temporary `media_id`.
-4. `aibot_send_msg` to the same `chatid` with `msgtype: image` and the returned `media_id`.
+1. 发送 `aibot_upload_media_init`，包含素材类型 `image`、文件名、字节大小、分片总数和 MD5。
+2. 对每个 Base64 编码的分片发送 `aibot_upload_media_chunk`，分片编号从 1 开始。
+3. 发送 `aibot_upload_media_finish`，取得临时素材的 `media_id`。
+4. 向同一 `chatid` 发送 `aibot_send_msg`，消息类型为 `image`，并携带取得的 `media_id`。
 
-The Markdown answer is sent first. Images are uploaded and sent sequentially to preserve citation order and avoid unnecessary concurrent WebSocket traffic. Failure of one image is logged and does not prevent subsequent images from being attempted.
+Markdown 文字回答始终先发送。图片按照顺序逐张上传和发送，从而保持引用顺序并避免不必要的并发 WebSocket 流量。单张图片上传或发送失败时记录日志，但仍继续尝试发送后续图片。
 
-## Data Flow
+## 数据流
 
 ```text
-async_chat final answer
-  -> structure_answer formats reference.chunks
-  -> extract cited image_id values from answer
+async_chat 最终回答
+  -> structure_answer 格式化 reference.chunks
+  -> 从回答正文提取被引用知识块的 image_id
   -> OutgoingMessage(text, images)
   -> aibot_send_msg(markdown)
-  -> for each image_id:
+  -> 针对每个 image_id：
        STORAGE_IMPL.get
        -> upload init
        -> upload chunks
-       -> upload finish (media_id)
+       -> upload finish（取得 media_id）
        -> aibot_send_msg(image)
 ```
 
-## Error Handling
+## 错误处理
 
-- An invalid or out-of-range citation is ignored.
-- A citation without an image is ignored.
-- Missing image storage data logs an error and skips that image.
-- WebSocket request timeout, malformed acknowledgement, or non-zero `errcode` fails only the current operation.
-- An image upload/send failure does not retract or duplicate the already-sent Markdown answer.
-- Disconnect and stop paths fail pending request Futures so callers do not wait until timeout.
-- Existing reconnect behavior remains responsible for establishing a new socket; the first version does not retry a partially uploaded image across reconnects.
+- 忽略非法或超出范围的引用编号。
+- 忽略没有图片的被引用知识块。
+- 对象存储中不存在图片时记录错误并跳过该图片。
+- WebSocket 请求超时、响应格式错误或非零 `errcode` 只中止当前操作。
+- 图片上传或发送失败不会撤回或重复发送已经成功发送的 Markdown 回答。
+- WebSocket 断开或 Channel 停止时，立即结束所有等待中的请求，避免调用方一直等待到超时。
+- 现有重连逻辑继续负责建立新连接；第一版不对上传到一半的图片执行跨连接重试。
 
-## Testing
+## 测试设计
 
-Add isolated unit tests covering:
+新增相互隔离的单元测试，覆盖：
 
-- Citation parsing, supported digit normalization, index validation, ordering, and image deduplication.
-- Backward-compatible construction of text-only outgoing messages.
-- WebSocket response correlation and non-zero error handling.
-- Upload init/chunk/finish frame shapes, Base64 encoding, MD5, and media ID extraction.
-- Image message frame shape and preservation of text-before-images ordering.
-- Missing storage objects and per-image failure isolation.
-- Cleanup of pending requests on disconnect or channel stop.
+- 引用解析、受支持数字的规范化、下标校验、顺序保持和图片去重。
+- 纯文字 `OutgoingMessage` 构造方式保持向后兼容。
+- WebSocket 响应关联和非零错误码处理。
+- 上传初始化、分片上传和上传完成的消息结构，以及 Base64 编码、MD5 和 `media_id` 提取。
+- 图片消息结构，以及文字先于图片发送的顺序。
+- 对象存储图片缺失和单张图片失败时的隔离行为。
+- WebSocket 断开或 Channel 停止时清理等待中的请求。
 
-No live WeCom credentials or external network access are required for unit tests.
+单元测试不需要真实企业微信凭证，也不访问外部网络。
 
-## Acceptance Criteria
+## 验收标准
 
-1. A WebSocket WeCom answer citing image-backed chunks sends its Markdown text followed by exactly those images.
-2. Images appear in first-citation order and duplicates are sent once.
-3. Uncited images and cited non-image chunks are not sent.
-4. Text replies continue to work when no cited image exists or image delivery fails.
-5. Other channel adapters require no behavior change.
-6. Automated tests validate the citation and WebSocket media protocol paths.
+1. 企业微信 WebSocket 回答引用了带图片的知识块时，先发送 Markdown 文字，再准确发送这些引用图片。
+2. 图片按照正文中的首次引用顺序出现，相同图片只发送一次。
+3. 未引用的图片和没有图片的被引用知识块都不发送。
+4. 没有引用图片或图片发送失败时，文字回答仍能正常发送。
+5. 其他 Channel 的行为不发生变化。
+6. 自动化测试覆盖引用筛选和 WebSocket 素材协议链路。
