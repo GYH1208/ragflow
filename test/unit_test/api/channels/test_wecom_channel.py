@@ -63,6 +63,38 @@ async def test_ws_request_raises_for_protocol_error():
 
 
 @pytest.mark.asyncio
+async def test_ws_request_rejects_ack_without_errcode():
+    channel = make_channel()
+    task = asyncio.create_task(channel._ws_request("aibot_send_msg", {}))
+    await asyncio.sleep(0)
+    sent = channel._ws.send_json.await_args.args[0]
+
+    await channel._handle_ws_payload(json.dumps({"headers": sent["headers"]}))
+
+    with pytest.raises(RuntimeError, match="errcode"):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_ws_request_rejects_non_numeric_errcode():
+    channel = make_channel()
+    task = asyncio.create_task(channel._ws_request("aibot_send_msg", {}))
+    await asyncio.sleep(0)
+    sent = channel._ws.send_json.await_args.args[0]
+
+    await channel._handle_ws_payload(json.dumps({"headers": sent["headers"], "errcode": "invalid"}))
+
+    with pytest.raises(RuntimeError, match="errcode"):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_ws_payload_ignores_non_object_json():
+    channel = make_channel()
+    await channel._handle_ws_payload(json.dumps([]))
+
+
+@pytest.mark.asyncio
 async def test_disconnect_fails_and_clears_pending_requests():
     channel = make_channel()
     task = asyncio.create_task(channel._ws_request("aibot_send_msg", {}))
@@ -73,6 +105,47 @@ async def test_disconnect_fails_and_clears_pending_requests():
     with pytest.raises(ConnectionError, match="disconnected"):
         await task
     assert channel._ws_pending == {}
+
+
+@pytest.mark.asyncio
+async def test_message_callback_does_not_block_ack_processing():
+    channel = make_channel()
+    handler_done = asyncio.Event()
+
+    async def handler(message):
+        await channel.send(OutgoingMessage(chat_id=message.chat_id, text="answer"))
+        handler_done.set()
+
+    channel.set_message_handler(handler)
+    callback = {
+        "cmd": "aibot_msg_callback",
+        "headers": {"req_id": "callback-1"},
+        "body": {
+            "msgtype": "text",
+            "from": {"userid": "user-1"},
+            "chatid": "chat-1",
+            "chattype": "group",
+            "text": {"content": "question"},
+        },
+    }
+
+    await asyncio.wait_for(channel._handle_ws_payload(json.dumps(callback)), 0.1)
+    for _ in range(10):
+        if channel._ws.send_json.await_count:
+            break
+        await asyncio.sleep(0)
+    sent = channel._ws.send_json.await_args.args[0]
+    await channel._handle_ws_payload(
+        json.dumps(
+            {
+                "cmd": "aibot_send_msg",
+                "headers": sent["headers"],
+                "errcode": 0,
+            }
+        )
+    )
+
+    await asyncio.wait_for(handler_done.wait(), 0.1)
 
 
 @pytest.mark.asyncio
@@ -102,7 +175,7 @@ async def test_upload_image_uses_init_chunks_and_finish(monkeypatch):
             "md5": hashlib.md5(b"abcdefg").hexdigest(),
         },
     )
-    assert [request[1]["chunk_index"] for request in requests[1:4]] == [1, 2, 3]
+    assert [request[1]["chunk_index"] for request in requests[1:4]] == [0, 1, 2]
     assert base64.b64decode(requests[1][1]["base64_data"]) == b"abc"
     assert requests[-1] == (
         "aibot_upload_media_finish",
@@ -123,6 +196,24 @@ async def test_upload_image_requires_media_id(monkeypatch):
 
     with pytest.raises(RuntimeError, match="media_id"):
         await channel._upload_websocket_image(b"image", "reference.jpg")
+
+
+@pytest.mark.asyncio
+async def test_upload_image_rejects_more_than_100_chunks(monkeypatch):
+    channel = make_channel()
+
+    async def request(cmd, body):
+        if cmd == "aibot_upload_media_init":
+            return {"body": {"upload_id": "upload-1"}}
+        if cmd == "aibot_upload_media_finish":
+            return {"body": {"media_id": "media-1"}}
+        return {"body": {}}
+
+    monkeypatch.setattr(channel, "_ws_request", request)
+    monkeypatch.setattr("api.channels.wecom.channel.WECOM_MEDIA_CHUNK_SIZE", 1)
+
+    with pytest.raises(ValueError, match="100"):
+        await channel._upload_websocket_image(b"x" * 101, "reference.jpg")
 
 
 @pytest.mark.asyncio

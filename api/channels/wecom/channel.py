@@ -23,6 +23,7 @@ LOGGER = logging.getLogger(__name__)
 WECOM_API_BASE = "https://qyapi.weixin.qq.com/cgi-bin"
 WECOM_WS_URL = "wss://openws.work.weixin.qq.com"
 WECOM_MEDIA_CHUNK_SIZE = 512 * 1024
+WECOM_MEDIA_MAX_CHUNKS = 100
 WECOM_WS_REQUEST_TIMEOUT = 10
 
 
@@ -160,6 +161,7 @@ class WeComChannel(Channel):
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._ws_send_lock: Optional[asyncio.Lock] = None
         self._ws_pending: dict[str, asyncio.Future] = {}
+        self._ws_callback_tasks: set[asyncio.Task] = set()
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._stop_requested = False
 
@@ -192,6 +194,11 @@ class WeComChannel(Channel):
     async def stop(self) -> None:
         self._stop_requested = True
         self._fail_pending_requests(ConnectionError("wecom channel stopped"))
+        callback_tasks = list(self._ws_callback_tasks)
+        for task in callback_tasks:
+            task.cancel()
+        if callback_tasks:
+            await asyncio.gather(*callback_tasks, return_exceptions=True)
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
             try:
@@ -382,23 +389,44 @@ class WeComChannel(Channel):
                 payload[:200],
             )
             return
+        if not isinstance(obj, dict):
+            LOGGER.error(
+                "[wecom:%s] websocket payload must be an object: %r",
+                self.account_id,
+                obj,
+            )
+            return
         cmd = str(obj.get("cmd") or "")
         headers = obj.get("headers") or {}
+        if not isinstance(headers, dict):
+            LOGGER.error(
+                "[wecom:%s] websocket headers must be an object: %r",
+                self.account_id,
+                headers,
+            )
+            return
         body = obj.get("body") or {}
         req_id = str(headers.get("req_id") or "")
         pending = self._ws_pending.get(req_id)
         if pending is not None and not pending.done():
-            errcode = int(obj.get("errcode", 0) or 0)
+            raw_errcode = obj.get("errcode")
+            try:
+                if raw_errcode is None:
+                    raise ValueError("missing errcode")
+                errcode = int(raw_errcode)
+            except (TypeError, ValueError):
+                pending.set_exception(RuntimeError(f"wecom websocket response has invalid errcode: {raw_errcode!r}"))
+                return
             if errcode:
                 pending.set_exception(RuntimeError(f"wecom websocket request failed ({errcode}): {obj.get('errmsg') or obj}"))
             else:
                 pending.set_result(obj)
             return
         if cmd == "aibot_msg_callback":
-            await self._handle_ws_message(headers, body, obj)
+            self._schedule_ws_callback(self._handle_ws_message(headers, body, obj))
             return
         if cmd == "aibot_event_callback":
-            await self._handle_ws_event(headers, body, obj)
+            self._schedule_ws_callback(self._handle_ws_event(headers, body, obj))
             return
         if cmd in ("aibot_subscribe", "aibot_respond_msg", "aibot_respond_welcome_msg"):
             errcode = obj.get("errcode")
@@ -408,6 +436,23 @@ class WeComChannel(Channel):
                 LOGGER.debug("[wecom:%s] websocket response: %s", self.account_id, obj)
             return
         LOGGER.debug("[wecom:%s] websocket ignored cmd=%s", self.account_id, cmd)
+
+    def _schedule_ws_callback(self, callback) -> None:
+        task = asyncio.create_task(callback)
+        self._ws_callback_tasks.add(task)
+        task.add_done_callback(self._on_ws_callback_done)
+
+    def _on_ws_callback_done(self, task: asyncio.Task) -> None:
+        self._ws_callback_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            LOGGER.error(
+                "[wecom:%s] websocket callback failed",
+                self.account_id,
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
     async def _ws_request(self, cmd: str, body: dict) -> dict:
         if self._ws is None or self._ws.closed:
@@ -442,6 +487,8 @@ class WeComChannel(Channel):
             raise ValueError("wecom image upload requires non-empty data")
 
         total_chunks = (len(image) + WECOM_MEDIA_CHUNK_SIZE - 1) // WECOM_MEDIA_CHUNK_SIZE
+        if total_chunks > WECOM_MEDIA_MAX_CHUNKS:
+            raise ValueError(f"wecom image upload exceeds {WECOM_MEDIA_MAX_CHUNKS} chunks")
         init_response = await self._ws_request(
             "aibot_upload_media_init",
             {
@@ -463,7 +510,7 @@ class WeComChannel(Channel):
                 "aibot_upload_media_chunk",
                 {
                     "upload_id": upload_id,
-                    "chunk_index": chunk_index + 1,
+                    "chunk_index": chunk_index,
                     "base64_data": base64.b64encode(chunk).decode("ascii"),
                 },
             )
