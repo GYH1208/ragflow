@@ -23,6 +23,7 @@ LOGGER = logging.getLogger(__name__)
 WECOM_API_BASE = "https://qyapi.weixin.qq.com/cgi-bin"
 WECOM_WS_URL = "wss://openws.work.weixin.qq.com"
 WECOM_MEDIA_CHUNK_SIZE = 512 * 1024
+WECOM_WS_REQUEST_TIMEOUT = 10
 
 
 @dataclass
@@ -88,9 +89,7 @@ class _SharedWebhookServer:
             if request.method == "GET":
                 echo_str = request.query.get("echostr", "")
                 try:
-                    decrypted = channel.crypto.check_signature(
-                        signature, timestamp, nonce, echo_str
-                    )
+                    decrypted = channel.crypto.check_signature(signature, timestamp, nonce, echo_str)
                     return web.Response(text=decrypted)
                 except InvalidSignatureException:
                     return web.Response(status=403, text="bad signature")
@@ -151,11 +150,8 @@ class WeComChannel(Channel):
         self.account = account
         self.account_id = account.account_id
         self.connection_type = (account.connection_type or "webhook").strip().lower()
-        self.crypto = (
-            WeChatCrypto(account.token, account.aes_key, account.corp_id)
-            if self.connection_type == "webhook"
-            else None
-        )
+        self.supports_reference_images = self.connection_type == "websocket"
+        self.crypto = WeChatCrypto(account.token, account.aes_key, account.corp_id) if self.connection_type == "webhook" else None
         self._server: Optional[_SharedWebhookServer] = None
         self._access_token: Optional[str] = None
         self._access_token_expires_at: float = 0.0
@@ -184,9 +180,7 @@ class WeComChannel(Channel):
             )
             return
 
-        self._server = await _acquire_server(
-            self.account.webhook_host, self.account.webhook_port
-        )
+        self._server = await _acquire_server(self.account.webhook_host, self.account.webhook_port)
         self._server.channels[self.account_id] = self
         LOGGER.info(
             "[wecom:%s] registered at path /wecom/%s/callback (agent_id=%s)",
@@ -220,9 +214,7 @@ class WeComChannel(Channel):
         self._ws = None
         if self._server is not None:
             self._server.channels.pop(self.account_id, None)
-            await _release_server(
-                self.account.webhook_host, self.account.webhook_port
-            )
+            await _release_server(self.account.webhook_host, self.account.webhook_port)
             self._server = None
 
     async def _handle_text_message(
@@ -290,18 +282,14 @@ class WeComChannel(Channel):
                             self.account_id,
                         )
                         await self._subscribe_websocket(ws)
-                        self._heartbeat_task = asyncio.create_task(
-                            self._heartbeat_loop(ws)
-                        )
+                        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws))
                         async for msg in ws:
                             if self._stop_requested:
                                 break
                             if msg.type == aiohttp.WSMsgType.TEXT:
                                 await self._handle_ws_payload(msg.data)
                             elif msg.type == aiohttp.WSMsgType.BINARY:
-                                await self._handle_ws_payload(
-                                    msg.data.decode("utf-8", "ignore")
-                                )
+                                await self._handle_ws_payload(msg.data.decode("utf-8", "ignore"))
                             elif msg.type == aiohttp.WSMsgType.PONG:
                                 LOGGER.debug("[wecom:%s] websocket pong", self.account_id)
                             elif msg.type in (
@@ -327,9 +315,7 @@ class WeComChannel(Channel):
                     exc_info=True,
                 )
             finally:
-                self._fail_pending_requests(
-                    ConnectionError("wecom websocket disconnected")
-                )
+                self._fail_pending_requests(ConnectionError("wecom websocket disconnected"))
                 if self._heartbeat_task and not self._heartbeat_task.done():
                     self._heartbeat_task.cancel()
                     try:
@@ -380,9 +366,7 @@ class WeComChannel(Channel):
         errcode = int(resp.get("errcode", 0) or 0)
         if errcode != 0:
             if errcode == 853000:
-                raise PermissionError(
-                    f"wecom websocket subscribe failed: invalid bot_id or secret: {resp}"
-                )
+                raise PermissionError(f"wecom websocket subscribe failed: invalid bot_id or secret: {resp}")
             raise RuntimeError(f"wecom websocket subscribe failed: {resp}")
         LOGGER.info("[wecom:%s] websocket subscribed", self.account_id)
 
@@ -406,12 +390,7 @@ class WeComChannel(Channel):
         if pending is not None and not pending.done():
             errcode = int(obj.get("errcode", 0) or 0)
             if errcode:
-                pending.set_exception(
-                    RuntimeError(
-                        f"wecom websocket request failed ({errcode}): "
-                        f"{obj.get('errmsg') or obj}"
-                    )
-                )
+                pending.set_exception(RuntimeError(f"wecom websocket request failed ({errcode}): {obj.get('errmsg') or obj}"))
             else:
                 pending.set_result(obj)
             return
@@ -430,9 +409,7 @@ class WeComChannel(Channel):
             return
         LOGGER.debug("[wecom:%s] websocket ignored cmd=%s", self.account_id, cmd)
 
-    async def _ws_request(
-        self, cmd: str, body: dict, timeout: float = 10
-    ) -> dict:
+    async def _ws_request(self, cmd: str, body: dict) -> dict:
         if self._ws is None or self._ws.closed:
             raise ConnectionError("wecom websocket is not connected")
 
@@ -449,7 +426,7 @@ class WeComChannel(Channel):
                 self._ws_send_lock = asyncio.Lock()
             async with self._ws_send_lock:
                 await self._ws.send_json(payload)
-            return await asyncio.wait_for(future, timeout=timeout)
+            return await asyncio.wait_for(future, timeout=WECOM_WS_REQUEST_TIMEOUT)
         finally:
             self._ws_pending.pop(req_id, None)
 
@@ -460,15 +437,11 @@ class WeComChannel(Channel):
             if not future.done():
                 future.set_exception(error)
 
-    async def _upload_websocket_image(
-        self, image: bytes, filename: str
-    ) -> str:
+    async def _upload_websocket_image(self, image: bytes, filename: str) -> str:
         if not image:
             raise ValueError("wecom image upload requires non-empty data")
 
-        total_chunks = (
-            len(image) + WECOM_MEDIA_CHUNK_SIZE - 1
-        ) // WECOM_MEDIA_CHUNK_SIZE
+        total_chunks = (len(image) + WECOM_MEDIA_CHUNK_SIZE - 1) // WECOM_MEDIA_CHUNK_SIZE
         init_response = await self._ws_request(
             "aibot_upload_media_init",
             {
@@ -481,9 +454,7 @@ class WeComChannel(Channel):
         )
         upload_id = str((init_response.get("body") or {}).get("upload_id") or "")
         if not upload_id:
-            raise RuntimeError(
-                "wecom aibot_upload_media_init response missing upload_id"
-            )
+            raise RuntimeError("wecom aibot_upload_media_init response missing upload_id")
 
         for chunk_index in range(total_chunks):
             start = chunk_index * WECOM_MEDIA_CHUNK_SIZE
@@ -501,18 +472,12 @@ class WeComChannel(Channel):
             "aibot_upload_media_finish",
             {"upload_id": upload_id},
         )
-        media_id = str(
-            (finish_response.get("body") or {}).get("media_id") or ""
-        )
+        media_id = str((finish_response.get("body") or {}).get("media_id") or "")
         if not media_id:
-            raise RuntimeError(
-                "wecom aibot_upload_media_finish response missing media_id"
-            )
+            raise RuntimeError("wecom aibot_upload_media_finish response missing media_id")
         return media_id
 
-    async def _send_websocket_image(
-        self, chat_id: str, media_id: str
-    ) -> None:
+    async def _send_websocket_image(self, chat_id: str, media_id: str) -> None:
         await self._ws_request(
             "aibot_send_msg",
             {
@@ -583,17 +548,13 @@ class WeComChannel(Channel):
                 "corpsecret": self.account.secret,
             }
             async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{WECOM_API_BASE}/gettoken", params=params
-                ) as resp:
+                async with session.get(f"{WECOM_API_BASE}/gettoken", params=params) as resp:
                     data = await resp.json(content_type=None)
             if data.get("errcode", 0) != 0 or "access_token" not in data:
                 raise RuntimeError(f"wecom gettoken failed: {data}")
             self._access_token = data["access_token"]
             # 60s safety margin against clock skew / in-flight calls.
-            self._access_token_expires_at = (
-                now + int(data.get("expires_in", 7200)) - 60
-            )
+            self._access_token_expires_at = now + int(data.get("expires_in", 7200)) - 60
             return self._access_token
 
     async def send(self, message: OutgoingMessage) -> None:
@@ -643,20 +604,15 @@ class WeComChannel(Channel):
         if self._ws is None or self._ws.closed:
             LOGGER.error("[wecom:%s] websocket is not connected", self.account_id)
             return
-        payload = {
-            "cmd": "aibot_send_msg",
-            "headers": {"req_id": f"req-{time.time_ns()}"},
-            "body": {
-                "chatid": message.chat_id,
-                "msgtype": "markdown",
-                "markdown": {"content": message.text},
-            },
-        }
         try:
-            if self._ws_send_lock is None:
-                self._ws_send_lock = asyncio.Lock()
-            async with self._ws_send_lock:
-                await self._ws.send_json(payload)
+            await self._ws_request(
+                "aibot_send_msg",
+                {
+                    "chatid": message.chat_id,
+                    "msgtype": "markdown",
+                    "markdown": {"content": message.text},
+                },
+            )
             LOGGER.info(
                 "[wecom:%s] websocket reply sent chat_id=%s",
                 self.account_id,
@@ -664,6 +620,37 @@ class WeComChannel(Channel):
             )
         except Exception:
             LOGGER.error("[wecom:%s] websocket send failed", self.account_id, exc_info=True)
+            return
+
+        for image in message.images:
+            try:
+                image_data = self._load_stored_image(image.image_id)
+                if not image_data:
+                    LOGGER.error(
+                        "[wecom:%s] image not found: %s",
+                        self.account_id,
+                        image.image_id,
+                    )
+                    continue
+                object_name = image.image_id.split("-", 1)[-1].rsplit("/", 1)[-1]
+                filename = object_name
+                if not filename.lower().endswith((".jpg", ".jpeg", ".png")):
+                    filename = f"{filename}.jpg"
+                media_id = await self._upload_websocket_image(image_data, filename)
+                await self._send_websocket_image(message.chat_id, media_id)
+                LOGGER.info(
+                    "[wecom:%s] websocket image sent chat_id=%s image_id=%s",
+                    self.account_id,
+                    message.chat_id,
+                    image.image_id,
+                )
+            except Exception:
+                LOGGER.error(
+                    "[wecom:%s] websocket image send failed image_id=%s",
+                    self.account_id,
+                    image.image_id,
+                    exc_info=True,
+                )
 
 
 def _build(account_id: str, cfg: dict) -> Channel:
@@ -674,9 +661,7 @@ def _build(account_id: str, cfg: dict) -> Channel:
         required = ("corp_id", "agent_id", "secret", "token", "aes_key")
     missing = [k for k in required if not cfg.get(k)]
     if missing:
-        raise ValueError(
-            f"wecom account '{account_id}' missing required fields: {missing}"
-        )
+        raise ValueError(f"wecom account '{account_id}' missing required fields: {missing}")
     agent_id = 0
     aes_key = ""
     corp_id = str(cfg.get("corp_id") or "")
@@ -686,16 +671,12 @@ def _build(account_id: str, cfg: dict) -> Channel:
         try:
             agent_id = int(cfg["agent_id"])
         except (TypeError, ValueError) as err:
-            raise ValueError(
-                f"wecom account '{account_id}' agent_id must be int: {err}"
-            ) from err
+            raise ValueError(f"wecom account '{account_id}' agent_id must be int: {err}") from err
         # WeCom EncodingAESKey is always 43 characters; reject placeholders early so
         # the failure is a clear message instead of a base64 "Incorrect padding" error.
         aes_key = str(cfg["aes_key"])
         if len(aes_key) != 43:
-            raise ValueError(
-                f"wecom account '{account_id}' aes_key (EncodingAESKey) must be 43 characters, got {len(aes_key)}"
-            )
+            raise ValueError(f"wecom account '{account_id}' aes_key (EncodingAESKey) must be 43 characters, got {len(aes_key)}")
     return WeComChannel(
         WeComAccount(
             account_id=account_id,

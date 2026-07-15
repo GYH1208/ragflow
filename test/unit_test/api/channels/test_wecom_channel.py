@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from api.channels.core.base import OutgoingImage, OutgoingMessage
 from api.channels.wecom.channel import WeComAccount, WeComChannel
 
 
@@ -27,9 +28,7 @@ def make_channel():
 @pytest.mark.asyncio
 async def test_ws_request_resolves_matching_response():
     channel = make_channel()
-    task = asyncio.create_task(
-        channel._ws_request("aibot_send_msg", {"chatid": "chat"})
-    )
+    task = asyncio.create_task(channel._ws_request("aibot_send_msg", {"chatid": "chat"}))
     await asyncio.sleep(0)
     sent = channel._ws.send_json.await_args.args[0]
     response = {
@@ -81,7 +80,7 @@ async def test_upload_image_uses_init_chunks_and_finish(monkeypatch):
     channel = make_channel()
     requests = []
 
-    async def request(cmd, body, timeout=10):
+    async def request(cmd, body):
         requests.append((cmd, body))
         if cmd == "aibot_upload_media_init":
             return {"body": {"upload_id": "upload-1"}}
@@ -92,10 +91,7 @@ async def test_upload_image_uses_init_chunks_and_finish(monkeypatch):
     monkeypatch.setattr(channel, "_ws_request", request)
     monkeypatch.setattr("api.channels.wecom.channel.WECOM_MEDIA_CHUNK_SIZE", 3)
 
-    assert (
-        await channel._upload_websocket_image(b"abcdefg", "reference.jpg")
-        == "media-1"
-    )
+    assert await channel._upload_websocket_image(b"abcdefg", "reference.jpg") == "media-1"
     assert requests[0] == (
         "aibot_upload_media_init",
         {
@@ -118,7 +114,7 @@ async def test_upload_image_uses_init_chunks_and_finish(monkeypatch):
 async def test_upload_image_requires_media_id(monkeypatch):
     channel = make_channel()
 
-    async def request(cmd, body, timeout=10):
+    async def request(cmd, body):
         if cmd == "aibot_upload_media_init":
             return {"body": {"upload_id": "upload-1"}}
         return {"body": {}}
@@ -143,5 +139,101 @@ async def test_send_websocket_image_uses_media_id(monkeypatch):
             "chatid": "chat-1",
             "msgtype": "image",
             "image": {"media_id": "media-1"},
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_websocket_sends_text_then_images_in_order(monkeypatch):
+    channel = make_channel()
+    events = []
+
+    async def request(cmd, body):
+        events.append((cmd, body))
+        return {"body": {}}
+
+    async def send_image(chat_id, media_id):
+        events.append(("image", media_id))
+
+    monkeypatch.setattr(channel, "_ws_request", request)
+    monkeypatch.setattr(channel, "_load_stored_image", lambda image_id: image_id.encode())
+    monkeypatch.setattr(
+        channel,
+        "_upload_websocket_image",
+        AsyncMock(side_effect=["media-a", "media-b"]),
+    )
+    monkeypatch.setattr(channel, "_send_websocket_image", send_image)
+
+    await channel.send(
+        OutgoingMessage(
+            chat_id="chat-1",
+            text="answer",
+            images=[OutgoingImage("image-a"), OutgoingImage("image-b")],
+        )
+    )
+
+    assert events[0][1]["msgtype"] == "markdown"
+    assert events[1:] == [("image", "media-a"), ("image", "media-b")]
+
+
+@pytest.mark.asyncio
+async def test_image_failure_does_not_block_later_images(monkeypatch):
+    channel = make_channel()
+    request = AsyncMock(return_value={"body": {}})
+    monkeypatch.setattr(channel, "_ws_request", request)
+    monkeypatch.setattr(channel, "_load_stored_image", lambda image_id: image_id.encode())
+    monkeypatch.setattr(
+        channel,
+        "_upload_websocket_image",
+        AsyncMock(side_effect=[RuntimeError("failed"), "media-b"]),
+    )
+    send_image = AsyncMock()
+    monkeypatch.setattr(channel, "_send_websocket_image", send_image)
+
+    await channel.send(
+        OutgoingMessage(
+            chat_id="chat-1",
+            text="answer",
+            images=[OutgoingImage("image-a"), OutgoingImage("image-b")],
+        )
+    )
+
+    send_image.assert_awaited_once_with("chat-1", "media-b")
+
+
+@pytest.mark.asyncio
+async def test_missing_stored_image_is_skipped(monkeypatch):
+    channel = make_channel()
+    request = AsyncMock(return_value={"body": {}})
+    monkeypatch.setattr(channel, "_ws_request", request)
+    monkeypatch.setattr(channel, "_load_stored_image", lambda image_id: None)
+    upload = AsyncMock()
+    monkeypatch.setattr(channel, "_upload_websocket_image", upload)
+
+    await channel.send(
+        OutgoingMessage(
+            chat_id="chat-1",
+            text="answer",
+            images=[OutgoingImage("missing")],
+        )
+    )
+
+    upload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_text_only_message_sends_only_markdown(monkeypatch):
+    channel = make_channel()
+    request = AsyncMock(return_value={"body": {}})
+    monkeypatch.setattr(channel, "_ws_request", request)
+
+    await channel.send(OutgoingMessage(chat_id="chat-1", text="answer"))
+
+    request.assert_awaited_once_with(
+        "aibot_send_msg",
+        {
+            "chatid": "chat-1",
+            "msgtype": "markdown",
+            "markdown": {"content": "answer"},
         },
     )
