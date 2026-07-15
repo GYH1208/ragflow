@@ -28,9 +28,18 @@ import hashlib
 import importlib
 import json
 import logging
+import re
 import threading
 
+from api.channels.core.base import OutgoingImage
+
 LOGGER = logging.getLogger(__name__)
+
+_CITATION_PATTERN = re.compile(r"\[(?:ID:)?([0-9\u0660-\u0669\u06F0-\u06F9]+)\]")
+_CITATION_DIGIT_TRANSLATION = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+    "01234567890123456789",
+)
 
 # Channel packages bundled under api/channels that self-register on import.
 _BUNDLED_CHANNELS = (
@@ -46,6 +55,24 @@ _BUNDLED_CHANNELS = (
 
 # How often (seconds) to reconcile running channels against the database.
 _RECONCILE_INTERVAL_SECS = 10
+
+
+def _extract_cited_images(answer: str, chunks: object) -> list[OutgoingImage]:
+    if not isinstance(chunks, list):
+        return []
+
+    images = []
+    seen = set()
+    for match in _CITATION_PATTERN.finditer(answer or ""):
+        index = int(match.group(1).translate(_CITATION_DIGIT_TRANSLATION))
+        if index >= len(chunks) or not isinstance(chunks[index], dict):
+            continue
+        image_id = str(chunks[index].get("image_id") or "")
+        if not image_id or image_id in seen:
+            continue
+        seen.add(image_id)
+        images.append(OutgoingImage(image_id=image_id))
+    return images
 
 
 def _register_channels() -> None:
@@ -152,13 +179,16 @@ def _make_chat_handler(ch):
             history.append(m)
 
         answer_text = ""
+        answer_images = []
         try:
-            chat_kwargs = {"quote": False}
+            chat_kwargs = {"quote": bool(ch.supports_reference_images)}
             if "{knowledge}" in (dia.prompt_config or {}).get("system", ""):
                 chat_kwargs["knowledge"] = ""
             async for ans in async_chat(dia, history, False, **chat_kwargs):
                 structure_answer(conv, ans, message_id, conv.id)
                 answer_text = (ans or {}).get("answer", "") or ""
+                reference = (ans or {}).get("reference") or {}
+                answer_images = _extract_cited_images(answer_text, reference.get("chunks"))
                 ConversationService.update_by_id(conv.id, conv.to_dict())
                 break
         except Exception as ex:
@@ -171,6 +201,7 @@ def _make_chat_handler(ch):
                     chat_id=msg.chat_id,
                     text=answer_text,
                     reply_to_message_id=msg.message_id or None,
+                    images=answer_images,
                 )
             )
 
