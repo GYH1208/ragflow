@@ -160,6 +160,7 @@ class WeComChannel(Channel):
         self._ws_task: Optional[asyncio.Task] = None
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._ws_send_lock: Optional[asyncio.Lock] = None
+        self._ws_pending: dict[str, asyncio.Future] = {}
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._stop_requested = False
 
@@ -193,6 +194,7 @@ class WeComChannel(Channel):
 
     async def stop(self) -> None:
         self._stop_requested = True
+        self._fail_pending_requests(ConnectionError("wecom channel stopped"))
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
             try:
@@ -322,6 +324,9 @@ class WeComChannel(Channel):
                     exc_info=True,
                 )
             finally:
+                self._fail_pending_requests(
+                    ConnectionError("wecom websocket disconnected")
+                )
                 if self._heartbeat_task and not self._heartbeat_task.done():
                     self._heartbeat_task.cancel()
                     try:
@@ -393,6 +398,20 @@ class WeComChannel(Channel):
         cmd = str(obj.get("cmd") or "")
         headers = obj.get("headers") or {}
         body = obj.get("body") or {}
+        req_id = str(headers.get("req_id") or "")
+        pending = self._ws_pending.get(req_id)
+        if pending is not None and not pending.done():
+            errcode = int(obj.get("errcode", 0) or 0)
+            if errcode:
+                pending.set_exception(
+                    RuntimeError(
+                        f"wecom websocket request failed ({errcode}): "
+                        f"{obj.get('errmsg') or obj}"
+                    )
+                )
+            else:
+                pending.set_result(obj)
+            return
         if cmd == "aibot_msg_callback":
             await self._handle_ws_message(headers, body, obj)
             return
@@ -407,6 +426,36 @@ class WeComChannel(Channel):
                 LOGGER.debug("[wecom:%s] websocket response: %s", self.account_id, obj)
             return
         LOGGER.debug("[wecom:%s] websocket ignored cmd=%s", self.account_id, cmd)
+
+    async def _ws_request(
+        self, cmd: str, body: dict, timeout: float = 10
+    ) -> dict:
+        if self._ws is None or self._ws.closed:
+            raise ConnectionError("wecom websocket is not connected")
+
+        req_id = f"req-{time.time_ns()}"
+        future = asyncio.get_running_loop().create_future()
+        self._ws_pending[req_id] = future
+        payload = {
+            "cmd": cmd,
+            "headers": {"req_id": req_id},
+            "body": body,
+        }
+        try:
+            if self._ws_send_lock is None:
+                self._ws_send_lock = asyncio.Lock()
+            async with self._ws_send_lock:
+                await self._ws.send_json(payload)
+            return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            self._ws_pending.pop(req_id, None)
+
+    def _fail_pending_requests(self, error: BaseException) -> None:
+        pending_requests = list(self._ws_pending.values())
+        self._ws_pending.clear()
+        for future in pending_requests:
+            if not future.done():
+                future.set_exception(error)
 
     async def _handle_ws_message(self, headers: Any, body: Any, raw: Any) -> None:
         if not isinstance(body, dict):
