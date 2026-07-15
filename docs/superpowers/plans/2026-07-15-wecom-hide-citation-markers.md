@@ -99,7 +99,7 @@ def test_hides_markers_when_chunk_container_is_invalid():
 Run:
 
 ```bash
-.venv/bin/pytest -q \
+uv run --frozen --group test pytest -q \
   test/unit_test/api/channels/test_base.py \
   test/unit_test/api/channels/test_bootstrap.py \
   test/unit_test/api/channels/test_wecom_channel.py
@@ -210,7 +210,7 @@ answer_images = cited_images if ch.supports_reference_images else []
 Run:
 
 ```bash
-.venv/bin/pytest -q \
+uv run --frozen --group test pytest -q \
   test/unit_test/api/channels/test_base.py \
   test/unit_test/api/channels/test_bootstrap.py \
   test/unit_test/api/channels/test_wecom_channel.py
@@ -223,14 +223,14 @@ Expected: 所有测试 PASS，无失败和错误。
 Run:
 
 ```bash
-.venv/bin/ruff check \
+uvx ruff check \
   api/channels/core/base.py \
   api/channels/bootstrap.py \
   api/channels/wecom/channel.py \
   test/unit_test/api/channels/test_base.py \
   test/unit_test/api/channels/test_bootstrap.py \
   test/unit_test/api/channels/test_wecom_channel.py
-.venv/bin/ruff format --check \
+uvx ruff format --check \
   api/channels/core/base.py \
   api/channels/bootstrap.py \
   api/channels/wecom/channel.py \
