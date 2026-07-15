@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, ClassVar, Optional
 
 LOGGER = logging.getLogger(__name__)
@@ -20,11 +20,17 @@ class IncomingMessage:
     raw: Any = None
 
 
+@dataclass(frozen=True)
+class OutgoingImage:
+    image_id: str
+
+
 @dataclass
 class OutgoingMessage:
     chat_id: str
     text: str
     reply_to_message_id: Optional[str] = None
+    images: list[OutgoingImage] = field(default_factory=list)
 
 
 MessageHandler = Callable[[IncomingMessage], Awaitable[None]]
@@ -34,6 +40,7 @@ class Channel(ABC):
     """One configured bot identity on one messaging platform."""
 
     channel_id: ClassVar[str]
+    supports_reference_images: bool = False
     account_id: str
 
     def __init__(self) -> None:
