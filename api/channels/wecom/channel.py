@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import time
@@ -20,6 +22,7 @@ LOGGER = logging.getLogger(__name__)
 
 WECOM_API_BASE = "https://qyapi.weixin.qq.com/cgi-bin"
 WECOM_WS_URL = "wss://openws.work.weixin.qq.com"
+WECOM_MEDIA_CHUNK_SIZE = 512 * 1024
 
 
 @dataclass
@@ -456,6 +459,77 @@ class WeComChannel(Channel):
         for future in pending_requests:
             if not future.done():
                 future.set_exception(error)
+
+    async def _upload_websocket_image(
+        self, image: bytes, filename: str
+    ) -> str:
+        if not image:
+            raise ValueError("wecom image upload requires non-empty data")
+
+        total_chunks = (
+            len(image) + WECOM_MEDIA_CHUNK_SIZE - 1
+        ) // WECOM_MEDIA_CHUNK_SIZE
+        init_response = await self._ws_request(
+            "aibot_upload_media_init",
+            {
+                "type": "image",
+                "filename": filename,
+                "total_size": len(image),
+                "total_chunks": total_chunks,
+                "md5": hashlib.md5(image).hexdigest(),
+            },
+        )
+        upload_id = str((init_response.get("body") or {}).get("upload_id") or "")
+        if not upload_id:
+            raise RuntimeError(
+                "wecom aibot_upload_media_init response missing upload_id"
+            )
+
+        for chunk_index in range(total_chunks):
+            start = chunk_index * WECOM_MEDIA_CHUNK_SIZE
+            chunk = image[start : start + WECOM_MEDIA_CHUNK_SIZE]
+            await self._ws_request(
+                "aibot_upload_media_chunk",
+                {
+                    "upload_id": upload_id,
+                    "chunk_index": chunk_index + 1,
+                    "base64_data": base64.b64encode(chunk).decode("ascii"),
+                },
+            )
+
+        finish_response = await self._ws_request(
+            "aibot_upload_media_finish",
+            {"upload_id": upload_id},
+        )
+        media_id = str(
+            (finish_response.get("body") or {}).get("media_id") or ""
+        )
+        if not media_id:
+            raise RuntimeError(
+                "wecom aibot_upload_media_finish response missing media_id"
+            )
+        return media_id
+
+    async def _send_websocket_image(
+        self, chat_id: str, media_id: str
+    ) -> None:
+        await self._ws_request(
+            "aibot_send_msg",
+            {
+                "chatid": chat_id,
+                "msgtype": "image",
+                "image": {"media_id": media_id},
+            },
+        )
+
+    @staticmethod
+    def _load_stored_image(image_id: str) -> Optional[bytes]:
+        parts = image_id.split("-", 1)
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return None
+        from common import settings
+
+        return settings.STORAGE_IMPL.get(bucket=parts[0], fnm=parts[1])
 
     async def _handle_ws_message(self, headers: Any, body: Any, raw: Any) -> None:
         if not isinstance(body, dict):
