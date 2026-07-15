@@ -19,11 +19,11 @@
 
 ### 出站消息模型
 
-扩展公共出站消息模型，增加可选的对象存储图片引用列表。每个图片引用包含 RAGFlow 的复合 `image_id`。不支持图片的 Channel 可以继续只使用现有文字字段，不需要改变原有行为。
+扩展公共 Channel 能力和出站消息模型：Channel 默认不支持引用图片，只有企业微信 WebSocket 实例声明支持；`OutgoingMessage` 增加可选的对象存储图片引用列表。每个图片引用包含 RAGFlow 的复合 `image_id`。不支持图片的 Channel 可以继续只使用现有文字字段，不需要改变原有行为。
 
 ### 引用图片筛选
 
-`async_chat` 返回最终答案后，Channel 启动层保留经 `structure_answer` 格式化后的 `reference.chunks`。新增一个职责单一的辅助函数，用于扫描回答中的 `[ID:n]` 标记、规范化受支持的阿拉伯语和波斯语数字、校验引用下标、过滤没有 `image_id` 的知识块，并在不改变首次引用顺序的情况下去重。
+当前 Channel 调用 `async_chat` 时默认关闭引用返回。Channel 启动层根据能力标记决定 `quote` 参数：只有支持引用图片的企业微信 WebSocket 实例使用 `quote=True`，其他 Channel 继续使用 `quote=False`。`async_chat` 返回最终答案后，启动层保留经 `structure_answer` 格式化后的 `reference.chunks`。新增一个职责单一的辅助函数，用于扫描回答中的 `[ID:n]` 标记、规范化受支持的阿拉伯语和波斯语数字、校验引用下标、过滤没有 `image_id` 的知识块，并在不改变首次引用顺序的情况下去重。
 
 筛选出的图片引用与 Markdown 回答放入同一个 `OutgoingMessage`。引用筛选逻辑独立于企业微信协议实现，因此不需要真实 WebSocket 连接或对象存储即可进行单元测试。
 
@@ -100,5 +100,5 @@ async_chat 最终回答
 2. 图片按照正文中的首次引用顺序出现，相同图片只发送一次。
 3. 未引用的图片和没有图片的被引用知识块都不发送。
 4. 没有引用图片或图片发送失败时，文字回答仍能正常发送。
-5. 其他 Channel 的行为不发生变化。
-6. 自动化测试覆盖引用筛选和 WebSocket 素材协议链路。
+5. 只有企业微信 WebSocket 开启引用返回；其他 Channel 和企业微信 Webhook 的回答行为不发生变化。
+6. 自动化测试覆盖能力开关、引用筛选和 WebSocket 素材协议链路。
