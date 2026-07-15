@@ -280,7 +280,7 @@ self._ws_pending: dict[str, asyncio.Future] = {}
 
 实现 `_ws_request`：先登记 Future，再在锁内发送 `{cmd, headers, body}`，使用 `asyncio.wait_for` 等待；`finally` 删除映射。实现 `_fail_pending_requests`，为所有未完成 Future 设置异常并清空映射。
 
-在 `_handle_ws_payload` 解析 JSON 后，读取 `headers.req_id`；命中待处理 Future 时，根据 `errcode` 设置结果或异常并返回。未命中时继续走原有回调和事件分支。
+在 `_handle_ws_payload` 解析 JSON 后，先验证顶层对象、响应头和 `errcode`，再读取 `headers.req_id`；命中待处理 Future 时设置结果或异常并返回。未命中时把消息回调和事件处理调度到受跟踪的后台任务，使接收循环可以继续读取出站消息的 ACK。
 
 在 `_run_websocket` 的 `finally` 以及 `stop` 中调用 `_fail_pending_requests(ConnectionError(...))`。
 
@@ -340,7 +340,7 @@ async def test_upload_image_uses_init_chunks_and_finish(monkeypatch):
         "total_chunks": 3,
         "md5": hashlib.md5(b"abcdefg").hexdigest(),
     })
-    assert [request[1]["chunk_index"] for request in requests[1:4]] == [1, 2, 3]
+    assert [request[1]["chunk_index"] for request in requests[1:4]] == [0, 1, 2]
     assert base64.b64decode(requests[1][1]["base64_data"]) == b"abc"
     assert requests[-1] == ("aibot_upload_media_finish", {"upload_id": "upload-1"})
 ```
@@ -382,7 +382,7 @@ async def test_send_websocket_image_uses_media_id(monkeypatch):
 
 - [ ] **步骤 3：实现上传协议**
 
-使用 `base64.b64encode`、`hashlib.md5` 和向上取整的分片数量。严格检查 init 返回的 `upload_id` 和 finish 返回的 `media_id`，缺失时抛出含命令名称的 `RuntimeError`。通过 `_ws_request` 发送每个协议帧。
+使用 `base64.b64encode`、`hashlib.md5` 和向上取整的分片数量。每片最大 512 KiB，`chunk_index` 从 0 开始，最多允许 100 片。严格检查 init 返回的 `upload_id` 和 finish 返回的 `media_id`，缺失时抛出含命令名称的 `RuntimeError`。通过 `_ws_request` 发送每个协议帧。
 
 `_load_stored_image` 使用 `parse_storage_composite_id` 解析 ID，并通过 `settings.STORAGE_IMPL.get(bucket=..., fnm=...)` 读取数据；无效或空数据返回 `None`。
 
