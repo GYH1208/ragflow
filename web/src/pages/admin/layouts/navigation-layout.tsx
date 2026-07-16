@@ -21,6 +21,7 @@ import { getSystemVersion, logout } from '@/services/admin-service';
 import authorizationUtil from '@/utils/authorization-util';
 
 import ThemeSwitch from '../../../components/theme-switch';
+import AdminLanguageSwitcher from '../components/admin-language-switcher';
 import { IS_ENTERPRISE } from '../utils';
 import { CurrentUserInfoContext } from './root-layout';
 
@@ -125,12 +126,15 @@ const AdminNavigationLayout = () => {
         </nav>
 
         <div className="mt-auto space-y-4">
-          <div className="flex justify-between items-center">
+          <div className="flex justify-between items-center gap-2">
             <span className="leading-none text-xs text-accent-primary">
               {version}
             </span>
 
-            <ThemeSwitch />
+            <div className="flex items-center gap-2">
+              <AdminLanguageSwitcher />
+              <ThemeSwitch />
+            </div>
           </div>
 
           <Button
