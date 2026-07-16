@@ -51,7 +51,7 @@ jest.mock('@/components/ui/dropdown-menu', () => ({
 
 describe('AdminLanguageSwitcher', () => {
   it('shows the current language and switches to the selected language', () => {
-    render(<AdminLanguageSwitcher />);
+    render(React.createElement(AdminLanguageSwitcher));
 
     expect(
       screen.getByRole('button', { name: 'admin.language' }),

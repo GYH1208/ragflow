@@ -1,3 +1,4 @@
+import React from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -16,29 +17,29 @@ const AdminLanguageSwitcher = () => {
     ({ code }) => code === languageCode,
   );
 
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          aria-label={t('admin.language')}
-          className="justify-start"
+  return React.createElement(
+    DropdownMenu,
+    null,
+    <DropdownMenuTrigger asChild>
+      <Button
+        type="button"
+        variant="ghost"
+        aria-label={t('admin.language')}
+        className="justify-start"
+      >
+        {currentLanguage?.displayName || languageCode}
+      </Button>
+    </DropdownMenuTrigger>,
+    <DropdownMenuContent align="start">
+      {supportedLanguages.map(({ code, displayName }) => (
+        <DropdownMenuItem
+          key={code}
+          onClick={() => void changeLanguageAsync(code)}
         >
-          {currentLanguage?.displayName || languageCode}
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start">
-        {supportedLanguages.map(({ code, displayName }) => (
-          <DropdownMenuItem
-            key={code}
-            onClick={() => void changeLanguageAsync(code)}
-          >
-            {displayName}
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+          {displayName}
+        </DropdownMenuItem>
+      ))}
+    </DropdownMenuContent>,
   );
 };
 
