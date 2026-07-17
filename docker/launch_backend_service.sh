@@ -44,8 +44,15 @@ load_env_file() {
 # Load environment variables
 load_env_file
 
-# Unset HTTP proxies that might be set by Docker daemon
-export http_proxy=""; export https_proxy=""; export no_proxy=""; export HTTP_PROXY=""; export HTTPS_PROXY=""; export NO_PROXY=""
+# Unset HTTP proxies that might be set by Docker daemon.
+# Keep an optional ALL_PROXY for external model access, but always connect to
+# loopback services directly so local health checks are not sent to the proxy.
+export http_proxy=""
+export https_proxy=""
+export HTTP_PROXY=""
+export HTTPS_PROXY=""
+export NO_PROXY="localhost,127.0.0.1,::1"
+export no_proxy="$NO_PROXY"
 export PYTHONPATH=$(pwd)
 
 export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/
