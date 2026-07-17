@@ -2,6 +2,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from requests.utils import should_bypass_proxies
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LAUNCHER = REPO_ROOT / "docker" / "launch_backend_service.sh"
@@ -19,6 +21,7 @@ def test_launcher_preserves_all_proxy_and_bypasses_loopback_hosts():
     env.update(
         {
             "ALL_PROXY": "http://127.0.0.1:17890",
+            "MINIO_HOST": "minio",
             "NO_PROXY": "unexpected.example",
             "no_proxy": "unexpected.example",
         }
@@ -36,8 +39,14 @@ def test_launcher_preserves_all_proxy_and_bypasses_loopback_hosts():
         env=env,
     )
 
-    assert result.stdout.splitlines() == [
-        "http://127.0.0.1:17890",
-        "localhost,127.0.0.1,::1",
-        "localhost,127.0.0.1,::1",
-    ]
+    all_proxy, no_proxy, lowercase_no_proxy = result.stdout.splitlines()
+
+    assert all_proxy == "http://127.0.0.1:17890"
+    assert no_proxy == "localhost,127.0.0.1,::1,minio"
+    assert lowercase_no_proxy == no_proxy
+    assert should_bypass_proxies(
+        "http://127.0.0.1:9380/api/v1/system/ping", no_proxy
+    )
+    assert should_bypass_proxies(
+        "http://minio:9000/minio/health/live", no_proxy
+    )

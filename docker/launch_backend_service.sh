@@ -51,7 +51,7 @@ export http_proxy=""
 export https_proxy=""
 export HTTP_PROXY=""
 export HTTPS_PROXY=""
-export NO_PROXY="localhost,127.0.0.1,::1"
+export NO_PROXY="localhost,127.0.0.1,::1,${MINIO_HOST:-minio}"
 export no_proxy="$NO_PROXY"
 export PYTHONPATH=$(pwd)
 
