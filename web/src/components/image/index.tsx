@@ -1,7 +1,6 @@
 import { Authorization } from '@/constants/authorization';
 import { restAPIv1 } from '@/utils/api';
 import { getAuthorization } from '@/utils/authorization-util';
-import { getSearchValue } from '@/utils/common-util';
 import classNames from 'classnames';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -85,12 +84,12 @@ const fetchDocumentImage = (url: string, authorization: string) => {
 export const useDocumentImageUrl = (id: string, t?: string | number) => {
   const directUrl = useMemo(() => buildDocumentImageUrl(id, t), [id, t]);
   const [imageUrl, setImageUrl] = useState(() =>
-    getAuthorization() && getSearchValue('shared_id') ? '' : directUrl,
+    getAuthorization() ? '' : directUrl,
   );
 
   useEffect(() => {
     const authorization = getAuthorization();
-    if (!authorization || !getSearchValue('shared_id')) {
+    if (!authorization) {
       setImageUrl(directUrl);
       return;
     }
