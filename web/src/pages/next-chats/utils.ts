@@ -31,13 +31,18 @@ export const buildMessageItemReference = (
   conversation: { messages: IMessage[]; reference: IReference[] },
   message: IMessage,
 ) => {
-  const assistantMessages = conversation.messages
-    ?.filter(
-      (x) =>
-        x.role === MessageType.Assistant && !x.content.startsWith('**ERROR**:'), // Exclude error messages
-    )
-    .slice(1);
-  const referenceIndex = assistantMessages.findIndex(
+  const assistantMessages = conversation.messages?.filter(
+    (x) =>
+      x.role === MessageType.Assistant && !x.content.startsWith('**ERROR**:'), // Exclude error messages
+  );
+  const referenceCount = conversation.reference?.length ?? 0;
+  const hasUnreferencedPrologue =
+    conversation.messages?.[0]?.role === MessageType.Assistant &&
+    assistantMessages.length === referenceCount + 1;
+  const referencedAssistantMessages = hasUnreferencedPrologue
+    ? assistantMessages.slice(1)
+    : assistantMessages;
+  const referenceIndex = referencedAssistantMessages.findIndex(
     (x) => x.id === message.id,
   );
   const reference = !isEmpty(message?.reference)

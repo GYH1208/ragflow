@@ -773,7 +773,12 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         system_content += kwargs["knowledge"]
     msg = [{"role": "system", "content": system_content}]
     prompt4citation = ""
-    if knowledges and (prompt_config.get("quote", True) and kwargs.get("quote", True)):
+    include_references = bool(
+        knowledges
+        and kwargs.get("quote", True)
+        and (prompt_config.get("quote", True) or kwargs.get("_channel_send_source_files", False))
+    )
+    if include_references:
         prompt4citation = citation_prompt()
     msg.extend([{"role": m["role"], "content": re.sub(r"##\d+\$\$", "", m["content"])} for m in messages if m["role"] != "system"])
     used_token_count, msg = message_fit_in(msg, int(max_tokens * 0.95))
@@ -795,7 +800,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             think = ans[0] + "</think>"
             answer = ans[1]
 
-        if knowledges and (prompt_config.get("quote", True) and kwargs.get("quote", True)):
+        if include_references:
             idx = set([])
             normalized_answer = normalize_arabic_digits(answer) or ""
             if embd_mdl and not CITATION_MARKER_PATTERN.search(normalized_answer):

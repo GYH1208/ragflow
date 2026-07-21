@@ -118,6 +118,11 @@ export function ChatPromptEngine({ prefix = '' }: ChatPromptEngineProps) {
           tooltip={t('chat.quoteTip')}
         ></SwitchFormField>
         <SwitchFormField
+          name={prefixName(prefix, 'prompt_config.send_source_file')}
+          label={t('chat.sendSourceFile')}
+          tooltip={t('chat.sendSourceFileTip')}
+        ></SwitchFormField>
+        <SwitchFormField
           name={prefixName(prefix, 'prompt_config.keyword')}
           label={t('chat.keyword')}
           tooltip={t('chat.keywordTip')}

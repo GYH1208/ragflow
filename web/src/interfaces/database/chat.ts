@@ -15,6 +15,7 @@ export interface PromptConfig {
   system: string;
   tts?: boolean;
   quote: boolean;
+  send_source_file?: boolean;
   keyword: boolean;
   refine_multiturn: boolean;
   use_kg: boolean;

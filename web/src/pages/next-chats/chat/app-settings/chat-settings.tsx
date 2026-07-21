@@ -48,6 +48,7 @@ export function ChatSettings({ hasSingleChatBox }: ChatSettingsProps) {
       dataset_ids: [],
       prompt_config: {
         quote: true,
+        send_source_file: false,
         keyword: false,
         tts: false,
         use_kg: false,

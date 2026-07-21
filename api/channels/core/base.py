@@ -25,12 +25,19 @@ class OutgoingImage:
     image_id: str
 
 
+@dataclass(frozen=True)
+class OutgoingFile:
+    document_id: str
+    filename: str
+
+
 @dataclass
 class OutgoingMessage:
     chat_id: str
     text: str
     reply_to_message_id: Optional[str] = None
     images: list[OutgoingImage] = field(default_factory=list)
+    files: list[OutgoingFile] = field(default_factory=list)
 
 
 MessageHandler = Callable[[IncomingMessage], Awaitable[None]]
@@ -41,6 +48,7 @@ class Channel(ABC):
 
     channel_id: ClassVar[str]
     supports_reference_images: bool = False
+    supports_source_files: bool = False
     hides_reference_markers: bool = False
     account_id: str
 

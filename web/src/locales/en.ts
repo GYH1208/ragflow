@@ -1058,6 +1058,9 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
       maxTokensMinMessage: 'Max tokens cannot be less than 0.',
       quote: 'Show quote',
       quoteTip: 'Whether to display the original text as a reference.',
+      sendSourceFile: 'Send cited source files',
+      sendSourceFileTip:
+        'When enabled, supported chat channels send the original files actually cited by the answer. Each file is sent only once.',
       selfRag: 'Self-RAG',
       selfRagTip: 'Please refer to: https://huggingface.co/papers/2310.11511',
       overview: 'Chat ID',

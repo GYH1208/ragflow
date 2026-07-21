@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from api.channels.core.base import OutgoingImage, OutgoingMessage
+from api.channels.core.base import OutgoingFile, OutgoingImage, OutgoingMessage
 from api.channels.wecom.channel import WeComAccount, WeComChannel
 
 
@@ -27,6 +27,7 @@ def make_channel():
 
 def test_wecom_hides_reference_markers():
     assert make_channel().hides_reference_markers is True
+    assert make_channel().supports_source_files is True
 
 
 @pytest.mark.asyncio
@@ -188,6 +189,26 @@ async def test_upload_image_uses_init_chunks_and_finish(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_upload_file_uses_file_media_type(monkeypatch):
+    channel = make_channel()
+    requests = []
+
+    async def request(cmd, body):
+        requests.append((cmd, body))
+        if cmd == "aibot_upload_media_init":
+            return {"body": {"upload_id": "upload-1"}}
+        if cmd == "aibot_upload_media_finish":
+            return {"body": {"media_id": "media-1"}}
+        return {"body": {}}
+
+    monkeypatch.setattr(channel, "_ws_request", request)
+
+    assert await channel._upload_websocket_media(b"document", "guide.docx", "file") == "media-1"
+    assert requests[0][1]["type"] == "file"
+    assert requests[0][1]["filename"] == "guide.docx"
+
+
+@pytest.mark.asyncio
 async def test_upload_image_requires_media_id(monkeypatch):
     channel = make_channel()
 
@@ -234,6 +255,24 @@ async def test_send_websocket_image_uses_media_id(monkeypatch):
             "chatid": "chat-1",
             "msgtype": "image",
             "image": {"media_id": "media-1"},
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_websocket_file_uses_media_id(monkeypatch):
+    channel = make_channel()
+    request = AsyncMock(return_value={"body": {}})
+    monkeypatch.setattr(channel, "_ws_request", request)
+
+    await channel._send_websocket_media("chat-1", "media-1", "file")
+
+    request.assert_awaited_once_with(
+        "aibot_send_msg",
+        {
+            "chatid": "chat-1",
+            "msgtype": "file",
+            "file": {"media_id": "media-1"},
         },
     )
 
@@ -332,3 +371,39 @@ async def test_text_only_message_sends_only_markdown(monkeypatch):
             "markdown": {"content": "answer"},
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_websocket_sends_source_files_after_text_and_images(monkeypatch):
+    channel = make_channel()
+    events = []
+
+    async def request(cmd, body):
+        events.append((cmd, body))
+        return {"body": {}}
+
+    async def upload_media(data, filename, media_type):
+        events.append(("upload", filename, media_type, data))
+        return "file-media"
+
+    async def send_media(chat_id, media_id, media_type):
+        events.append(("send", chat_id, media_id, media_type))
+
+    monkeypatch.setattr(channel, "_ws_request", request)
+    monkeypatch.setattr(channel, "_load_stored_file", lambda document_id: b"source-data")
+    monkeypatch.setattr(channel, "_upload_websocket_media", upload_media)
+    monkeypatch.setattr(channel, "_send_websocket_media", send_media)
+
+    await channel.send(
+        OutgoingMessage(
+            chat_id="chat-1",
+            text="answer",
+            files=[OutgoingFile(document_id="doc-1", filename="guide.docx")],
+        )
+    )
+
+    assert events[0][1]["msgtype"] == "markdown"
+    assert events[1:] == [
+        ("upload", "guide.docx", "file", b"source-data"),
+        ("send", "chat-1", "file-media", "file"),
+    ]

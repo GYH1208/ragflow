@@ -17,6 +17,7 @@ export function useChatSettingSchema() {
 
   const promptConfigSchema = z.object({
     quote: z.boolean(),
+    send_source_file: z.boolean().optional(),
     keyword: z.boolean(),
     tts: z.boolean(),
     empty_response: z.string().optional(),

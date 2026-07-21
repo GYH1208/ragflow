@@ -98,6 +98,7 @@ _DEFAULT_PROMPT_CONFIG = {
     "parameters": [{"key": "knowledge", "optional": False}],
     "empty_response": "Sorry! No relevant content was found in the knowledge base!",
     "quote": True,
+    "send_source_file": False,
     "tts": False,
     "refine_multiturn": True,
 }
@@ -107,6 +108,7 @@ _DEFAULT_DIRECT_CHAT_PROMPT_CONFIG = {
     "parameters": [],
     "empty_response": "",
     "quote": False,
+    "send_source_file": False,
     "tts": False,
     "refine_multiturn": True,
 }

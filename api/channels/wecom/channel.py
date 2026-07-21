@@ -153,6 +153,7 @@ class WeComChannel(Channel):
         self.account_id = account.account_id
         self.connection_type = (account.connection_type or "webhook").strip().lower()
         self.supports_reference_images = self.connection_type == "websocket"
+        self.supports_source_files = self.connection_type == "websocket"
         self.crypto = WeChatCrypto(account.token, account.aes_key, account.corp_id) if self.connection_type == "webhook" else None
         self._server: Optional[_SharedWebhookServer] = None
         self._access_token: Optional[str] = None
@@ -483,21 +484,23 @@ class WeComChannel(Channel):
             if not future.done():
                 future.set_exception(error)
 
-    async def _upload_websocket_image(self, image: bytes, filename: str) -> str:
-        if not image:
-            raise ValueError("wecom image upload requires non-empty data")
+    async def _upload_websocket_media(self, data: bytes, filename: str, media_type: str) -> str:
+        if media_type not in {"file", "image"}:
+            raise ValueError(f"unsupported wecom media type: {media_type}")
+        if not data:
+            raise ValueError(f"wecom {media_type} upload requires non-empty data")
 
-        total_chunks = (len(image) + WECOM_MEDIA_CHUNK_SIZE - 1) // WECOM_MEDIA_CHUNK_SIZE
+        total_chunks = (len(data) + WECOM_MEDIA_CHUNK_SIZE - 1) // WECOM_MEDIA_CHUNK_SIZE
         if total_chunks > WECOM_MEDIA_MAX_CHUNKS:
-            raise ValueError(f"wecom image upload exceeds {WECOM_MEDIA_MAX_CHUNKS} chunks")
+            raise ValueError(f"wecom {media_type} upload exceeds {WECOM_MEDIA_MAX_CHUNKS} chunks")
         init_response = await self._ws_request(
             "aibot_upload_media_init",
             {
-                "type": "image",
+                "type": media_type,
                 "filename": filename,
-                "total_size": len(image),
+                "total_size": len(data),
                 "total_chunks": total_chunks,
-                "md5": hashlib.md5(image).hexdigest(),
+                "md5": hashlib.md5(data).hexdigest(),
             },
         )
         upload_id = str((init_response.get("body") or {}).get("upload_id") or "")
@@ -506,7 +509,7 @@ class WeComChannel(Channel):
 
         for chunk_index in range(total_chunks):
             start = chunk_index * WECOM_MEDIA_CHUNK_SIZE
-            chunk = image[start : start + WECOM_MEDIA_CHUNK_SIZE]
+            chunk = data[start : start + WECOM_MEDIA_CHUNK_SIZE]
             await self._ws_request(
                 "aibot_upload_media_chunk",
                 {
@@ -525,15 +528,23 @@ class WeComChannel(Channel):
             raise RuntimeError("wecom aibot_upload_media_finish response missing media_id")
         return media_id
 
-    async def _send_websocket_image(self, chat_id: str, media_id: str) -> None:
+    async def _upload_websocket_image(self, image: bytes, filename: str) -> str:
+        return await self._upload_websocket_media(image, filename, "image")
+
+    async def _send_websocket_media(self, chat_id: str, media_id: str, media_type: str) -> None:
+        if media_type not in {"file", "image"}:
+            raise ValueError(f"unsupported wecom media type: {media_type}")
         await self._ws_request(
             "aibot_send_msg",
             {
                 "chatid": chat_id,
-                "msgtype": "image",
-                "image": {"media_id": media_id},
+                "msgtype": media_type,
+                media_type: {"media_id": media_id},
             },
         )
+
+    async def _send_websocket_image(self, chat_id: str, media_id: str) -> None:
+        await self._send_websocket_media(chat_id, media_id, "image")
 
     @staticmethod
     def _load_stored_image(image_id: str) -> Optional[bytes]:
@@ -543,6 +554,14 @@ class WeComChannel(Channel):
         from common import settings
 
         return settings.STORAGE_IMPL.get(bucket=parts[0], fnm=parts[1])
+
+    @staticmethod
+    def _load_stored_file(document_id: str) -> Optional[bytes]:
+        from api.db.services.file2document_service import File2DocumentService
+        from common import settings
+
+        bucket, object_name = File2DocumentService.get_storage_address(doc_id=document_id)
+        return settings.STORAGE_IMPL.get(bucket=bucket, fnm=object_name)
 
     async def _handle_ws_message(self, headers: Any, body: Any, raw: Any) -> None:
         if not isinstance(body, dict):
@@ -697,6 +716,32 @@ class WeComChannel(Channel):
                     "[wecom:%s] websocket image send failed image_id=%s",
                     self.account_id,
                     image.image_id,
+                    exc_info=True,
+                )
+
+        for source_file in message.files:
+            try:
+                file_data = self._load_stored_file(source_file.document_id)
+                if not file_data:
+                    LOGGER.error(
+                        "[wecom:%s] source file not found document_id=%s",
+                        self.account_id,
+                        source_file.document_id,
+                    )
+                    continue
+                media_id = await self._upload_websocket_media(file_data, source_file.filename, "file")
+                await self._send_websocket_media(message.chat_id, media_id, "file")
+                LOGGER.info(
+                    "[wecom:%s] websocket source file sent chat_id=%s document_id=%s",
+                    self.account_id,
+                    message.chat_id,
+                    source_file.document_id,
+                )
+            except Exception:
+                LOGGER.error(
+                    "[wecom:%s] websocket source file send failed document_id=%s",
+                    self.account_id,
+                    source_file.document_id,
                     exc_info=True,
                 )
 

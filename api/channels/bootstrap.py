@@ -32,7 +32,7 @@ import logging
 import re
 import threading
 
-from api.channels.core.base import OutgoingImage
+from api.channels.core.base import OutgoingFile, OutgoingImage
 
 LOGGER = logging.getLogger(__name__)
 
@@ -69,12 +69,21 @@ def _trim_output_horizontal_suffix(parts: list[str]) -> None:
         parts.pop()
 
 
-def _prepare_cited_output(answer: str, chunks: object) -> tuple[str, list[OutgoingImage]]:
+def _prepare_cited_output(
+    answer: str,
+    chunks: object,
+    *,
+    include_source_files: bool = False,
+    allowed_dataset_ids: list[str] | None = None,
+) -> tuple[str, list[OutgoingImage], list[OutgoingFile]]:
     text = answer or ""
     valid_chunks = chunks if isinstance(chunks, list) else []
     parts: list[str] = []
     images: list[OutgoingImage] = []
-    seen: set[str] = set()
+    files: list[OutgoingFile] = []
+    seen_images: set[str] = set()
+    seen_files: set[str] = set()
+    allowed_datasets = {str(dataset_id) for dataset_id in (allowed_dataset_ids or []) if dataset_id}
     cursor = 0
 
     for match in _CITATION_PATTERN.finditer(text):
@@ -86,9 +95,17 @@ def _prepare_cited_output(answer: str, chunks: object) -> tuple[str, list[Outgoi
         index = int(match.group(1).translate(_CITATION_DIGIT_TRANSLATION))
         if index < len(valid_chunks) and isinstance(valid_chunks[index], dict):
             image_id = str(valid_chunks[index].get("image_id") or "")
-            if image_id and image_id not in seen:
-                seen.add(image_id)
+            if image_id and image_id not in seen_images:
+                seen_images.add(image_id)
                 images.append(OutgoingImage(image_id=image_id))
+
+            if include_source_files:
+                document_id = str(valid_chunks[index].get("document_id") or "")
+                filename = str(valid_chunks[index].get("document_name") or "")
+                dataset_id = str(valid_chunks[index].get("dataset_id") or "")
+                if document_id and filename and document_id not in seen_files and (not allowed_datasets or dataset_id in allowed_datasets):
+                    seen_files.add(document_id)
+                    files.append(OutgoingFile(document_id=document_id, filename=filename))
 
         space_end = cursor
         while space_end < len(text) and text[space_end] in _HORIZONTAL_WHITESPACE:
@@ -103,7 +120,7 @@ def _prepare_cited_output(answer: str, chunks: object) -> tuple[str, list[Outgoi
             cursor = space_end
 
     parts.append(text[cursor:])
-    return "".join(parts), images
+    return "".join(parts), images, files
 
 
 def _register_channels() -> None:
@@ -209,17 +226,28 @@ def _make_chat_handler(ch):
 
         answer_text = ""
         answer_images = []
+        answer_files = []
         try:
-            chat_kwargs = {"quote": bool(ch.supports_reference_images)}
+            send_source_files = bool(ch.supports_source_files and (dia.prompt_config or {}).get("send_source_file", False))
+            chat_kwargs = {
+                "quote": bool(ch.supports_reference_images or send_source_files),
+                "_channel_send_source_files": send_source_files,
+            }
             if "{knowledge}" in (dia.prompt_config or {}).get("system", ""):
                 chat_kwargs["knowledge"] = ""
             async for ans in async_chat(dia, history, False, **chat_kwargs):
                 structure_answer(conv, ans, message_id, conv.id)
                 raw_answer = (ans or {}).get("answer", "") or ""
                 reference = (ans or {}).get("reference") or {}
-                prepared_text, cited_images = _prepare_cited_output(raw_answer, reference.get("chunks"))
+                prepared_text, cited_images, cited_files = _prepare_cited_output(
+                    raw_answer,
+                    reference.get("chunks"),
+                    include_source_files=send_source_files,
+                    allowed_dataset_ids=dia.kb_ids,
+                )
                 answer_text = prepared_text if ch.hides_reference_markers else raw_answer
-                answer_images = cited_images if ch.supports_reference_images else []
+                answer_images = cited_images if ch.supports_reference_images and (dia.prompt_config or {}).get("quote", True) else []
+                answer_files = cited_files if send_source_files else []
                 ConversationService.update_by_id(conv.id, conv.to_dict())
                 break
         except Exception as ex:
@@ -233,6 +261,7 @@ def _make_chat_handler(ch):
                     text=answer_text,
                     reply_to_message_id=msg.message_id or None,
                     images=answer_images,
+                    files=answer_files,
                 )
             )
 
