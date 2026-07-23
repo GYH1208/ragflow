@@ -18,12 +18,110 @@ package elasticsearch
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
+	esv8 "github.com/elastic/go-elasticsearch/v8"
+
 	"ragflow/internal/common"
+	enginetypes "ragflow/internal/engine/types"
 )
+
+type captureSearchTransport struct {
+	body []byte
+}
+
+func (t *captureSearchTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var err error
+	t.body, err = io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header: http.Header{
+			"Content-Type":      []string{"application/json"},
+			"X-Elastic-Product": []string{"Elasticsearch"},
+		},
+		Body:    io.NopCloser(strings.NewReader(`{"hits":{"total":{"value":0},"hits":[]}}`)),
+		Request: req,
+	}, nil
+}
+
+func TestHybridSearchUsesStructuralOnlyKNNFilter(t *testing.T) {
+	if err := common.Init("info", common.FileOutput{}); err != nil {
+		t.Fatalf("initialize logger: %v", err)
+	}
+	transport := &captureSearchTransport{}
+	client, err := esv8.NewClient(esv8.Config{Transport: transport})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	engine := &elasticsearchEngine{client: client}
+	req := &enginetypes.SearchRequest{
+		IndexNames: []string{"ragflow_test"},
+		KbIDs:      []string{"kb-1"},
+		Filter: map[string]interface{}{
+			"available_int": 1,
+			"doc_id":        []string{"doc-1"},
+		},
+		Limit: 64,
+		MatchExprs: []interface{}{
+			&enginetypes.MatchTextExpr{
+				Fields:       []string{"question_tks^20", "content_ltks^2"},
+				MatchingText: "换社康后今天能用吗",
+				TopN:         10,
+				ExtraOptions: map[string]interface{}{"minimum_should_match": 0.3},
+			},
+			&enginetypes.MatchDenseExpr{
+				VectorColumnName: "q_8_vec",
+				EmbeddingData:    []float64{0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1},
+				TopN:             64,
+				ExtraOptions:     map[string]interface{}{"similarity": 0.17},
+			},
+			&enginetypes.FusionExpr{
+				Method:       "weighted_sum",
+				TopN:         64,
+				FusionParams: map[string]interface{}{"weights": "0.05,0.95"},
+			},
+		},
+	}
+
+	if _, err := engine.Search(context.Background(), req); err != nil {
+		t.Fatalf("search: %v", err)
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(transport.body, &body); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	queryJSON, _ := json.Marshal(body["query"])
+	knn, ok := body["knn"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing knn query: %v", body)
+	}
+	filterJSON, _ := json.Marshal(knn["filter"])
+	if !strings.Contains(string(queryJSON), "query_string") {
+		t.Fatalf("BM25 query must remain a top-level query: %s", queryJSON)
+	}
+	if strings.Contains(string(filterJSON), "query_string") {
+		t.Fatalf("KNN filter must not contain query_string: %s", filterJSON)
+	}
+	if !strings.Contains(string(filterJSON), "kb_id") ||
+		!strings.Contains(string(filterJSON), "doc_id") ||
+		!strings.Contains(string(filterJSON), "available_int") {
+		t.Fatalf("KNN filter lost structural constraints: %s", filterJSON)
+	}
+	if got := knn["boost"]; got != float64(0.95) {
+		t.Fatalf("KNN boost = %v, want 0.95", got)
+	}
+}
 
 // makeResponse builds a SearchResponse with `n` synthetic hits whose id
 // is the index in the batch ("h-0", "h-1", ...) and whose sort cursor is

@@ -191,6 +191,7 @@ class ESConnection(ESConnectionBase):
 
         s = Search()
         vector_similarity_weight = 0.5
+        has_hybrid_fusion = False
         for m in match_expressions:
             if isinstance(m, FusionExpr) and m.method == "weighted_sum" and "weights" in m.fusion_params:
                 assert len(match_expressions) == 3 and isinstance(match_expressions[0], MatchTextExpr) and isinstance(
@@ -199,6 +200,12 @@ class ESConnection(ESConnectionBase):
                     match_expressions[2], FusionExpr)
                 weights = m.fusion_params["weights"]
                 vector_similarity_weight = get_float(weights.split(",")[1])
+                has_hybrid_fusion = True
+
+        # Keep KNN eligibility independent from lexical matching. Elasticsearch
+        # combines a top-level query and top-level knn clause as a disjunction,
+        # so the KNN pre-filter must contain structural constraints only.
+        structural_filter = Q("bool", filter=copy.deepcopy(list(bool_query.filter)))
         for m in match_expressions:
             if isinstance(m, MatchTextExpr):
                 minimum_should_match = m.extra_options.get("minimum_should_match", 0.0)
@@ -219,7 +226,8 @@ class ESConnection(ESConnectionBase):
                           m.topn,
                           m.topn * 2,
                           query_vector=list(m.embedding_data),
-                          filter=bool_query.to_dict(),
+                          boost=vector_similarity_weight if has_hybrid_fusion else None,
+                          filter=structural_filter,
                           similarity=similarity,
                           )
 

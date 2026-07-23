@@ -769,13 +769,17 @@ func (e *elasticsearchEngine) Search(ctx context.Context, req *types.SearchReque
 		}
 	}
 
-	// Build bool query from condition
+	// Build separate copies of the structural constraints. boolQuery is later
+	// extended with the BM25 query_string, while structuralFilter must remain
+	// lexical-free so KNN contributes an independent candidate set.
 	boolQuery := buildBoolQueryFromCondition(req.Filter, req.KbIDs, isSkillIndex)
+	structuralFilter := buildBoolQueryFromCondition(req.Filter, req.KbIDs, isSkillIndex)
 
 	// Extract vector_similarity_weight from FusionExpr
 	var matchText *types.MatchTextExpr
 	var matchDense *types.MatchDenseExpr
 	vectorSimilarityWeight := 0.5
+	hasHybridFusion := false
 	for _, expr := range req.MatchExprs {
 		if expr == nil {
 			continue
@@ -803,6 +807,7 @@ func (e *elasticsearchEngine) Search(ctx context.Context, req *types.SearchReque
 							vectorSimilarityWeight = w
 						}
 					}
+					hasHybridFusion = true
 				}
 			}
 		case *types.MatchTextExpr:
@@ -858,7 +863,12 @@ func (e *elasticsearchEngine) Search(ctx context.Context, req *types.SearchReque
 			"k":              k,
 			"num_candidates": numCandidates,
 			"similarity":     similarity,
-			"filter":         boolQuery,
+		}
+		if structuralFilter != nil {
+			knnQuery["filter"] = structuralFilter
+		}
+		if hasHybridFusion {
+			knnQuery["boost"] = vectorSimilarityWeight
 		}
 
 		queryBody["knn"] = knnQuery
