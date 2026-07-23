@@ -324,3 +324,19 @@ class TestGetParsingStatusByKbIds:
             result["kb-1"][f] == 0
             for f in _ALL_STATUS_FIELDS - {"done_count"}
         )
+
+
+@pytest.mark.p2
+@pytest.mark.parametrize("updated_rows, expected", [(1, True), (0, False)])
+def test_try_start_parse_returns_atomic_update_result(monkeypatch, updated_rows, expected):
+    calls = []
+
+    def _filter_update(_cls, filters, update_data):
+        calls.append((filters, update_data))
+        return updated_rows
+
+    monkeypatch.setattr(DocumentService, "filter_update", classmethod(_filter_update))
+    update_data = {"run": TaskStatus.RUNNING.value, "progress": 0}
+
+    assert DocumentService.try_start_parse("doc-1", update_data) is expected
+    assert calls[0][1] == update_data

@@ -1,0 +1,284 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "Q&A 知识库解析质量审计",
+    "description": "覆盖当前 3 个知识库、6 个 Q&A DOCX 文件的源文档、解析器输出和 Elasticsearch 索引一致性审计。",
+    "generatedAt": "2026-07-21T12:00:00Z",
+    "cards": [
+      {
+        "id": "source_questions",
+        "description": "按源文件可见编号和目录核对的独立问题总数。",
+        "dataset": "summary",
+        "sourceId": "audit_snapshot",
+        "metrics": [
+          { "label": "源文件独立问题", "field": "expected_questions", "format": "number" }
+        ]
+      },
+      {
+        "id": "answerable_questions",
+        "description": "扣除缺失边界、空答案、重复和伪问题后的可回答问题。",
+        "dataset": "summary",
+        "sourceId": "audit_snapshot",
+        "metrics": [
+          { "label": "当前可回答", "field": "answerable_questions", "format": "number" },
+          { "label": "可回答覆盖率", "field": "answerable_coverage", "format": "percent" }
+        ]
+      },
+      {
+        "id": "missing_boundaries",
+        "description": "没有形成独立 chunk 的问题。",
+        "dataset": "summary",
+        "sourceId": "audit_snapshot",
+        "metrics": [
+          { "label": "缺失问答边界", "field": "missing_question_boundaries", "format": "number" }
+        ]
+      },
+      {
+        "id": "empty_answers",
+        "description": "问题已生成 chunk，但文本答案为空。",
+        "dataset": "summary",
+        "sourceId": "audit_snapshot",
+        "metrics": [
+          { "label": "空答案", "field": "empty_answers", "format": "number" },
+          { "label": "图片完整率", "field": "image_reference_coverage", "format": "percent" }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "coverage_chart",
+        "title": "各知识库问答覆盖情况",
+        "subtitle": "人事考勤文件的可回答缺口最大；行政和财务整体较完整。",
+        "type": "bar",
+        "dataset": "coverage_by_scope",
+        "sourceId": "audit_snapshot",
+        "valueFormat": "number",
+        "encodings": {
+          "x": { "field": "scope", "type": "nominal", "label": "知识库 / 文件" },
+          "y": { "field": "count", "type": "quantitative", "label": "问题数" },
+          "color": { "field": "metric", "type": "nominal", "label": "口径" },
+          "tooltip": [
+            { "field": "count", "type": "quantitative", "label": "问题数", "format": "number" }
+          ]
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "file_detail_table",
+        "title": "逐文件解析质量",
+        "subtitle": "高风险文件优先排列；DB chunk 数为页面统计，ES chunk 数为实际索引。",
+        "dataset": "file_details",
+        "sourceId": "audit_snapshot",
+        "defaultSort": { "field": "risk_rank", "direction": "asc" },
+        "columns": [
+          { "field": "risk_rank", "label": "优先级", "format": "number" },
+          { "field": "knowledge_base", "label": "知识库", "type": "text" },
+          { "field": "document", "label": "文件", "type": "text" },
+          { "field": "severity", "label": "风险", "type": "text" },
+          { "field": "expected_questions", "label": "预期问题", "format": "number" },
+          { "field": "answerable_questions", "label": "可回答", "format": "number" },
+          { "field": "missing_question_boundaries", "label": "缺失边界", "format": "number" },
+          { "field": "empty_answers", "label": "空答案", "format": "number" },
+          { "field": "database_chunk_count", "label": "DB chunk", "format": "number" },
+          { "field": "elasticsearch_chunk_count", "label": "ES chunk", "format": "number" },
+          { "field": "finding", "label": "主要发现", "type": "text" }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "audit_snapshot",
+        "label": "2026-07-21 Q&A 解析审计脚本与可复现快照",
+        "path": "audit/qna_parse_audit_2026-07-21/qna_parse_audit.ipynb"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# Q&A 知识库解析质量审计\n\n审计范围：当前启用 Q&A 解析器的全部 3 个知识库、6 个 DOCX 文件。"
+      },
+      {
+        "id": "executive_summary",
+        "type": "markdown",
+        "body": "## Executive Summary（执行摘要）\n\n- 源文件共识别出 **260 个独立问题**，当前可稳定回答 **223 个（85.8%）**。\n- 最大风险集中在人事知识库：社保薪资文件缺少 11 个独立问答边界；考勤文件缺少 10 个边界，并有 11 个已有问题答案为空。\n- **65 个源图片引用全部保留**，现有索引与当前解析器输出在正文和图片关联上逐条一致；考勤中一条人工编辑记录只有中英文 Q/A 前缀差异。核心问题发生在 DOCX 解析和问答切分阶段，不是 Elasticsearch 写入阶段。\n- 前 5 个文件的数据库 chunk 统计恰好是实际索引的 2 倍（418 vs 209）；财务文件统计正常。这会误导管理页面，但未发现索引中成倍重复。"
+      },
+      {
+        "id": "metrics",
+        "type": "metric-strip",
+        "cardIds": ["source_questions", "answerable_questions", "missing_boundaries", "empty_answers"]
+      },
+      {
+        "id": "coverage_heading",
+        "type": "markdown",
+        "body": "## 覆盖率分布"
+      },
+      { "id": "coverage", "type": "chart", "chartId": "coverage_chart" },
+      {
+        "id": "root_causes",
+        "type": "markdown",
+        "body": "## 已确认的原因\n\n1. **Word 修订插入文本未被读取。** 人事两个文件大量内容位于 `w:ins` 中，而当前解析器读取 `python-docx` 的 `paragraph.text`；该属性会漏掉这些可见修订文本。考勤文件因此出现 11 个空答案和多处截断。\n2. **问答切分过度依赖标题样式。** 使用 `Normal` 样式的编号问题会被并入上一条答案。社保薪资、考勤和二期问答均存在此类问题。\n3. **行政源文件本身不完整。** 目录列出办公地点、园区部门分布、园区前台联系人三题，但正文没有对应答案；这不是解析器丢失。\n4. **数据库统计被重复累加。** 前 5 个文件 DB chunk 数均为 ES 实际数的 2 倍，属于状态统计问题。\n5. **语言配置不一致。** 人事和行政知识库配置为英文，导致中文问答使用 `Question/Answer` 前缀；主要影响一致性和后续规则处理。"
+      },
+      {
+        "id": "detail_heading",
+        "type": "markdown",
+        "body": "## 逐文件结果"
+      },
+      { "id": "details", "type": "table", "tableId": "file_detail_table" },
+      {
+        "id": "recommendations",
+        "type": "markdown",
+        "body": "## 建议处理顺序\n\n1. 修复 DOCX 可见文本读取：包含 `w:ins` 插入内容，同时排除 `w:del` 删除内容，并增加带修订文档的自动化测试。\n2. 改进编号问题边界识别，不能只依赖 Word 标题样式；至少覆盖 `1.3`、`2.4` 等 Normal 样式编号。\n3. 修复后重新解析人事三个文件，并以实际索引重新计算 DB chunk 数。\n4. 补齐行政目录中缺失的三条正文答案。\n5. 删除财务文件中重复的“欠票未核销”问答，并统一人事、行政知识库的语言配置。"
+      },
+      {
+        "id": "caveats",
+        "type": "markdown",
+        "body": "## 审计边界\n\n本报告核对的是解析完整性、问答边界、图片关联和索引一致性。预期问题数依据源文件当前可见编号与行政目录人工核对；未判断人事、行政、财务制度内容本身是否仍然有效。"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## Further Questions\n\n- 修复后重新解析，260 个独立问题能否全部形成可回答 chunk？\n- 重解析流程是否可以原子替换旧 chunk 并同步重算 DB 统计，避免再次出现 2 倍计数？\n- 是否需要把“空答案、重复问题、源图片与解析图片数量不一致”加入上传后的自动质量门禁？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-21T12:00:00Z",
+    "status": "ready",
+    "datasets": {
+      "summary": [
+        {
+          "knowledge_bases": 3,
+          "documents": 6,
+          "expected_questions": 260,
+          "stored_qa_chunks": 236,
+          "valid_unique_question_chunks": 234,
+          "answerable_questions": 223,
+          "missing_question_boundaries": 26,
+          "empty_answers": 11,
+          "duplicate_chunks": 1,
+          "spurious_chunks": 1,
+          "database_chunk_count": 447,
+          "elasticsearch_chunk_count": 238,
+          "source_image_references": 65,
+          "parsed_image_blobs": 65,
+          "answerable_coverage": 0.8576923077,
+          "image_reference_coverage": 1.0
+        }
+      ],
+      "coverage_by_scope": [
+        { "scope": "人事-社保薪资", "metric": "源文件问题", "count": 39 },
+        { "scope": "人事-社保薪资", "metric": "当前可回答", "count": 28 },
+        { "scope": "人事-考勤", "metric": "源文件问题", "count": 65 },
+        { "scope": "人事-考勤", "metric": "当前可回答", "count": 44 },
+        { "scope": "人事-二期", "metric": "源文件问题", "count": 39 },
+        { "scope": "人事-二期", "metric": "当前可回答", "count": 37 },
+        { "scope": "行政-全部", "metric": "源文件问题", "count": 89 },
+        { "scope": "行政-全部", "metric": "当前可回答", "count": 86 },
+        { "scope": "财务", "metric": "源文件问题", "count": 28 },
+        { "scope": "财务", "metric": "当前可回答", "count": 28 }
+      ],
+      "file_details": [
+        {
+          "risk_rank": 1,
+          "knowledge_base": "人事知识库",
+          "document": "（SZ+CQ）人事常见问题解答-社保公积金、薪资福利模块-----20250313修改.docx",
+          "severity": "高",
+          "expected_questions": 39,
+          "answerable_questions": 28,
+          "missing_question_boundaries": 11,
+          "empty_answers": 0,
+          "database_chunk_count": 58,
+          "elasticsearch_chunk_count": 29,
+          "finding": "11 个编号问题未成为独立 chunk；修订插入文本还造成答案局部缺失。"
+        },
+        {
+          "risk_rank": 2,
+          "knowledge_base": "人事知识库",
+          "document": "（SZ+CQ)人事常见问题解答-考勤模块--20250409修改.docx",
+          "severity": "高",
+          "expected_questions": 65,
+          "answerable_questions": 44,
+          "missing_question_boundaries": 10,
+          "empty_answers": 11,
+          "database_chunk_count": 114,
+          "elasticsearch_chunk_count": 57,
+          "finding": "10 个问题未独立切分，11 个现有问题答案为空，另有多处答案截断。"
+        },
+        {
+          "risk_rank": 3,
+          "knowledge_base": "人事知识库",
+          "document": "二期问答.docx",
+          "severity": "中",
+          "expected_questions": 39,
+          "answerable_questions": 37,
+          "missing_question_boundaries": 2,
+          "empty_answers": 0,
+          "database_chunk_count": 74,
+          "elasticsearch_chunk_count": 37,
+          "finding": "2.3、2.4 使用 Normal 样式，被并入上一条答案。"
+        },
+        {
+          "risk_rank": 4,
+          "knowledge_base": "行政知识库",
+          "document": "20250523-行政100问.docx",
+          "severity": "中",
+          "expected_questions": 85,
+          "answerable_questions": 82,
+          "missing_question_boundaries": 3,
+          "empty_answers": 0,
+          "database_chunk_count": 164,
+          "elasticsearch_chunk_count": 82,
+          "finding": "目录中的办公地点、园区部门分布、园区前台联系人三题在正文中没有答案。"
+        },
+        {
+          "risk_rank": 5,
+          "knowledge_base": "行政知识库",
+          "document": "行政100问-2025.5.22.docx",
+          "severity": "低",
+          "expected_questions": 4,
+          "answerable_questions": 4,
+          "missing_question_boundaries": 0,
+          "empty_answers": 0,
+          "database_chunk_count": 8,
+          "elasticsearch_chunk_count": 4,
+          "finding": "4 条问答均完整，图片关联完整。"
+        },
+        {
+          "risk_rank": 6,
+          "knowledge_base": "财务知识库",
+          "document": "财务常见问题回复2025.5.23_Q&A标准版.docx",
+          "severity": "低",
+          "expected_questions": 28,
+          "answerable_questions": 28,
+          "missing_question_boundaries": 0,
+          "empty_answers": 0,
+          "database_chunk_count": 29,
+          "elasticsearch_chunk_count": 29,
+          "finding": "内容完整，但同一欠票查询问答重复出现 2 次。"
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "audit_snapshot",
+      "label": "2026-07-21 Q&A 解析审计脚本与可复现快照",
+      "path": "audit/qna_parse_audit_2026-07-21/qna_parse_audit.ipynb",
+      "query": {
+        "engine": "mysql + elasticsearch + docx",
+        "sql": "SELECT d.*, kb.name AS kb_name, kb.tenant_id, kb.language AS kb_language FROM document d JOIN knowledgebase kb ON d.kb_id = kb.id WHERE d.parser_id = 'qa' AND d.status = '1' ORDER BY kb.name, d.name",
+        "description": "选择全部启用的 Q&A 文档；随后由审计脚本读取 DOCX、执行当前解析器并与 Elasticsearch chunk 逐项比对。",
+        "executed_at": "2026-07-21T12:00:00Z"
+      }
+    }
+  ],
+  "package_info": {
+    "originUrl": "artifact://qna-parse-audit-2026-07-21",
+    "controls": { "edit": false, "refresh": false }
+  }
+}

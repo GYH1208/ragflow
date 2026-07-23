@@ -1385,10 +1385,9 @@ def _run_sync(user_id:str, req):
     for doc_id in req["doc_ids"]:
         info = {"run": str(req["run"]), "progress": 0}
         rerun_with_delete = str(req["run"]) == TaskStatus.RUNNING.value and req.get("delete", False)
+        reset_info = {}
         if rerun_with_delete:
-            info["progress_msg"] = ""
-            info["chunk_num"] = 0
-            info["token_num"] = 0
+            reset_info = {"progress_msg": "", "chunk_num": 0, "token_num": 0}
 
         doc_tenant_id = DocumentService.get_tenant_id(doc_id)
         if not doc_tenant_id:
@@ -1404,10 +1403,15 @@ def _run_sync(user_id:str, req):
                 cancel_all_task_of(doc_id)
             else:
                 return RetCode.DATA_ERROR, "Cannot cancel a task that is not in RUNNING status"
-        if all([rerun_with_delete, str(doc.run) == TaskStatus.DONE.value]):
-            DocumentService.clear_chunk_num_when_rerun(doc_id)
-
-        DocumentService.update_by_id(doc_id, info)
+        if str(req["run"]) == TaskStatus.RUNNING.value:
+            if not DocumentService.try_start_parse(doc_id, info):
+                return RetCode.DATA_ERROR, "Can't parse document that is currently being processed"
+            if rerun_with_delete and str(doc.run) == TaskStatus.DONE.value:
+                DocumentService.clear_chunk_num_when_rerun(doc_id)
+            if reset_info:
+                DocumentService.update_by_id(doc_id, reset_info)
+        else:
+            DocumentService.update_by_id(doc_id, info)
         if req.get("delete", False):
             TaskService.filter_delete([Task.doc_id == doc_id])
             if settings.docStoreConn.index_exist(search.index_name(doc_tenant_id), doc.kb_id):
@@ -1510,14 +1514,18 @@ async def parse_documents(tenant_id, dataset_id):
                     continue
 
                 info = {"run": str(TaskStatus.RUNNING.value), "progress": 0}
+                reset_info = {}
                 # If re-running a completed document, clear previous chunks
                 if str(doc.run) == TaskStatus.DONE.value:
-                    DocumentService.clear_chunk_num_when_rerun(doc.id)
-                    info["progress_msg"] = ""
-                    info["chunk_num"] = 0
-                    info["token_num"] = 0
+                    reset_info = {"progress_msg": "", "chunk_num": 0, "token_num": 0}
 
-                DocumentService.update_by_id(doc_id, info)
+                if not DocumentService.try_start_parse(doc_id, info):
+                    errors.append(f"Document is currently being processed: {doc_id}")
+                    continue
+                if str(doc.run) == TaskStatus.DONE.value:
+                    DocumentService.clear_chunk_num_when_rerun(doc.id)
+                if reset_info:
+                    DocumentService.update_by_id(doc_id, reset_info)
                 TaskService.filter_delete([Task.doc_id == doc_id])
                 if settings.docStoreConn.index_exist(search.index_name(tenant_id), doc.kb_id):
                     settings.docStoreConn.delete({"doc_id": doc_id}, search.index_name(tenant_id), doc.kb_id)
@@ -1534,6 +1542,8 @@ async def parse_documents(tenant_id, dataset_id):
         result = await thread_pool_exec(_run_sync)
         if not_found_ids:
             return get_error_data_result(message=f"Documents not found: {not_found_ids}")
+        if result["success_count"] == 0 and result.get("errors"):
+            return get_error_data_result(message="; ".join(result["errors"]))
         return get_result(data=result)
     except Exception as e:
         logging.exception(e)

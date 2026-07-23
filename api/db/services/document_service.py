@@ -42,6 +42,20 @@ class DocumentService(CommonService):
     model = Document
 
     @classmethod
+    def try_start_parse(cls, doc_id, update_data):
+        """Atomically mark a non-running document as running."""
+        return (
+            cls.filter_update(
+                [
+                    cls.model.id == doc_id,
+                    ((cls.model.run.is_null(True)) | (cls.model.run != TaskStatus.RUNNING.value)),
+                ],
+                update_data,
+            )
+            > 0
+        )
+
+    @classmethod
     def get_cls_model_fields(cls):
         return [
             cls.model.id,

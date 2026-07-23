@@ -29,7 +29,7 @@ from api.db.joint_services.tenant_model_service import (
     get_model_config_from_provider_instance,
     get_tenant_default_model_by_type,
 )
-from api.db.db_models import Document, Task
+from api.db.db_models import Task
 from api.db.services.doc_metadata_service import DocMetadataService
 from api.db.services.document_service import DocumentService
 from api.db.services.file2document_service import File2DocumentService
@@ -89,6 +89,21 @@ def _store_chunk_image_or_error(dataset_id, chunk_id, image_binary):
             chunk_id,
         )
         return "Failed to store chunk image"
+    return None
+
+
+def _split_qa_content(content):
+    """Split QA content once while preserving multiline questions and answers."""
+    answer_separator = re.search(r"\t(?=(?:回答|Answer)\s*[:：])", content, flags=re.IGNORECASE)
+    if answer_separator:
+        offset = answer_separator.start()
+        return content[:offset], content[offset + 1 :]
+    if "\t" in content:
+        question, answer = content.split("\t", 1)
+        return question, answer
+    if "\n" in content:
+        question, answer = content.split("\n", 1)
+        return question, answer
     return None
 
 
@@ -172,24 +187,17 @@ async def parse(tenant_id, dataset_id):
     not_found = []
     success_count = 0
     for id in doc_list:
-        doc = DocumentService.query(id=id, kb_id=dataset_id)
-        if not doc:
+        docs = DocumentService.query(id=id, kb_id=dataset_id)
+        if not docs:
             not_found.append(id)
             continue
-        if not doc:
-            return get_error_data_result(message=f"You don't own the document {id}.")
-        info = {"run": "1", "progress": 0, "progress_msg": "", "chunk_num": 0, "token_num": 0}
-        if (
-            DocumentService.filter_update(
-                [
-                    Document.id == id,
-                    ((Document.run.is_null(True)) | (Document.run != TaskStatus.RUNNING.value)),
-                ],
-                info,
-            )
-            == 0
-        ):
+        doc = docs[0]
+        run_info = {"run": TaskStatus.RUNNING.value, "progress": 0}
+        if not DocumentService.try_start_parse(id, run_info):
             return get_error_data_result("Can't parse document that is currently being processed")
+        if str(doc.run) == TaskStatus.DONE.value:
+            DocumentService.clear_chunk_num_when_rerun(id)
+        DocumentService.update_by_id(id, {"progress_msg": "", "chunk_num": 0, "token_num": 0})
         index_name = search.index_name(tenant_id)
         if settings.docStoreConn.index_exist(index_name, dataset_id):
             settings.docStoreConn.delete({"doc_id": id}, index_name, dataset_id)
@@ -201,11 +209,11 @@ async def parse(tenant_id, dataset_id):
                 dataset_id,
             )
         TaskService.filter_delete([Task.doc_id == id])
-        e, doc = DocumentService.get_by_id(id)
-        doc = doc.to_dict()
-        doc["tenant_id"] = tenant_id
-        bucket, name = File2DocumentService.get_storage_address(doc_id=doc["id"])
-        queue_tasks(doc, bucket, name, 0)
+        e, current_doc = DocumentService.get_by_id(id)
+        current_doc = current_doc.to_dict()
+        current_doc["tenant_id"] = tenant_id
+        bucket, name = File2DocumentService.get_storage_address(doc_id=current_doc["id"])
+        queue_tasks(current_doc, bucket, name, 0)
         success_count += 1
     if not_found:
         return get_result(message=f"Documents not found: {not_found}", code=RetCode.DATA_ERROR)
@@ -710,11 +718,27 @@ async def update_chunk(tenant_id, dataset_id, document_id, chunk_id):
     model_config = get_model_config_from_provider_instance(dataset_tenant_id, LLMType.EMBEDDING.value, embd_id)
     embd_mdl = TenantLLMService.model_instance(model_config)
     if doc.parser_id == ParserType.QA:
-        arr = [t for t in re.split(r"[\n\t]", d["content_with_weight"]) if len(t) > 1]
-        if len(arr) != 2:
+        qa_content = _split_qa_content(d["content_with_weight"])
+        if qa_content is None:
             return get_error_data_result(message="Q&A must be separated by TAB/ENTER key.")
-        q, a = rmPrefix(arr[0]), rmPrefix(arr[1])
-        d = beAdoc(d, arr[0], arr[1], not any([rag_tokenizer.is_chinese(t) for t in q + a]))
+        raw_question, raw_answer = qa_content
+        question, answer = rmPrefix(raw_question), rmPrefix(raw_answer)
+        if not question:
+            return get_error_data_result(message="Question is required.")
+        has_image = bool(
+            d.get("img_id")
+            or chunk.get("img_id")
+            or chunk.get("image")
+            or chunk.get("doc_type_kwd") == "image"
+        )
+        if not answer and not has_image:
+            return get_error_data_result(message="Answer is required unless the chunk contains an image.")
+        d = beAdoc(
+            d,
+            raw_question,
+            raw_answer,
+            not any(rag_tokenizer.is_chinese(t) for t in question + answer),
+        )
 
     v, _ = embd_mdl.encode(
         [

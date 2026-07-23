@@ -308,6 +308,7 @@ def _load_chunk_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "api.db.joint_services", joint_services_pkg)
 
     tenant_model_service_mod = ModuleType("api.db.joint_services.tenant_model_service")
+    tenant_model_service_mod.split_model_name = lambda model_name: (model_name, "")
     tenant_model_service_mod.get_model_config_by_id = lambda *_args, **_kwargs: {"llm_name": "embed", "model_type": "embedding"}
     tenant_model_service_mod.get_model_config_from_provider_instance = lambda *_args, **_kwargs: {"llm_name": "embed", "model_type": "embedding"}
     tenant_model_service_mod.get_tenant_default_model_by_type = lambda *_args, **_kwargs: {"llm_name": "chat", "model_type": "chat"}
@@ -600,6 +601,59 @@ def test_restful_chunk_add_update_and_switch_unit(monkeypatch):
 
 
 @pytest.mark.p2
+@pytest.mark.parametrize(
+    "content, expected",
+    [
+        (
+            "Question: Parent\nChild\tAnswer: First paragraph\nSecond paragraph\tanswer tab",
+            ("Question: Parent\nChild", "Answer: First paragraph\nSecond paragraph\tanswer tab"),
+        ),
+        (
+            "Question: Parent\tChild\tAnswer: First paragraph\nSecond paragraph",
+            ("Question: Parent\tChild", "Answer: First paragraph\nSecond paragraph"),
+        ),
+        (
+            "Question: Single line\nAnswer: First paragraph\nSecond paragraph",
+            ("Question: Single line", "Answer: First paragraph\nSecond paragraph"),
+        ),
+    ],
+)
+def test_split_qa_content_preserves_remaining_whitespace(monkeypatch, content, expected):
+    module = _load_chunk_api_module(monkeypatch)
+    assert module._split_qa_content(content) == expected
+
+
+@pytest.mark.p2
+def test_restful_update_image_qa_allows_empty_text_answer(monkeypatch):
+    module = _load_chunk_api_module(monkeypatch)
+    module.request = SimpleNamespace(args={}, headers={})
+    monkeypatch.setattr(
+        module.DocumentService,
+        "query",
+        lambda **kwargs: [
+            _DummyDoc(
+                doc_id=kwargs.get("id", "doc-1"),
+                kb_id=kwargs.get("kb_id", "kb-1"),
+                parser_id=module.ParserType.QA,
+            )
+        ],
+    )
+    module.settings.docStoreConn.chunk = {
+        "id": "chunk-1",
+        "doc_id": "doc-1",
+        "content_with_weight": "Question: Attachments\tAnswer:",
+        "img_id": "kb-1-chunk-1",
+        "doc_type_kwd": "image",
+    }
+    _set_request_json(monkeypatch, module, {"content": "Question: Attachments\tAnswer:"})
+
+    res = _run(_route_core(module.update_chunk)("tenant-1", "kb-1", "doc-1", "chunk-1"))
+
+    assert res["code"] == 0, res
+    assert module.settings.docStoreConn.updated[-1][1]["content_with_weight"] == "Question: Attachments\nAnswer:"
+
+
+@pytest.mark.p2
 def test_restful_chunk_guard_branches_unit(monkeypatch):
     module = _load_chunk_api_module(monkeypatch)
     module.request = SimpleNamespace(args={}, headers={})
@@ -728,4 +782,3 @@ def test_restful_add_chunk_valid_image_base64_stores_before_insert(monkeypatch):
     inserted = module.settings.docStoreConn.inserted[-1]
     assert inserted.get("img_id"), inserted
     assert inserted.get("doc_type_kwd") == "image", inserted
-
