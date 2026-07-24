@@ -603,8 +603,12 @@ class ESConnection(ESConnectionBase):
             hit_fields = hit.get("fields", {})
             m = {}
             for n in fields:
+                # Elasticsearch stores the relevance score as hit metadata,
+                # not in _source or fields.
+                if n == "_score" and hit.get("_score") is not None:
+                    m[n] = hit.get("_score")
                 # First check _source
-                if d.get(n) is not None:
+                elif d.get(n) is not None:
                     m[n] = d.get(n)
                 # Then check fields (ES 9.x stores dense_vector here, not in _source)
                 elif n in hit_fields:

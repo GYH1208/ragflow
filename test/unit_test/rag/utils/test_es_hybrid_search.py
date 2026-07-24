@@ -128,3 +128,32 @@ def test_knn_only_search_keeps_structural_filter_without_changing_score():
     assert "kb_id" in str(body["knn"]["filter"])
     assert "doc_id" in str(body["knn"]["filter"])
     assert "available_int" in str(body["knn"]["filter"])
+
+
+def test_get_fields_includes_elasticsearch_metadata_score():
+    conn = _make_connection()
+    result = {
+        "hits": {
+            "total": {"value": 1},
+            "hits": [
+                {
+                    "_id": "entity-1",
+                    "_score": 0.87,
+                    "_source": {
+                        "entity_kwd": "年假",
+                        "kb_id": "kb-hr",
+                    },
+                }
+            ],
+        }
+    }
+
+    fields = conn.get_fields(result, ["entity_kwd", "kb_id", "_score"])
+
+    assert fields == {
+        "entity-1": {
+            "entity_kwd": "年假",
+            "kb_id": "kb-hr",
+            "_score": "0.87",
+        }
+    }

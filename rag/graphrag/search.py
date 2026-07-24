@@ -33,6 +33,42 @@ from common.doc_store.doc_store_base import OrderByExpr
 
 
 class KGSearch(Dealer):
+    @staticmethod
+    def _first_value(value):
+        if isinstance(value, list):
+            return value[0] if value else ""
+        return value
+
+    def _log_raw_retrieval_(self, kind, search_result, sim_thr, topn=5):
+        if kind == "entity":
+            fields = ["entity_kwd", "_score", "kb_id"]
+        else:
+            fields = ["from_entity_kwd", "to_entity_kwd", "_score", "kb_id"]
+
+        rows = self.dataStore.get_fields(search_result, fields)
+        candidates = []
+        for row in rows.values():
+            candidate = {
+                "score": get_float(row.get("_score", 0)),
+                "kb_id": self._first_value(row.get("kb_id", "")),
+            }
+            if kind == "entity":
+                candidate["entity"] = self._first_value(row.get("entity_kwd", ""))
+            else:
+                candidate["from_entity"] = self._first_value(row.get("from_entity_kwd", ""))
+                candidate["to_entity"] = self._first_value(row.get("to_entity_kwd", ""))
+            candidates.append(candidate)
+
+        candidates.sort(key=lambda candidate: candidate["score"], reverse=True)
+        logging.info(
+            "KG raw retrieval: kind=%s raw_total=%s returned=%s threshold=%.4f top=%s",
+            kind,
+            self.dataStore.get_total(search_result),
+            len(rows),
+            sim_thr,
+            json.dumps(candidates[:topn], ensure_ascii=False),
+        )
+
     async def _chat(self, llm_bdl, system, history, gen_conf):
         response = get_llm_cache(llm_bdl.llm_name, system, history, gen_conf)
         if response:
@@ -113,26 +149,28 @@ class KGSearch(Dealer):
             }
         return res
 
-    def get_relevant_ents_by_keywords(self, keywords, filters, idxnms, kb_ids, emb_mdl, sim_thr=0.3, N=56):
+    async def get_relevant_ents_by_keywords(self, keywords, filters, idxnms, kb_ids, emb_mdl, sim_thr=0.3, N=56):
         if not keywords:
             return {}
         filters = deepcopy(filters)
         filters["knowledge_graph_kwd"] = "entity"
-        matchDense = self.get_vector(", ".join(keywords), emb_mdl, 1024, sim_thr)
-        es_res = self.dataStore.search(["content_with_weight", "entity_kwd", "rank_flt", "n_hop_with_weight"], [], filters, [matchDense],
+        matchDense = await self.get_vector(", ".join(keywords), emb_mdl, 1024, sim_thr)
+        es_res = self.dataStore.search(["content_with_weight", "entity_kwd", "rank_flt", "n_hop_with_weight", "_score", "kb_id"], [], filters, [matchDense],
                                        OrderByExpr(), 0, N,
                                        idxnms, kb_ids)
+        self._log_raw_retrieval_("entity", es_res, sim_thr)
         return self._ent_info_from_(es_res, sim_thr)
 
-    def get_relevant_relations_by_txt(self, txt, filters, idxnms, kb_ids, emb_mdl, sim_thr=0.3, N=56):
+    async def get_relevant_relations_by_txt(self, txt, filters, idxnms, kb_ids, emb_mdl, sim_thr=0.3, N=56):
         if not txt:
             return {}
         filters = deepcopy(filters)
         filters["knowledge_graph_kwd"] = "relation"
-        matchDense = self.get_vector(txt, emb_mdl, 1024, sim_thr)
+        matchDense = await self.get_vector(txt, emb_mdl, 1024, sim_thr)
         es_res = self.dataStore.search(
-            ["content_with_weight", "_score", "from_entity_kwd", "to_entity_kwd", "weight_int"],
+            ["content_with_weight", "_score", "from_entity_kwd", "to_entity_kwd", "weight_int", "kb_id"],
             [], filters, [matchDense], OrderByExpr(), 0, N, idxnms, kb_ids)
+        self._log_raw_retrieval_("relation", es_res, sim_thr)
         return self._relation_info_from_(es_res, sim_thr)
 
     def get_relevant_ents_by_types(self, types, filters, idxnms, kb_ids, N=56):
@@ -174,9 +212,9 @@ class KGSearch(Dealer):
             ents = [qst]
             pass
 
-        ents_from_query = self.get_relevant_ents_by_keywords(ents, filters, idxnms, kb_ids, emb_mdl, ent_sim_threshold)
+        ents_from_query = await self.get_relevant_ents_by_keywords(ents, filters, idxnms, kb_ids, emb_mdl, ent_sim_threshold)
         ents_from_types = self.get_relevant_ents_by_types(ty_kwds, filters, idxnms, kb_ids, 10000)
-        rels_from_txt = self.get_relevant_relations_by_txt(qst, filters, idxnms, kb_ids, emb_mdl, rel_sim_threshold)
+        rels_from_txt = await self.get_relevant_relations_by_txt(qst, filters, idxnms, kb_ids, emb_mdl, rel_sim_threshold)
         nhop_pathes = defaultdict(dict)
         for _, ent in ents_from_query.items():
             nhops = ent.get("n_hop_ents", [])
