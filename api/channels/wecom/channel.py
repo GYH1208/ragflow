@@ -577,6 +577,14 @@ class WeComChannel(Channel):
         chat_id = str(body.get("chatid") or sender_id or "")
         req_id = str((headers or {}).get("req_id") or body.get("msgid") or "")
         content = str((body.get("text") or {}).get("content") or "")
+        LOGGER.info(
+            "[wecom:%s] inbound message user_id=%s chat_id=%s chat_type=%s req_id=%s",
+            self.account_id,
+            sender_id,
+            chat_id,
+            chat_type,
+            req_id,
+        )
         await self._handle_text_message(
             chat_id=chat_id or sender_id,
             sender_id=sender_id,

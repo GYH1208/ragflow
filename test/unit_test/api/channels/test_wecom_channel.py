@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
@@ -151,6 +152,30 @@ async def test_message_callback_does_not_block_ack_processing():
     )
 
     await asyncio.wait_for(handler_done.wait(), 0.1)
+
+
+@pytest.mark.asyncio
+async def test_websocket_message_logs_sender_identifiers_without_content(caplog):
+    channel = make_channel()
+
+    with caplog.at_level(logging.INFO, logger="api.channels.wecom.channel"):
+        await channel._handle_ws_message(
+            {"req_id": "request-1"},
+            {
+                "msgtype": "text",
+                "from": {"userid": "user-1"},
+                "chatid": "chat-1",
+                "chattype": "group",
+                "text": {"content": "private question"},
+            },
+            {},
+        )
+
+    assert (
+        "[wecom:acc] inbound message user_id=user-1 chat_id=chat-1 "
+        "chat_type=group req_id=request-1"
+    ) in caplog.messages
+    assert "private question" not in caplog.text
 
 
 @pytest.mark.asyncio
