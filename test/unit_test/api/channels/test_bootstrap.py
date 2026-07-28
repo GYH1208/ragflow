@@ -93,6 +93,8 @@ async def _run_handler_case(
     *,
     chunks,
     resolution,
+    question="用户问题",
+    answer="回答正文。[ID:0]",
     text_send_result=True,
     persist_result=True,
 ):
@@ -167,7 +169,7 @@ async def _run_handler_case(
 
     async def fake_async_chat(dialog, history, stream, **kwargs):
         yield {
-            "answer": "回答正文。[ID:0]",
+            "answer": answer,
             "reference": {"chunks": chunks, "doc_aggs": []},
             "final": True,
         }
@@ -224,7 +226,7 @@ async def _run_handler_case(
         chat_type="single",
         message_id="incoming-1",
         sender_id="user-1",
-        text="用户问题",
+        text=question,
     ))
     return events, sent_messages
 
@@ -344,3 +346,61 @@ async def test_handler_sends_no_images_on_error_resolution(monkeypatch):
     )
 
     assert len(sent_messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_capability_answer_never_sends_cited_approval_screenshot_without_trusted_evidence(
+    monkeypatch,
+):
+    approval_image_id = "6dd5ae4a802811f18504c1b4e3818882-eab6502820610ded"
+    chunks = [
+        {
+            "id": "travel",
+            "content": "差旅与外出管理：酒店、机票、外部宾客、报销规则。",
+            "image_id": "",
+        },
+        {
+            "id": "office",
+            "content": "办公场地、快递与综合服务。",
+            "image_id": "",
+        },
+        {
+            "id": "benefits",
+            "content": "员工福利、文化活动与日常办公支持。",
+            "image_id": "",
+        },
+        {
+            "id": "finance-approval",
+            "content": "财务流程：查询审批进度、报销相关操作。",
+            "image_id": approval_image_id,
+        },
+    ]
+    answer = (
+        "我可以解答差旅、办公服务、员工福利、日常办公支持等常见问题。\n"
+        "财务流程：查询审批进度、报销相关操作。[ID:3]"
+    )
+
+    events, sent_messages = await _run_handler_case(
+        monkeypatch,
+        question="你都有什么功能？",
+        answer=answer,
+        chunks=chunks,
+        resolution=EvidenceResolution(
+            [],
+            [],
+            [0, 1],
+            "no_match",
+            7.0,
+            "below_confidence_threshold",
+        ),
+    )
+
+    assert len(sent_messages) == 1
+    assert sent_messages[0].text == answer.replace("[ID:3]", "").strip()
+    assert sent_messages[0].images == []
+    assert not any(
+        image.image_id == approval_image_id
+        for message in sent_messages
+        for image in message.images
+    )
+    assert ("persist", "conversation-1", "message-1", []) in events
