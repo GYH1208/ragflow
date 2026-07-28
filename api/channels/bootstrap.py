@@ -123,6 +123,30 @@ def _prepare_cited_output(
     return "".join(parts), images, files
 
 
+def _images_for_used_chunks(
+    chunks: object,
+    used_chunk_ids: list[str],
+) -> list[OutgoingImage]:
+    valid_chunks = chunks if isinstance(chunks, list) else []
+    chunks_by_id = {
+        str(chunk.get("id")): chunk
+        for chunk in valid_chunks
+        if isinstance(chunk, dict) and chunk.get("id")
+    }
+    images: list[OutgoingImage] = []
+    seen_image_ids: set[str] = set()
+    for chunk_id in used_chunk_ids:
+        chunk = chunks_by_id.get(str(chunk_id))
+        if not chunk:
+            continue
+        image_id = str(chunk.get("image_id") or "")
+        if not image_id or image_id in seen_image_ids:
+            continue
+        seen_image_ids.add(image_id)
+        images.append(OutgoingImage(image_id=image_id))
+    return images
+
+
 def _register_channels() -> None:
     """Import each bundled channel package so it self-registers a builder.
 
@@ -177,10 +201,10 @@ def _make_chat_handler(ch):
     connected dialog ignore inbound messages.
     """
     from api.channels.core.base import IncomingMessage, OutgoingMessage
-
     from api.db.services.chat_channel_service import ChatChannelService
     from api.db.services.conversation_service import ConversationService, structure_answer
     from api.db.services.dialog_service import DialogService, async_chat
+    from api.db.services.evidence_service import EvidenceService
     from common.misc_utils import get_uuid
 
     async def handle(msg: IncomingMessage) -> None:
@@ -225,8 +249,10 @@ def _make_chat_handler(ch):
             history.append(m)
 
         answer_text = ""
-        answer_images = []
         answer_files = []
+        raw_answer = ""
+        reference = {}
+        completion_succeeded = False
         try:
             send_source_files = bool(ch.supports_source_files and (dia.prompt_config or {}).get("send_source_file", False))
             chat_kwargs = {
@@ -239,30 +265,141 @@ def _make_chat_handler(ch):
                 structure_answer(conv, ans, message_id, conv.id)
                 raw_answer = (ans or {}).get("answer", "") or ""
                 reference = (ans or {}).get("reference") or {}
-                prepared_text, cited_images, cited_files = _prepare_cited_output(
+                prepared_text, _, cited_files = _prepare_cited_output(
                     raw_answer,
                     reference.get("chunks"),
                     include_source_files=send_source_files,
                     allowed_dataset_ids=dia.kb_ids,
                 )
                 answer_text = prepared_text if ch.hides_reference_markers else raw_answer
-                answer_images = cited_images if ch.supports_reference_images and (dia.prompt_config or {}).get("quote", True) else []
                 answer_files = cited_files if send_source_files else []
                 ConversationService.update_by_id(conv.id, conv.to_dict())
+                completion_succeeded = True
                 break
         except Exception as ex:
             LOGGER.exception("[%s:%s] completion failed: %s", ch.channel_id, ch.account_id, ex)
             answer_text = f"**ERROR**: {ex}"
 
-        if answer_text:
-            await ch.send(
-                OutgoingMessage(
-                    chat_id=msg.chat_id,
-                    text=answer_text,
-                    reply_to_message_id=msg.message_id or None,
-                    images=answer_images,
-                    files=answer_files,
+        if not answer_text:
+            return
+
+        text_send_result = await ch.send(
+            OutgoingMessage(
+                chat_id=msg.chat_id,
+                text=answer_text,
+                reply_to_message_id=msg.message_id or None,
+                images=[],
+                files=answer_files,
+            )
+        )
+        if not completion_succeeded:
+            return
+
+        valid_chunks = (
+            reference.get("chunks", [])
+            if isinstance(reference, dict)
+            else []
+        )
+        has_image_candidate = any(
+            isinstance(chunk, dict) and chunk.get("image_id")
+            for chunk in valid_chunks
+        )
+        quote_enabled = bool(
+            (dia.prompt_config or {}).get("quote", True)
+        )
+        if not ch.supports_reference_images:
+            LOGGER.info(
+                "[%s:%s] evidence skipped reason=unsupported_channel",
+                ch.channel_id,
+                ch.account_id,
+            )
+            return
+        if not quote_enabled:
+            LOGGER.info(
+                "[%s:%s] evidence skipped reason=quote_disabled",
+                ch.channel_id,
+                ch.account_id,
+            )
+            return
+        if text_send_result is not True:
+            LOGGER.info(
+                "[%s:%s] evidence skipped reason=text_send_unconfirmed",
+                ch.channel_id,
+                ch.account_id,
+            )
+            return
+        if not has_image_candidate:
+            LOGGER.info(
+                "[%s:%s] evidence skipped reason=no_image_candidates",
+                ch.channel_id,
+                ch.account_id,
+            )
+            return
+
+        try:
+            resolution = await EvidenceService.resolve_for_dialog(
+                dia,
+                msg.text,
+                raw_answer,
+                valid_chunks,
+            )
+            if resolution.status == "error":
+                LOGGER.info(
+                    "[%s:%s] evidence skipped reason=resolution_error",
+                    ch.channel_id,
+                    ch.account_id,
                 )
+                return
+
+            saved = ConversationService.update_reference_evidence(
+                conv.id,
+                message_id,
+                resolution.used_chunk_ids,
+            )
+            if not saved:
+                LOGGER.warning(
+                    "[%s:%s] evidence persistence failed "
+                    "conversation_id=%s message_id=%s",
+                    ch.channel_id,
+                    ch.account_id,
+                    conv.id,
+                    message_id,
+                )
+
+            evidence_images = _images_for_used_chunks(
+                valid_chunks,
+                resolution.used_chunk_ids,
+            )
+            LOGGER.info(
+                "[%s:%s] evidence delivery conversation_id=%s "
+                "message_id=%s status=%s used_chunk_ids=%s "
+                "image_ids=%s duration_ms=%.1f",
+                ch.channel_id,
+                ch.account_id,
+                conv.id,
+                message_id,
+                resolution.status,
+                resolution.used_chunk_ids,
+                [image.image_id for image in evidence_images],
+                resolution.duration_ms,
+            )
+            if not evidence_images:
+                LOGGER.info(
+                    "[%s:%s] evidence skipped reason=no_trusted_evidence",
+                    ch.channel_id,
+                    ch.account_id,
+                )
+                return
+            await ch.send(OutgoingMessage(
+                chat_id=msg.chat_id,
+                text="",
+                images=evidence_images,
+            ))
+        except Exception:
+            LOGGER.exception(
+                "[%s:%s] evidence delivery failed",
+                ch.channel_id,
+                ch.account_id,
             )
 
     return handle

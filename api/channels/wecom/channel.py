@@ -624,19 +624,18 @@ class WeComChannel(Channel):
             self._access_token_expires_at = now + int(data.get("expires_in", 7200)) - 60
             return self._access_token
 
-    async def send(self, message: OutgoingMessage) -> None:
+    async def send(self, message: OutgoingMessage) -> bool:
         if self.connection_type == "websocket":
-            await self._send_websocket_message(message)
-            return
+            return await self._send_websocket_message(message)
 
         if not message.chat_id:
             LOGGER.error("[wecom:%s] missing chat_id; cannot send", self.account_id)
-            return
+            return False
         try:
             token = await self._get_access_token()
         except Exception:
             LOGGER.error("[wecom:%s] access_token error", self.account_id, exc_info=True)
-            return
+            return False
 
         payload = {
             "touser": message.chat_id,
@@ -655,7 +654,7 @@ class WeComChannel(Channel):
                     data = await resp.json(content_type=None)
         except Exception:
             LOGGER.error("[wecom:%s] send transport error", self.account_id, exc_info=True)
-            return
+            return False
 
         if data.get("errcode", 0) != 0:
             # 40014 / 42001 = access_token expired or invalid; drop cache.
@@ -663,31 +662,37 @@ class WeComChannel(Channel):
                 self._access_token = None
                 self._access_token_expires_at = 0.0
             LOGGER.error("[wecom:%s] send failed: %s", self.account_id, data)
+            return False
+        return True
 
-    async def _send_websocket_message(self, message: OutgoingMessage) -> None:
-        if not message.text:
-            LOGGER.error("[wecom:%s] empty websocket reply text", self.account_id)
-            return
+    async def _send_websocket_message(self, message: OutgoingMessage) -> bool:
+        if not message.text and not message.images and not message.files:
+            LOGGER.error("[wecom:%s] empty websocket message", self.account_id)
+            return False
         if self._ws is None or self._ws.closed:
             LOGGER.error("[wecom:%s] websocket is not connected", self.account_id)
-            return
-        try:
-            await self._ws_request(
-                "aibot_send_msg",
-                {
-                    "chatid": message.chat_id,
-                    "msgtype": "markdown",
-                    "markdown": {"content": message.text},
-                },
-            )
-            LOGGER.info(
-                "[wecom:%s] websocket reply sent chat_id=%s",
-                self.account_id,
-                message.chat_id,
-            )
-        except Exception:
-            LOGGER.error("[wecom:%s] websocket send failed", self.account_id, exc_info=True)
-            return
+            return False
+
+        sent_any = False
+        if message.text:
+            try:
+                await self._ws_request(
+                    "aibot_send_msg",
+                    {
+                        "chatid": message.chat_id,
+                        "msgtype": "markdown",
+                        "markdown": {"content": message.text},
+                    },
+                )
+                sent_any = True
+                LOGGER.info(
+                    "[wecom:%s] websocket reply sent chat_id=%s",
+                    self.account_id,
+                    message.chat_id,
+                )
+            except Exception:
+                LOGGER.error("[wecom:%s] websocket send failed", self.account_id, exc_info=True)
+                return False
 
         for image in message.images:
             try:
@@ -705,6 +710,7 @@ class WeComChannel(Channel):
                     filename = f"{filename}.jpg"
                 media_id = await self._upload_websocket_image(image_data, filename)
                 await self._send_websocket_image(message.chat_id, media_id)
+                sent_any = True
                 LOGGER.info(
                     "[wecom:%s] websocket image sent chat_id=%s image_id=%s",
                     self.account_id,
@@ -731,6 +737,7 @@ class WeComChannel(Channel):
                     continue
                 media_id = await self._upload_websocket_media(file_data, source_file.filename, "file")
                 await self._send_websocket_media(message.chat_id, media_id, "file")
+                sent_any = True
                 LOGGER.info(
                     "[wecom:%s] websocket source file sent chat_id=%s document_id=%s",
                     self.account_id,
@@ -744,6 +751,7 @@ class WeComChannel(Channel):
                     source_file.document_id,
                     exc_info=True,
                 )
+        return sent_any
 
 
 def _build(account_id: str, cfg: dict) -> Channel:

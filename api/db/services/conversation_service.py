@@ -14,25 +14,85 @@
 #  limitations under the License.
 #
 import hashlib
-import time
+import json
 import logging
+import time
 from uuid import uuid4
-from common.constants import StatusEnum
-from api.db.db_models import Conversation, DB
+
+from api.db.db_models import DB, Conversation
 from api.db.services.api_service import API4ConversationService
 from api.db.services.common_service import CommonService
 from api.db.services.dialog_service import DialogService, async_chat
+from common.constants import StatusEnum
 from common.misc_utils import get_uuid
-import json
-
+from common.time_utils import current_timestamp, get_format_time
 from rag.prompts.generator import chunks_format
-
 
 logger = logging.getLogger(__name__)
 
 
 class ConversationService(CommonService):
     model = Conversation
+
+    @staticmethod
+    def _merge_reference_evidence(
+        references,
+        message_id,
+        used_chunk_ids,
+    ):
+        merged = [
+            dict(reference) if isinstance(reference, dict) else reference
+            for reference in (references or [])
+        ]
+        stable_ids = list(dict.fromkeys(
+            str(chunk_id)
+            for chunk_id in used_chunk_ids
+            if chunk_id
+        ))
+        for index, reference in enumerate(merged):
+            if not isinstance(reference, dict):
+                continue
+            if str(reference.get("message_id") or "") != str(message_id):
+                continue
+            reference["used_chunk_ids"] = stable_ids
+            merged[index] = reference
+            return merged, True
+        return merged, False
+
+    @classmethod
+    @DB.connection_context()
+    def update_reference_evidence(
+        cls,
+        conversation_id,
+        message_id,
+        used_chunk_ids,
+    ):
+        with DB.atomic():
+            conversation = (
+                cls.model.select()
+                .where(cls.model.id == conversation_id)
+                .for_update()
+                .first()
+            )
+            if conversation is None:
+                return False
+            references, found = cls._merge_reference_evidence(
+                conversation.reference,
+                message_id,
+                used_chunk_ids,
+            )
+            if not found:
+                return False
+            updated = (
+                cls.model.update(
+                    reference=references,
+                    update_time=current_timestamp(),
+                    update_date=get_format_time(),
+                )
+                .where(cls.model.id == conversation_id)
+                .execute()
+            )
+            return updated == 1
 
     @classmethod
     @DB.connection_context()
@@ -111,6 +171,7 @@ def structure_answer(conv, ans, message_id, session_id):
 
     chunk_list = chunks_format(reference)
 
+    reference["message_id"] = message_id
     reference["chunks"] = chunk_list
     ans["id"] = message_id
     ans["session_id"] = session_id

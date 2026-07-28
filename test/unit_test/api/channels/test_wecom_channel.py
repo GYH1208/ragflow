@@ -2,7 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -28,6 +28,70 @@ def make_channel():
 def test_wecom_hides_reference_markers():
     assert make_channel().hides_reference_markers is True
     assert make_channel().supports_source_files is True
+
+
+@pytest.mark.asyncio
+async def test_websocket_text_send_returns_true_after_ack(monkeypatch):
+    channel = make_channel()
+    monkeypatch.setattr(
+        channel,
+        "_ws_request",
+        AsyncMock(return_value={"body": {}}),
+    )
+
+    result = await channel.send(
+        OutgoingMessage(chat_id="chat-1", text="answer")
+    )
+
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_websocket_text_send_returns_false_when_ack_fails(monkeypatch):
+    channel = make_channel()
+    monkeypatch.setattr(
+        channel,
+        "_ws_request",
+        AsyncMock(side_effect=RuntimeError("send failed")),
+    )
+
+    result = await channel.send(
+        OutgoingMessage(chat_id="chat-1", text="answer")
+    )
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_media_only_message_sends_all_images(monkeypatch):
+    channel = make_channel()
+    request = AsyncMock(return_value={"body": {}})
+    send_image = AsyncMock()
+    monkeypatch.setattr(channel, "_ws_request", request)
+    monkeypatch.setattr(
+        channel,
+        "_load_stored_image",
+        lambda image_id: image_id.encode(),
+    )
+    monkeypatch.setattr(
+        channel,
+        "_upload_websocket_image",
+        AsyncMock(side_effect=["media-a", "media-b"]),
+    )
+    monkeypatch.setattr(channel, "_send_websocket_image", send_image)
+
+    result = await channel.send(OutgoingMessage(
+        chat_id="chat-1",
+        text="",
+        images=[OutgoingImage("image-a"), OutgoingImage("image-b")],
+    ))
+
+    request.assert_not_awaited()
+    assert send_image.await_args_list == [
+        call("chat-1", "media-a"),
+        call("chat-1", "media-b"),
+    ]
+    assert result is True
 
 
 @pytest.mark.asyncio

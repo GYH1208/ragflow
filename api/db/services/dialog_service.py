@@ -337,10 +337,10 @@ async def async_chat_solo(dialog, messages, stream=True, session_id=None):
         yield {"answer": answer, "reference": {}, "audio_binary": tts(tts_mdl, answer), "prompt": "", "created_at": time.time()}
 
 
-def get_models(dialog, trace_context=None, langfuse_session_id=None):
-    embd_mdl, chat_mdl, rerank_mdl, tts_mdl = None, None, None, None
-    kbs = KnowledgebaseService.get_by_ids(dialog.kb_ids)
-    embedding_list = list(set([kb.embd_id for kb in kbs]))
+def get_retrieval_models(dialog, trace_context=None, langfuse_session_id=None):
+    embd_mdl, rerank_mdl = None, None
+    kbs = list(KnowledgebaseService.get_by_ids(dialog.kb_ids))
+    embedding_list = list({kb.embd_id for kb in kbs})
     if len(embedding_list) > 1:
         raise Exception("**ERROR**: Knowledge bases use different embedding models.")
 
@@ -351,16 +351,27 @@ def get_models(dialog, trace_context=None, langfuse_session_id=None):
         if not embd_mdl:
             raise LookupError("Embedding model(%s) not found" % embedding_list[0])
 
+    if dialog.rerank_id:
+        rerank_model_config = get_model_config_from_provider_instance(dialog.tenant_id, LLMType.RERANK, dialog.rerank_id)
+        rerank_mdl = LLMBundle(dialog.tenant_id, rerank_model_config, trace_context=trace_context, langfuse_session_id=langfuse_session_id)
+
+    return kbs, embd_mdl, rerank_mdl
+
+
+def get_models(dialog, trace_context=None, langfuse_session_id=None):
+    chat_mdl, tts_mdl = None, None
+    kbs, embd_mdl, rerank_mdl = get_retrieval_models(
+        dialog,
+        trace_context=trace_context,
+        langfuse_session_id=langfuse_session_id,
+    )
+
     if dialog.llm_id:
         chat_model_config = get_model_config_from_provider_instance(dialog.tenant_id, LLMType.CHAT, dialog.llm_id)
     else:
         chat_model_config = get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
 
     chat_mdl = LLMBundle(dialog.tenant_id, chat_model_config, trace_context=trace_context, langfuse_session_id=langfuse_session_id)
-
-    if dialog.rerank_id:
-        rerank_model_config = get_model_config_from_provider_instance(dialog.tenant_id, LLMType.RERANK, dialog.rerank_id)
-        rerank_mdl = LLMBundle(dialog.tenant_id, rerank_model_config, trace_context=trace_context, langfuse_session_id=langfuse_session_id)
 
     if dialog.prompt_config.get("tts"):
         default_tts_model_config = get_tenant_default_model_by_type(dialog.tenant_id, LLMType.TTS)

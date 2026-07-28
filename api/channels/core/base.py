@@ -73,4 +73,9 @@ class Channel(ABC):
     async def stop(self) -> None: ...
 
     @abstractmethod
-    async def send(self, message: OutgoingMessage) -> None: ...
+    async def send(self, message: OutgoingMessage) -> bool | None:
+        """Send a message and return acknowledgement when supported.
+
+        Channels that can confirm delivery return ``True`` or ``False``.
+        Legacy channel adapters may continue to return ``None``.
+        """
