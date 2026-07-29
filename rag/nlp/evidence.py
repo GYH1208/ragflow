@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import re
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from timeit import default_timer as timer
 from typing import Literal
 
@@ -13,43 +11,35 @@ import numpy as np
 from common.misc_utils import thread_pool_exec
 
 _CITATION_TOKEN = r"\[(?:ID:)?[0-9\u0660-\u0669\u06F0-\u06F9]+\]"
-_CITATION_PATTERN = re.compile(r"\[(?:ID:)?([0-9\u0660-\u0669\u06F0-\u06F9]+)\]")
+_CITATION_PATTERN = re.compile(
+    r"\[(?:ID:)?([0-9\u0660-\u0669\u06F0-\u06F9]+)\]"
+)
 _THINK_TOKEN_PATTERN = re.compile(r"</?think>", re.IGNORECASE)
 _EVIDENCE_SENTENCE_PATTERN = re.compile(
     rf".*?[。！？!?；;](?:\s*{_CITATION_TOKEN})*|.+$",
     re.DOTALL,
 )
 _LIST_PREFIX = re.compile(r"^\s*(?:[-*+]|\d+[.)、])\s*")
-_SENTENCE_BOUNDARY = re.compile(r"(?<=[。！？!?；;])|\n+")
 _MARKDOWN_ONLY = re.compile(r"^\s*(?:#{1,6}|[-*_`>|])+\s*$")
 _META_ONLY = (
     re.compile(r"知识库.{0,12}(?:未找到|没有).{0,12}(?:图片|截图|流程图)"),
     re.compile(r"建议.{0,12}(?:联系|咨询).{0,12}(?:人事|管理员).{0,12}(?:截图|图片)"),
 )
 
-LOGGER = logging.getLogger(__name__)
+
+class EvidenceParseError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
 class EvidenceChunk:
     chunk_id: str
     content: str
-    image_id: str | None = None
-    vector: list[float] | None = None
-    similarity: float = float("nan")
-    vector_similarity: float = float("nan")
-    term_similarity: float = float("nan")
-    retrieval_rank: int = 0
-
-
-@dataclass(frozen=True)
-class EvidenceSegment:
-    index: int
-    text: str
-
-
-class EvidenceParseError(ValueError):
-    pass
+    image_id: str | None
+    similarity: float
+    vector_similarity: float
+    term_similarity: float
+    retrieval_rank: int
 
 
 @dataclass(frozen=True)
@@ -63,8 +53,20 @@ class EvidenceUnit:
 class EvidenceMatch:
     segment_index: int
     chunk_id: str
-    hybrid_score: float
+    retrieval_score: float
     rerank_score: float
+    rerank_margin: float | None
+
+
+@dataclass(frozen=True)
+class EvidenceDecision:
+    unit_index: int
+    cited_chunk_ids: list[str]
+    candidate_chunk_ids: list[str]
+    selected_chunk_id: str | None
+    rerank_scores: list[tuple[str, float]]
+    margin: float | None
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -75,22 +77,17 @@ class EvidenceResolution:
     status: Literal["resolved", "no_match", "error"]
     duration_ms: float
     reason: str | None = None
+    decisions: list[EvidenceDecision] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class EvidenceConfig:
-    min_hybrid_score: float = 0.55
-    min_rerank_score: float = 0.70
-    min_score_margin: float = 0.08
+    min_rerank_score: float = 0.75
+    min_score_margin: float = 0.10
     shortlist_size: int = 3
-    timeout_seconds: float = 10.0
-
-
-ChunkVectorLoader = Callable[
-    [list[str], int],
-    Awaitable[dict[str, list[float]]],
-]
-LexicalScorer = Callable[[str, list[str]], list[float] | np.ndarray]
+    max_evidence_units: int = 2
+    max_images: int = 2
+    timeout_seconds: float = 0.9
 
 
 def _clean_piece(piece: str) -> str:
@@ -145,7 +142,7 @@ def split_evidence_units(answer: str) -> list[EvidenceUnit]:
         for match in _EVIDENCE_SENTENCE_PATTERN.finditer(block)
     ]
     units: list[EvidenceUnit] = []
-    seen: set[tuple[str, tuple[int, ...]]] = set()
+    seen_texts: set[str] = set()
     pending_heading = ""
 
     for raw_piece in raw_pieces:
@@ -165,13 +162,10 @@ def split_evidence_units(answer: str) -> list[EvidenceUnit]:
         if pending_heading:
             piece = f"{pending_heading}：{piece}"
             pending_heading = ""
-        if not citations or len(piece) < 5:
+        if not citations or len(piece) < 5 or piece in seen_texts:
             continue
 
-        key = (piece, citations)
-        if key in seen:
-            continue
-        seen.add(key)
+        seen_texts.add(piece)
         units.append(
             EvidenceUnit(
                 index=len(units),
@@ -180,37 +174,6 @@ def split_evidence_units(answer: str) -> list[EvidenceUnit]:
             )
         )
     return units
-
-
-def split_evidence_segments(question: str, answer: str) -> list[EvidenceSegment]:
-    question_context = (question or "").strip()
-    raw = [_clean_piece(piece) for piece in _SENTENCE_BOUNDARY.split(answer or "")]
-    raw = [piece for piece in raw if piece and not _MARKDOWN_ONLY.fullmatch(piece) and not _is_meta_only(piece)]
-
-    merged: list[str] = []
-    pending_heading = ""
-    for piece in raw:
-        is_heading = len(piece) <= 12 and not re.search(r"[。！？!?；;：:]", piece)
-        if is_heading:
-            pending_heading = piece
-            continue
-        if pending_heading:
-            piece = f"{pending_heading}：{piece}"
-            pending_heading = ""
-        if 2 <= len(piece) < 5 and question_context:
-            piece = f"{question_context} {piece}"
-        if len(piece) >= 5:
-            merged.append(piece)
-    return [EvidenceSegment(index=index, text=text) for index, text in enumerate(merged)]
-
-
-def _usable_vector(vector: object, dim: int) -> bool:
-    if not isinstance(vector, (list, tuple, np.ndarray)) or len(vector) != dim:
-        return False
-    try:
-        return bool(np.any(np.asarray(vector, dtype=float)))
-    except (TypeError, ValueError):
-        return False
 
 
 def _finite_score(value: object) -> bool:
@@ -249,60 +212,32 @@ def build_unit_shortlist(
             retrieval_similarity_threshold,
         )
     ]
+    eligible_ids = {id(chunk) for chunk in eligible}
     cited = [
         chunks[index]
         for index in unit.citation_indexes
-        if 0 <= index < len(chunks) and chunks[index] in eligible
+        if 0 <= index < len(chunks)
+        and id(chunks[index]) in eligible_ids
     ]
     ordered: list[EvidenceChunk] = []
+    seen_chunk_ids: set[str] = set()
     for chunk in cited + sorted(
         eligible,
         key=lambda item: item.retrieval_rank,
     ):
-        if chunk not in ordered:
+        if chunk.chunk_id not in seen_chunk_ids:
+            seen_chunk_ids.add(chunk.chunk_id)
             ordered.append(chunk)
         if len(ordered) == shortlist_size:
             break
     return ordered
 
 
-def _tokenize(text: str) -> list[str]:
-    from rag.nlp import rag_tokenizer
-
-    return [token for token in rag_tokenizer.tokenize(text or "").split() if token]
-
-
-def _lexical_scores(
-    query_tokens: list[str],
-    document_tokens: list[list[str]],
-) -> np.ndarray:
-    query_set = set(query_tokens)
-    if not query_set:
-        return np.zeros(len(document_tokens), dtype=float)
-    return np.asarray(
-        [len(query_set.intersection(tokens)) / len(query_set) for tokens in document_tokens],
-        dtype=float,
-    )
-
-
-def _cosine_scores(
-    query_vector: np.ndarray,
-    document_vectors: list[list[float]],
-) -> np.ndarray:
-    matrix = np.asarray(document_vectors, dtype=float)
-    query_norm = float(np.linalg.norm(query_vector))
-    document_norms = np.linalg.norm(matrix, axis=1)
-    denominators = document_norms * query_norm
-    scores = np.zeros(len(matrix), dtype=float)
-    valid = denominators > 0
-    scores[valid] = (matrix[valid] @ query_vector) / denominators[valid]
-    return scores
-
-
 def _empty_resolution(
     started_at: float,
     reason: str,
     unmatched_segments: list[int],
+    decisions: list[EvidenceDecision] | None = None,
 ) -> EvidenceResolution:
     return EvidenceResolution(
         used_chunk_ids=[],
@@ -311,170 +246,260 @@ def _empty_resolution(
         status="no_match",
         duration_ms=(timer() - started_at) * 1000,
         reason=reason,
+        decisions=decisions or [],
     )
+
+
+def _rerank_query(question: str, unit: EvidenceUnit) -> str:
+    return (
+        f"用户原始问题：\n{question.strip()}\n\n"
+        f"回答中的相关回答点：\n{unit.text}"
+    )
+
+
+async def _rerank_unit(
+    question: str,
+    unit: EvidenceUnit,
+    shortlist: list[EvidenceChunk],
+    rerank_model,
+) -> np.ndarray:
+    scores, _ = await thread_pool_exec(
+        rerank_model.similarity,
+        _rerank_query(question, unit),
+        [chunk.content for chunk in shortlist],
+    )
+    values = np.asarray(scores, dtype=float)
+    if values.ndim != 1 or len(values) != len(shortlist):
+        raise ValueError(
+            "reranker result shape does not match shortlist"
+        )
+    if not np.all(np.isfinite(values)):
+        raise ValueError("reranker returned non-finite scores")
+    return values
 
 
 async def resolve_evidence(
     question: str,
     answer: str,
     chunks: list[EvidenceChunk],
-    embedding_model,
     rerank_model,
-    chunk_vector_loader: ChunkVectorLoader,
-    vector_similarity_weight: float,
+    retrieval_similarity_threshold: float,
     config: EvidenceConfig | None = None,
-    lexical_scorer: LexicalScorer | None = None,
 ) -> EvidenceResolution:
     started_at = timer()
     config = config or EvidenceConfig()
-    segments = split_evidence_segments(question, answer)
-    segment_indexes = [segment.index for segment in segments]
-    if not segments or not chunks:
+    try:
+        units = split_evidence_units(answer)
+    except EvidenceParseError:
         return _empty_resolution(
             started_at,
-            "no_segments_or_chunks",
-            segment_indexes,
-        )
-    if embedding_model is None or rerank_model is None:
-        return EvidenceResolution(
-            used_chunk_ids=[],
-            matches=[],
-            unmatched_segments=segment_indexes,
-            status="error",
-            duration_ms=(timer() - started_at) * 1000,
-            reason="model_unavailable",
+            "malformed_think_markup",
+            [],
         )
 
-    try:
-        segment_vectors, _ = await thread_pool_exec(
-            embedding_model.encode,
-            [segment.text for segment in segments],
-        )
-        segment_vectors = np.asarray(segment_vectors, dtype=float)
-        if segment_vectors.ndim != 2 or segment_vectors.shape[0] != len(segments) or segment_vectors.shape[1] == 0:
-            raise ValueError("embedding result shape does not match evidence segments")
-        dim = int(segment_vectors.shape[1])
-
-        missing_ids = list(dict.fromkeys(chunk.chunk_id for chunk in chunks if not _usable_vector(chunk.vector, dim)))
-        loaded_vectors = await chunk_vector_loader(missing_ids, dim) if missing_ids else {}
-
-        usable_chunks: list[EvidenceChunk] = []
-        chunk_vectors: list[list[float]] = []
-        for chunk in chunks:
-            vector = chunk.vector if _usable_vector(chunk.vector, dim) else loaded_vectors.get(chunk.chunk_id)
-            if not _usable_vector(vector, dim):
-                continue
-            usable_chunks.append(chunk)
-            chunk_vectors.append(np.asarray(vector, dtype=float).tolist())
-        if not usable_chunks:
-            return _empty_resolution(
-                started_at,
-                "no_chunk_vectors",
-                segment_indexes,
-            )
-
-        chunk_contents = [chunk.content for chunk in usable_chunks]
-        chunk_tokens = None if lexical_scorer else [_tokenize(content) for content in chunk_contents]
-        vector_weight = min(
-            1.0,
-            max(0.0, float(vector_similarity_weight)),
-        )
-        term_weight = 1.0 - vector_weight
-        shortlists: list[tuple[EvidenceSegment, list[tuple[int, float]]]] = []
-        for segment, segment_vector in zip(segments, segment_vectors):
-            vector_scores = _cosine_scores(
-                segment_vector,
-                chunk_vectors,
-            )
-            term_scores = np.asarray(
-                (
-                    lexical_scorer(segment.text, chunk_contents)
-                    if lexical_scorer
-                    else _lexical_scores(
-                        _tokenize(segment.text),
-                        chunk_tokens or [],
-                    )
-                ),
-                dtype=float,
-            )
-            if len(term_scores) != len(usable_chunks):
-                raise ValueError("lexical scorer result shape does not match chunks")
-            hybrid_scores = vector_scores * vector_weight + term_scores * term_weight
-            hybrid_scores = np.asarray(hybrid_scores, dtype=float)
-            order = np.argsort(hybrid_scores)[::-1]
-            selected = [(int(index), float(hybrid_scores[index])) for index in order[: config.shortlist_size]]
-            shortlists.append((segment, selected))
-
-        async def rerank_one(
-            segment: EvidenceSegment,
-            selected: list[tuple[int, float]],
-        ) -> np.ndarray:
-            documents = [usable_chunks[index].content for index, _ in selected]
-            scores, _ = await thread_pool_exec(
-                rerank_model.similarity,
-                segment.text,
-                documents,
-            )
-            return np.asarray(scores, dtype=float)
-
-        rerank_scores = await asyncio.gather(*[rerank_one(segment, selected) for segment, selected in shortlists])
-
-        matches: list[EvidenceMatch] = []
-        unmatched_segments: list[int] = []
-        for (segment, selected), scores in zip(
-            shortlists,
-            rerank_scores,
-        ):
-            if len(scores) != len(selected):
-                raise ValueError("reranker result shape does not match shortlist")
-            ranked = sorted(
-                (
-                    (
-                        chunk_index,
-                        hybrid_score,
-                        float(rerank_score),
-                    )
-                    for (chunk_index, hybrid_score), rerank_score in zip(selected, scores)
-                ),
-                key=lambda item: item[2],
-                reverse=True,
-            )
-            qualified = [item for item in ranked if item[1] >= config.min_hybrid_score and item[2] >= config.min_rerank_score]
-            if len(ranked) > 1 and ranked[0][2] - ranked[1][2] < config.min_score_margin:
-                qualified = []
-            if not qualified:
-                unmatched_segments.append(segment.index)
-                continue
-            for chunk_index, hybrid_score, rerank_score in qualified:
-                matches.append(
-                    EvidenceMatch(
-                        segment_index=segment.index,
-                        chunk_id=usable_chunks[chunk_index].chunk_id,
-                        hybrid_score=hybrid_score,
-                        rerank_score=rerank_score,
-                    )
+    pre_decisions: list[EvidenceDecision] = []
+    pre_unmatched: list[int] = []
+    work: list[
+        tuple[EvidenceUnit, list[EvidenceChunk], list[str]]
+    ] = []
+    for unit in units:
+        resolved_citations = [
+            chunks[index]
+            for index in unit.citation_indexes
+            if 0 <= index < len(chunks)
+        ]
+        if not resolved_citations:
+            pre_unmatched.append(unit.index)
+            pre_decisions.append(
+                EvidenceDecision(
+                    unit_index=unit.index,
+                    cited_chunk_ids=[],
+                    candidate_chunk_ids=[],
+                    selected_chunk_id=None,
+                    rerank_scores=[],
+                    margin=None,
+                    reason="citation_not_found",
                 )
+            )
+            continue
 
-        used_chunk_ids = list(dict.fromkeys(match.chunk_id for match in matches))
-        return EvidenceResolution(
-            used_chunk_ids=used_chunk_ids,
-            matches=matches,
-            unmatched_segments=unmatched_segments,
-            status="resolved" if used_chunk_ids else "no_match",
-            duration_ms=(timer() - started_at) * 1000,
-            reason=(None if used_chunk_ids else "below_confidence_threshold"),
+        shortlist = build_unit_shortlist(
+            unit,
+            chunks,
+            retrieval_similarity_threshold,
+            config.shortlist_size,
         )
-    except Exception as exc:
-        LOGGER.warning(
-            "evidence resolution failed: %s",
-            exc,
-            exc_info=True,
+        shortlist_ids = {
+            chunk.chunk_id for chunk in shortlist
+        }
+        cited_chunk_ids = [
+            chunk.chunk_id
+            for chunk in resolved_citations
+            if chunk.chunk_id in shortlist_ids
+        ]
+        if not cited_chunk_ids:
+            pre_unmatched.append(unit.index)
+            pre_decisions.append(
+                EvidenceDecision(
+                    unit_index=unit.index,
+                    cited_chunk_ids=[
+                        chunk.chunk_id
+                        for chunk in resolved_citations
+                    ],
+                    candidate_chunk_ids=[
+                        chunk.chunk_id for chunk in shortlist
+                    ],
+                    selected_chunk_id=None,
+                    rerank_scores=[],
+                    margin=None,
+                    reason="no_image_candidates",
+                )
+            )
+            continue
+
+        work.append((unit, shortlist, cited_chunk_ids))
+        if len(work) == config.max_evidence_units:
+            break
+
+    if not work:
+        if pre_decisions:
+            reason = pre_decisions[0].reason
+            unmatched = pre_unmatched
+        else:
+            reason = "no_visible_evidence_units"
+            unmatched = [unit.index for unit in units]
+        return _empty_resolution(
+            started_at,
+            reason,
+            unmatched,
+            pre_decisions,
         )
-        return EvidenceResolution(
-            used_chunk_ids=[],
-            matches=[],
-            unmatched_segments=segment_indexes,
-            status="error",
-            duration_ms=(timer() - started_at) * 1000,
-            reason=type(exc).__name__,
+
+    rerank_results = await asyncio.gather(
+        *[
+            _rerank_unit(
+                question,
+                unit,
+                shortlist,
+                rerank_model,
+            )
+            for unit, shortlist, _ in work
+        ],
+        return_exceptions=True,
+    )
+
+    used_chunk_ids: list[str] = []
+    matches: list[EvidenceMatch] = []
+    decisions: list[EvidenceDecision] = []
+    unmatched_segments: list[int] = list(pre_unmatched)
+    seen_image_ids: set[str] = set()
+    saw_rerank_error = False
+
+    for (unit, shortlist, cited_chunk_ids), result in zip(
+        work,
+        rerank_results,
+    ):
+        if isinstance(result, BaseException):
+            saw_rerank_error = True
+            unmatched_segments.append(unit.index)
+            decisions.append(
+                EvidenceDecision(
+                    unit_index=unit.index,
+                    cited_chunk_ids=cited_chunk_ids,
+                    candidate_chunk_ids=[
+                        chunk.chunk_id for chunk in shortlist
+                    ],
+                    selected_chunk_id=None,
+                    rerank_scores=[],
+                    margin=None,
+                    reason="rerank_error",
+                )
+            )
+            continue
+
+        ranked = sorted(
+            zip(shortlist, result),
+            key=lambda item: float(item[1]),
+            reverse=True,
         )
+        winner, winner_score = ranked[0]
+        margin = (
+            float(winner_score) - float(ranked[1][1])
+            if len(ranked) > 1
+            else None
+        )
+        reason = "accepted"
+        if winner.chunk_id not in cited_chunk_ids:
+            reason = "cited_candidate_not_top1"
+        elif float(winner_score) < config.min_rerank_score:
+            reason = "below_rerank_threshold"
+        elif (
+            margin is not None
+            and margin < config.min_score_margin
+        ):
+            reason = "below_score_margin"
+        elif str(winner.image_id) in seen_image_ids:
+            reason = "duplicate_image"
+
+        selected_chunk_id = (
+            winner.chunk_id if reason == "accepted" else None
+        )
+        decisions.append(
+            EvidenceDecision(
+                unit_index=unit.index,
+                cited_chunk_ids=cited_chunk_ids,
+                candidate_chunk_ids=[
+                    chunk.chunk_id for chunk in shortlist
+                ],
+                selected_chunk_id=selected_chunk_id,
+                rerank_scores=[
+                    (chunk.chunk_id, float(score))
+                    for chunk, score in ranked
+                ],
+                margin=margin,
+                reason=reason,
+            )
+        )
+        if reason != "accepted":
+            unmatched_segments.append(unit.index)
+            continue
+
+        seen_image_ids.add(str(winner.image_id))
+        used_chunk_ids.append(winner.chunk_id)
+        matches.append(
+            EvidenceMatch(
+                segment_index=unit.index,
+                chunk_id=winner.chunk_id,
+                retrieval_score=winner.similarity,
+                rerank_score=float(winner_score),
+                rerank_margin=margin,
+            )
+        )
+        if len(used_chunk_ids) == config.max_images:
+            break
+
+    all_decisions = sorted(
+        pre_decisions + decisions,
+        key=lambda decision: decision.unit_index,
+    )
+    if used_chunk_ids:
+        status: Literal["resolved", "no_match", "error"] = (
+            "resolved"
+        )
+        reason = None
+    elif saw_rerank_error:
+        status = "error"
+        reason = "rerank_error"
+    else:
+        status = "no_match"
+        reason = all_decisions[0].reason
+
+    return EvidenceResolution(
+        used_chunk_ids=used_chunk_ids,
+        matches=matches,
+        unmatched_segments=unmatched_segments,
+        status=status,
+        duration_ms=(timer() - started_at) * 1000,
+        reason=reason,
+        decisions=all_decisions,
+    )

@@ -1,15 +1,48 @@
+import dataclasses
+
 import numpy as np
 import pytest
 
-from api.channels.bootstrap import _images_for_used_chunks
-from api.channels.core.base import OutgoingImage
 from rag.nlp import evidence as evidence_module
-from rag.nlp.evidence import (
-    EvidenceChunk,
-    EvidenceConfig,
-    resolve_evidence,
-    split_evidence_segments,
-)
+from rag.nlp.evidence import EvidenceConfig, resolve_evidence
+
+
+class FakeReranker:
+    def __init__(self, scores):
+        self.scores = scores
+        self.calls = []
+
+    def similarity(self, query, documents):
+        self.calls.append((query, list(documents)))
+        return np.asarray(
+            [self.scores[(query, document)] for document in documents]
+        ), 0
+
+
+def _candidate_chunk(
+    chunk_id,
+    image_id,
+    rank,
+    similarity=0.8,
+    vector_similarity=0.8,
+    term_similarity=0.8,
+):
+    return evidence_module.EvidenceChunk(
+        chunk_id=chunk_id,
+        content=f"{chunk_id} 内容",
+        image_id=image_id,
+        similarity=similarity,
+        vector_similarity=vector_similarity,
+        term_similarity=term_similarity,
+        retrieval_rank=rank,
+    )
+
+
+def _rerank_query(question, unit_text):
+    return (
+        f"用户原始问题：\n{question}\n\n"
+        f"回答中的相关回答点：\n{unit_text}"
+    )
 
 
 def test_split_evidence_units_removes_think_and_preserves_citations():
@@ -63,25 +96,6 @@ def test_split_evidence_units_reads_non_ascii_digits():
     assert [unit.citation_indexes for unit in units] == [(2,), (1,)]
 
 
-def _candidate_chunk(
-    chunk_id,
-    image_id,
-    rank,
-    similarity=0.8,
-    vector_similarity=0.8,
-    term_similarity=0.8,
-):
-    return evidence_module.EvidenceChunk(
-        chunk_id=chunk_id,
-        content=f"{chunk_id} 内容",
-        image_id=image_id,
-        similarity=similarity,
-        vector_similarity=vector_similarity,
-        term_similarity=term_similarity,
-        retrieval_rank=rank,
-    )
-
-
 def test_shortlist_keeps_cited_image_then_adds_top_ranked_competitors():
     chunks = [
         _candidate_chunk("c0", "img0", 0),
@@ -120,439 +134,242 @@ def test_shortlist_ignores_out_of_range_citation_without_substitution():
     assert unit.citation_indexes == (9,)
 
 
-class FakeEmbedding:
-    def __init__(self, vectors):
-        self.vectors = vectors
-        self.calls = []
+def test_evidence_config_uses_precision_first_defaults():
+    config = EvidenceConfig()
 
-    def encode(self, texts):
-        self.calls.append(list(texts))
-        return np.asarray([self.vectors[text] for text in texts]), 0
-
-
-class FakeReranker:
-    def __init__(self, scores):
-        self.scores = scores
-        self.calls = []
-
-    def similarity(self, query, documents):
-        self.calls.append((query, list(documents)))
-        return np.asarray([self.scores[(query, document)] for document in documents]), 0
-
-
-@pytest.mark.parametrize(
-    ("question", "answer", "expected_segments"),
-    [
-        (
-            "忘记打卡了怎么办",
-            "进入考勤日历，点击异常记录后提交补签。",
-            ["进入考勤日历，点击异常记录后提交补签。"],
-        ),
-        (
-            "补卡路径是什么",
-            "企业微信 → 工作台 → 半岛 EHR 系统 → 考勤日历。",
-            ["企业微信 → 工作台 → 半岛 EHR 系统 → 考勤日历。"],
-        ),
-        (
-            "有没有处理考勤异常的流程图",
-            "知识库未找到流程图。处理入口位于考勤日历的异常记录。",
-            ["处理入口位于考勤日历的异常记录。"],
-        ),
-        (
-            "考勤异常在哪里处理",
-            "在考勤日历中点击异常记录即可处理。",
-            ["在考勤日历中点击异常记录即可处理。"],
-        ),
-    ],
-)
-def test_approved_queries_produce_only_business_fact_segments(
-    question,
-    answer,
-    expected_segments,
-):
-    assert [segment.text for segment in split_evidence_segments(question, answer)] == expected_segments
-
-
-def test_split_segments_removes_display_citations_from_copy_only():
-    answer = "处理路径：进入考勤日历。[ID:2]\n点击异常记录后补签。[0]"
-
-    segments = split_evidence_segments("考勤异常怎么处理？", answer)
-
-    assert [segment.text for segment in segments] == [
-        "处理路径：进入考勤日历。",
-        "点击异常记录后补签。",
-    ]
-    assert answer.endswith("[0]")
-
-
-def test_split_segments_ignores_knowledge_availability_but_keeps_business_negation():
-    answer = "知识库未找到流程图，建议联系人事获取截图。\n请假期间不存在迟到情况。\n迟到记录不能通过请假自动补卡。"
-
-    segments = split_evidence_segments("请假后还算迟到吗？", answer)
-
-    assert [segment.text for segment in segments] == [
-        "请假期间不存在迟到情况。",
-        "迟到记录不能通过请假自动补卡。",
-    ]
-
-
-def test_split_segments_merges_short_heading_with_following_fact():
-    segments = split_evidence_segments(
-        "怎么补卡？",
-        "操作步骤\n1. 打开工作台并进入考勤日历。\n2. 点击异常记录后提交补签。",
-    )
-
-    assert [segment.text for segment in segments] == [
-        "操作步骤：打开工作台并进入考勤日历。",
-        "点击异常记录后提交补签。",
-    ]
-    assert [segment.index for segment in segments] == [0, 1]
-
-
-def test_split_segments_uses_question_only_to_contextualize_short_fact():
-    segments = split_evidence_segments("忘记打卡怎么办？", "需补签。")
-
-    assert [segment.text for segment in segments] == [
-        "忘记打卡怎么办？ 需补签。",
-    ]
+    assert config.max_evidence_units == 2
+    assert config.shortlist_size == 3
+    assert config.max_images == 2
+    assert config.min_rerank_score == 0.75
+    assert config.min_score_margin == 0.10
+    assert config.timeout_seconds == 0.9
 
 
 @pytest.mark.asyncio
-async def test_resolver_reuses_vectors_and_reranker_selects_non_first_candidate():
-    answer = "进入考勤日历后点击异常记录。"
+async def test_resolver_rejects_wrong_citation_when_uncited_competitor_wins():
+    question = "怎么查看报销申请的进度？"
+    answer = "进入审批页面查看当前进度。[ID:1]"
     chunks = [
-        EvidenceChunk("c-unrelated", "考勤统计报表说明", "img-wrong"),
-        EvidenceChunk(
-            "c-correct",
-            "工作台进入考勤日历，点击异常记录补签",
-            "img-right",
+        dataclasses.replace(
+            _candidate_chunk("approval", "approval-image", 0),
+            content="进入报销审批页面，查看审批进度和当前节点",
+        ),
+        dataclasses.replace(
+            _candidate_chunk("proxy", "proxy-image", 1),
+            content="设置我的代理人，代理报销或审批",
         ),
     ]
-    embedding = FakeEmbedding({answer: [1.0, 0.0]})
+    query = _rerank_query(question, "进入审批页面查看当前进度。")
     reranker = FakeReranker(
         {
-            (answer, chunks[0].content): 0.30,
-            (answer, chunks[1].content): 0.92,
+            (query, chunks[1].content): 0.62,
+            (query, chunks[0].content): 0.80,
         }
     )
-    loader_calls = []
-
-    async def load_vectors(chunk_ids, dim):
-        loader_calls.append((chunk_ids, dim))
-        return {
-            "c-unrelated": [0.95, 0.05],
-            "c-correct": [0.80, 0.20],
-        }
 
     result = await resolve_evidence(
-        "考勤异常怎么处理？",
-        answer,
-        chunks,
-        embedding,
-        reranker,
-        load_vectors,
-        vector_similarity_weight=0.7,
-        config=EvidenceConfig(min_hybrid_score=0.20),
-    )
-
-    assert embedding.calls == [[answer]]
-    assert loader_calls == [(["c-unrelated", "c-correct"], 2)]
-    assert result.status == "resolved"
-    assert result.used_chunk_ids == ["c-correct"]
-
-
-@pytest.mark.asyncio
-async def test_resolver_never_maps_unrelated_first_candidate_image():
-    answer = "进入考勤日历并处理异常记录。"
-    chunks = [
-        EvidenceChunk(
-            "unrelated-image",
-            "员工餐厅菜单",
-            "wrong-image",
-        ),
-        EvidenceChunk(
-            "correct-image",
-            "进入考勤日历并处理异常记录",
-            "correct-process-image",
-        ),
-        EvidenceChunk(
-            "supporting-text",
-            "异常记录支持提交补签",
-            None,
-        ),
-    ]
-    embedding = FakeEmbedding({answer: [1.0, 0.0]})
-    reranker = FakeReranker(
-        {
-            (answer, chunks[0].content): 0.22,
-            (answer, chunks[1].content): 0.93,
-            (answer, chunks[2].content): 0.81,
-        }
-    )
-
-    async def load_vectors(chunk_ids, dim):
-        return {chunk_id: [1.0, 0.0] for chunk_id in chunk_ids}
-
-    result = await resolve_evidence(
-        "怎么处理考勤异常？",
-        answer,
-        chunks,
-        embedding,
-        reranker,
-        load_vectors,
-        vector_similarity_weight=1.0,
-    )
-
-    formatted_chunks = [{"id": chunk.chunk_id, "image_id": chunk.image_id} for chunk in chunks]
-    assert result.used_chunk_ids == ["correct-image", "supporting-text"]
-    assert _images_for_used_chunks(
-        formatted_chunks,
-        result.used_chunk_ids,
-    ) == [OutgoingImage("correct-process-image")]
-
-
-@pytest.mark.asyncio
-async def test_resolver_rejects_two_qualified_candidates_inside_margin():
-    answer = "点击异常记录进行处理。"
-    chunks = [
-        EvidenceChunk("c-a", "点击异常记录补签", "img-a"),
-        EvidenceChunk("c-b", "点击异常记录请假", "img-b"),
-    ]
-    embedding = FakeEmbedding({answer: [1.0, 0.0]})
-    reranker = FakeReranker(
-        {
-            (answer, chunks[0].content): 0.91,
-            (answer, chunks[1].content): 0.90,
-        }
-    )
-
-    async def load_vectors(chunk_ids, dim):
-        return {"c-a": [1.0, 0.0], "c-b": [0.99, 0.01]}
-
-    result = await resolve_evidence(
-        "怎么处理？",
-        answer,
-        chunks,
-        embedding,
-        reranker,
-        load_vectors,
-        vector_similarity_weight=1.0,
+        question=question,
+        answer=answer,
+        chunks=chunks,
+        rerank_model=reranker,
+        retrieval_similarity_threshold=0.2,
     )
 
     assert result.status == "no_match"
     assert result.used_chunk_ids == []
+    assert result.decisions[0].reason == "cited_candidate_not_top1"
 
 
 @pytest.mark.asyncio
-async def test_resolver_uses_injected_lexical_scorer_for_production_weights():
-    answer = "执行操作。"
+async def test_resolver_rejects_top1_inside_margin():
+    question = "怎么处理审批？"
+    answer = "打开审批记录处理。[ID:0]"
     chunks = [
-        EvidenceChunk("c-a", "候选甲", "img-a"),
-        EvidenceChunk("c-b", "候选乙", "img-b"),
-    ]
-    embedding = FakeEmbedding({answer: [1.0, 0.0]})
-    reranker = FakeReranker(
-        {
-            (answer, chunks[0].content): 0.85,
-            (answer, chunks[1].content): 0.95,
-        }
-    )
-    lexical_calls = []
-
-    async def load_vectors(chunk_ids, dim):
-        return {"c-a": [1.0, 0.0], "c-b": [1.0, 0.0]}
-
-    def lexical_scorer(query_text, documents):
-        lexical_calls.append((query_text, list(documents)))
-        return [0.0, 1.0]
-
-    result = await resolve_evidence(
-        "怎么操作？",
-        answer,
-        chunks,
-        embedding,
-        reranker,
-        load_vectors,
-        vector_similarity_weight=0.0,
-        lexical_scorer=lexical_scorer,
-    )
-
-    assert lexical_calls == [
-        (
-            answer,
-            [chunks[0].content, chunks[1].content],
-        )
-    ]
-    assert result.used_chunk_ids == ["c-b"]
-
-
-@pytest.mark.asyncio
-async def test_resolver_keeps_chunks_for_different_segments_in_answer_order():
-    answer = "先进入考勤日历。然后点击异常记录补签。"
-    chunks = [
-        EvidenceChunk(
-            "c-calendar",
-            "从工作台进入考勤日历",
-            "img-calendar",
+        dataclasses.replace(
+            _candidate_chunk("a", "img-a", 0),
+            content="打开审批记录",
         ),
-        EvidenceChunk(
-            "c-repair",
-            "选择异常记录并提交补签",
-            "img-repair",
+        dataclasses.replace(
+            _candidate_chunk("b", "img-b", 1),
+            content="打开审批流程",
         ),
     ]
-    embedding = FakeEmbedding(
-        {
-            "先进入考勤日历。": [1.0, 0.0],
-            "然后点击异常记录补签。": [0.0, 1.0],
-        }
-    )
+    query = _rerank_query(question, "打开审批记录处理。")
     reranker = FakeReranker(
         {
-            ("先进入考勤日历。", chunks[0].content): 0.95,
-            ("先进入考勤日历。", chunks[1].content): 0.20,
-            ("然后点击异常记录补签。", chunks[0].content): 0.15,
-            ("然后点击异常记录补签。", chunks[1].content): 0.94,
+            (query, chunks[0].content): 0.86,
+            (query, chunks[1].content): 0.80,
         }
     )
 
-    async def load_vectors(chunk_ids, dim):
-        return {
-            "c-calendar": [1.0, 0.0],
-            "c-repair": [0.0, 1.0],
-        }
+    result = await resolve_evidence(question, answer, chunks, reranker, 0.2)
 
-    result = await resolve_evidence(
-        "怎么补卡？",
-        answer,
-        chunks,
-        embedding,
-        reranker,
-        load_vectors,
-        0.7,
-    )
-
-    assert result.used_chunk_ids == ["c-calendar", "c-repair"]
-
-
-@pytest.mark.asyncio
-async def test_resolver_rejects_lone_winner_when_runner_up_is_inside_margin():
-    answer = "点击异常记录进行处理。"
-    chunks = [
-        EvidenceChunk("c-a", "点击异常记录补签", "img-a"),
-        EvidenceChunk("c-b", "点击异常记录请假", "img-b"),
-    ]
-    embedding = FakeEmbedding({answer: [1.0, 0.0]})
-    reranker = FakeReranker(
-        {
-            (answer, chunks[0].content): 0.74,
-            (answer, chunks[1].content): 0.68,
-        }
-    )
-
-    async def load_vectors(chunk_ids, dim):
-        return {"c-a": [1.0, 0.0], "c-b": [0.99, 0.01]}
-
-    result = await resolve_evidence(
-        "怎么处理？",
-        answer,
-        chunks,
-        embedding,
-        reranker,
-        load_vectors,
-        0.7,
-    )
-
-    assert result.status == "no_match"
     assert result.used_chunk_ids == []
+    assert result.decisions[0].reason == "below_score_margin"
 
 
 @pytest.mark.asyncio
-async def test_resolver_drops_zero_and_wrong_dimension_vectors():
-    answer = "有效事实。"
+async def test_two_distinct_units_can_select_two_images_in_answer_order():
+    question = "怎么查审批进度，怎么设置代理人？"
+    answer = "查看审批记录。[ID:0]\n设置我的代理人。[ID:1]"
     chunks = [
-        EvidenceChunk("zero", "零向量"),
-        EvidenceChunk("wrong-dim", "错误维度"),
-        EvidenceChunk("valid", "有效事实证据", "img-valid"),
+        dataclasses.replace(
+            _candidate_chunk("approval", "img-approval", 0),
+            content="查看审批进度",
+        ),
+        dataclasses.replace(
+            _candidate_chunk("proxy", "img-proxy", 1),
+            content="设置我的代理人",
+        ),
     ]
-    embedding = FakeEmbedding({answer: [1.0, 0.0]})
-    reranker = FakeReranker({(answer, "有效事实证据"): 0.95})
-
-    async def load_vectors(chunk_ids, dim):
-        assert dim == 2
-        return {
-            "zero": [0.0, 0.0],
-            "wrong-dim": [1.0],
-            "valid": [1.0, 0.0],
+    first_query = _rerank_query(question, "查看审批记录。")
+    second_query = _rerank_query(question, "设置我的代理人。")
+    reranker = FakeReranker(
+        {
+            (first_query, chunks[0].content): 0.93,
+            (first_query, chunks[1].content): 0.30,
+            (second_query, chunks[1].content): 0.94,
+            (second_query, chunks[0].content): 0.25,
         }
-
-    result = await resolve_evidence(
-        "问题",
-        answer,
-        chunks,
-        embedding,
-        reranker,
-        load_vectors,
-        0.7,
     )
 
-    assert result.used_chunk_ids == ["valid"]
+    result = await resolve_evidence(question, answer, chunks, reranker, 0.2)
+
+    assert result.used_chunk_ids == ["approval", "proxy"]
+    assert [decision.reason for decision in result.decisions] == [
+        "accepted",
+        "accepted",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_resolver_does_not_fallback_when_reranker_raises():
-    answer = "有效事实。"
-    embedding = FakeEmbedding({answer: [1.0, 0.0]})
+async def test_one_unit_never_selects_two_images():
+    question = "怎么查审批进度？"
+    answer = "查看审批记录和当前节点。[ID:0][ID:1]"
+    chunks = [
+        dataclasses.replace(
+            _candidate_chunk("a", "img-a", 0),
+            content="查看审批记录",
+        ),
+        dataclasses.replace(
+            _candidate_chunk("b", "img-b", 1),
+            content="查看审批当前节点",
+        ),
+    ]
+    query = _rerank_query(question, "查看审批记录和当前节点。")
+    reranker = FakeReranker(
+        {
+            (query, chunks[0].content): 0.92,
+            (query, chunks[1].content): 0.70,
+        }
+    )
 
-    class BrokenReranker:
+    result = await resolve_evidence(question, answer, chunks, reranker, 0.2)
+
+    assert result.used_chunk_ids == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_single_candidate_still_requires_absolute_threshold():
+    question = "怎么查审批进度？"
+    answer = "查看审批记录。[ID:0]"
+    chunk = dataclasses.replace(
+        _candidate_chunk("approval", "img-approval", 0),
+        content="查看审批记录",
+    )
+    query = _rerank_query(question, "查看审批记录。")
+    reranker = FakeReranker({(query, chunk.content): 0.74})
+
+    result = await resolve_evidence(
+        question,
+        answer,
+        [chunk],
+        reranker,
+        0.2,
+    )
+
+    assert result.used_chunk_ids == []
+    assert result.decisions[0].margin is None
+    assert result.decisions[0].reason == "below_rerank_threshold"
+
+
+@pytest.mark.asyncio
+async def test_two_units_with_same_image_id_are_deduplicated():
+    question = "怎么查进度和节点？"
+    answer = "查看审批进度。[ID:0]\n查看审批节点。[ID:1]"
+    chunks = [
+        dataclasses.replace(
+            _candidate_chunk("progress", "shared-image", 0),
+            content="查看审批进度",
+        ),
+        dataclasses.replace(
+            _candidate_chunk("node", "shared-image", 1),
+            content="查看审批节点",
+        ),
+    ]
+    first_query = _rerank_query(question, "查看审批进度。")
+    second_query = _rerank_query(question, "查看审批节点。")
+    reranker = FakeReranker(
+        {
+            (first_query, chunks[0].content): 0.95,
+            (first_query, chunks[1].content): 0.40,
+            (second_query, chunks[0].content): 0.30,
+            (second_query, chunks[1].content): 0.94,
+        }
+    )
+
+    result = await resolve_evidence(question, answer, chunks, reranker, 0.2)
+
+    assert result.used_chunk_ids == ["progress"]
+    assert [decision.reason for decision in result.decisions] == [
+        "accepted",
+        "duplicate_image",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_finite_rerank_output_is_fail_closed():
+    class NonFiniteReranker:
         def similarity(self, query, documents):
-            raise RuntimeError("reranker down")
-
-    async def load_vectors(chunk_ids, dim):
-        return {"c1": [1.0, 0.0]}
+            return np.asarray([float("nan")]), 0
 
     result = await resolve_evidence(
-        "问题",
-        answer,
-        [EvidenceChunk("c1", "有效事实证据", "img-1")],
-        embedding,
-        BrokenReranker(),
-        load_vectors,
-        0.7,
+        "怎么查审批？",
+        "查看审批。[ID:0]",
+        [_candidate_chunk("approval", "img", 0)],
+        NonFiniteReranker(),
+        0.2,
     )
 
     assert result.status == "error"
     assert result.used_chunk_ids == []
+    assert result.decisions[0].reason == "rerank_error"
 
 
 @pytest.mark.asyncio
-async def test_resolver_deduplicates_chunk_across_segments_by_first_use():
-    answer = "第一条事实。第二条事实。"
-    embedding = FakeEmbedding(
-        {
-            "第一条事实。": [1.0, 0.0],
-            "第二条事实。": [1.0, 0.0],
-        }
-    )
-    chunk = EvidenceChunk("shared", "同时支撑两条事实", "img-shared")
-    reranker = FakeReranker(
-        {
-            ("第一条事实。", chunk.content): 0.95,
-            ("第二条事实。", chunk.content): 0.91,
-        }
-    )
-
-    async def load_vectors(chunk_ids, dim):
-        return {"shared": [1.0, 0.0]}
-
+async def test_missing_citation_does_not_substitute_top_retrieval():
     result = await resolve_evidence(
-        "问题",
-        answer,
-        [chunk],
-        embedding,
-        reranker,
-        load_vectors,
-        0.7,
+        "怎么查审批？",
+        "查看审批。[ID:9]",
+        [_candidate_chunk("approval", "img", 0)],
+        FakeReranker({}),
+        0.2,
     )
 
-    assert result.used_chunk_ids == ["shared"]
+    assert result.status == "no_match"
+    assert result.used_chunk_ids == []
+    assert result.reason == "citation_not_found"
+
+
+@pytest.mark.asyncio
+async def test_malformed_hidden_reasoning_fails_closed():
+    result = await resolve_evidence(
+        "怎么查审批？",
+        "<think>未闭合",
+        [_candidate_chunk("approval", "img", 0)],
+        FakeReranker({}),
+        0.2,
+    )
+
+    assert result.status == "no_match"
+    assert result.reason == "malformed_think_markup"
