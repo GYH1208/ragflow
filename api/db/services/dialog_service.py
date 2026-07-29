@@ -337,6 +337,26 @@ async def async_chat_solo(dialog, messages, stream=True, session_id=None):
         yield {"answer": answer, "reference": {}, "audio_binary": tts(tts_mdl, answer), "prompt": "", "created_at": time.time()}
 
 
+def get_rerank_model(
+    dialog,
+    trace_context=None,
+    langfuse_session_id=None,
+):
+    if not dialog.rerank_id:
+        return None
+    rerank_model_config = get_model_config_from_provider_instance(
+        dialog.tenant_id,
+        LLMType.RERANK,
+        dialog.rerank_id,
+    )
+    return LLMBundle(
+        dialog.tenant_id,
+        rerank_model_config,
+        trace_context=trace_context,
+        langfuse_session_id=langfuse_session_id,
+    )
+
+
 def get_retrieval_models(dialog, trace_context=None, langfuse_session_id=None):
     embd_mdl, rerank_mdl = None, None
     kbs = list(KnowledgebaseService.get_by_ids(dialog.kb_ids))
@@ -351,9 +371,11 @@ def get_retrieval_models(dialog, trace_context=None, langfuse_session_id=None):
         if not embd_mdl:
             raise LookupError("Embedding model(%s) not found" % embedding_list[0])
 
-    if dialog.rerank_id:
-        rerank_model_config = get_model_config_from_provider_instance(dialog.tenant_id, LLMType.RERANK, dialog.rerank_id)
-        rerank_mdl = LLMBundle(dialog.tenant_id, rerank_model_config, trace_context=trace_context, langfuse_session_id=langfuse_session_id)
+    rerank_mdl = get_rerank_model(
+        dialog,
+        trace_context=trace_context,
+        langfuse_session_id=langfuse_session_id,
+    )
 
     return kbs, embd_mdl, rerank_mdl
 

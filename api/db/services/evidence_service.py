@@ -4,8 +4,7 @@ import asyncio
 import logging
 from timeit import default_timer as timer
 
-from api.db.services.dialog_service import get_retrieval_models
-from common import settings
+from api.db.services.dialog_service import get_rerank_model
 from rag.nlp.evidence import (
     EvidenceChunk,
     EvidenceConfig,
@@ -14,6 +13,13 @@ from rag.nlp.evidence import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _score(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
 
 
 def _error_resolution(
@@ -42,17 +48,27 @@ class EvidenceService:
     ) -> EvidenceResolution:
         started_at = timer()
         config = config or EvidenceConfig()
-        embedding_model = None
+        deadline = started_at + config.timeout_seconds
         rerank_model = None
         try:
             evidence_chunks = [
                 EvidenceChunk(
                     chunk_id=str(chunk.get("id") or ""),
                     content=str(chunk.get("content") or ""),
-                    image_id=(str(chunk.get("image_id") or "") or None),
+                    image_id=(
+                        str(chunk.get("image_id") or "") or None
+                    ),
+                    similarity=_score(chunk.get("similarity")),
+                    vector_similarity=_score(
+                        chunk.get("vector_similarity")
+                    ),
+                    term_similarity=_score(
+                        chunk.get("term_similarity")
+                    ),
+                    retrieval_rank=index,
                 )
-                for chunk in chunks
-                if isinstance(chunk, dict) and chunk.get("id") and chunk.get("content")
+                for index, chunk in enumerate(chunks)
+                if isinstance(chunk, dict)
             ]
             if not evidence_chunks:
                 return EvidenceResolution(
@@ -64,38 +80,18 @@ class EvidenceService:
                     reason="no_valid_chunks",
                 )
 
-            kbs, embedding_model, rerank_model = get_retrieval_models(dialog)
-            if embedding_model is None or rerank_model is None:
+            rerank_model = get_rerank_model(dialog)
+            if rerank_model is None:
                 return _error_resolution(
                     started_at,
                     "model_unavailable",
                 )
 
-            tenant_ids = list(dict.fromkeys(kb.tenant_id for kb in kbs))
-
-            async def load_vectors(
-                chunk_ids: list[str],
-                dim: int,
-            ) -> dict[str, list[float]]:
-                return await settings.retriever.fetch_chunk_vectors(
-                    chunk_ids,
-                    tenant_ids,
-                    dialog.kb_ids,
-                    dim,
-                )
-
-            def score_lexical(
-                segment_text: str,
-                documents: list[str],
-            ):
-                from rag.nlp import rag_tokenizer
-
-                queryer = settings.retriever.qryr
-                query_tokens = rag_tokenizer.tokenize(queryer.rmWWW(segment_text)).split()
-                document_tokens = [rag_tokenizer.tokenize(queryer.rmWWW(document)).split() for document in documents]
-                return queryer.token_similarity(
-                    query_tokens,
-                    document_tokens,
+            remaining_seconds = deadline - timer()
+            if remaining_seconds <= 0:
+                return _error_resolution(
+                    started_at,
+                    "rerank_timeout",
                 )
 
             result = await asyncio.wait_for(
@@ -103,49 +99,87 @@ class EvidenceService:
                     question=question,
                     answer=answer,
                     chunks=evidence_chunks,
-                    embedding_model=embedding_model,
                     rerank_model=rerank_model,
-                    chunk_vector_loader=load_vectors,
-                    vector_similarity_weight=(dialog.vector_similarity_weight),
+                    retrieval_similarity_threshold=float(
+                        dialog.similarity_threshold
+                    ),
                     config=config,
-                    lexical_scorer=score_lexical,
                 ),
-                timeout=config.timeout_seconds,
+                timeout=remaining_seconds,
             )
+            score_by_id = {
+                chunk.chunk_id: {
+                    "similarity": round(chunk.similarity, 4),
+                    "vector_similarity": round(
+                        chunk.vector_similarity,
+                        4,
+                    ),
+                    "term_similarity": round(
+                        chunk.term_similarity,
+                        4,
+                    ),
+                    "retrieval_rank": chunk.retrieval_rank,
+                }
+                for chunk in evidence_chunks
+            }
             LOGGER.info(
-                "evidence resolved status=%s candidates=%d used_chunk_ids=%s matches=%s unmatched_segments=%s duration_ms=%.1f",
+                "evidence resolved dialog_id=%s status=%s "
+                "candidates=%d used_chunk_ids=%s decisions=%s "
+                "duration_ms=%.1f",
+                getattr(dialog, "id", ""),
                 result.status,
                 len(evidence_chunks),
                 result.used_chunk_ids,
                 [
                     {
-                        "segment_index": match.segment_index,
-                        "chunk_id": match.chunk_id,
-                        "hybrid_score": round(
-                            match.hybrid_score,
-                            4,
+                        "unit_index": decision.unit_index,
+                        "cited_chunk_ids": (
+                            decision.cited_chunk_ids
                         ),
-                        "rerank_score": round(
-                            match.rerank_score,
-                            4,
+                        "candidate_chunk_ids": (
+                            decision.candidate_chunk_ids
                         ),
+                        "original_scores": {
+                            chunk_id: score_by_id.get(chunk_id)
+                            for chunk_id in (
+                                decision.candidate_chunk_ids
+                            )
+                        },
+                        "selected_chunk_id": (
+                            decision.selected_chunk_id
+                        ),
+                        "rerank_scores": [
+                            (chunk_id, round(score, 4))
+                            for chunk_id, score in (
+                                decision.rerank_scores
+                            )
+                        ],
+                        "margin": (
+                            round(decision.margin, 4)
+                            if decision.margin is not None
+                            else None
+                        ),
+                        "reason": decision.reason,
                     }
-                    for match in result.matches
+                    for decision in result.decisions
                 ],
-                result.unmatched_segments,
                 result.duration_ms,
             )
             return result
-        except asyncio.TimeoutError:  # noqa: UP041 - distinct from TimeoutError on Python 3.10
+        except asyncio.TimeoutError:  # noqa: UP041
             LOGGER.warning(
-                "evidence resolution timed out after %.1fs",
+                "evidence resolution timed out "
+                "reason=rerank_timeout timeout_seconds=%.3f",
                 config.timeout_seconds,
             )
-            return _error_resolution(started_at, "timeout")
+            return _error_resolution(
+                started_at,
+                "rerank_timeout",
+            )
         except Exception as exc:
             LOGGER.warning(
-                "evidence service failed: %s",
-                exc,
+                "evidence service failed error_type=%s",
+                type(exc).__name__,
                 exc_info=True,
             )
             return _error_resolution(
@@ -153,6 +187,8 @@ class EvidenceService:
                 type(exc).__name__,
             )
         finally:
-            for model in (embedding_model, rerank_model):
-                if model is not None and hasattr(model, "close"):
-                    model.close()
+            if (
+                rerank_model is not None
+                and hasattr(rerank_model, "close")
+            ):
+                rerank_model.close()

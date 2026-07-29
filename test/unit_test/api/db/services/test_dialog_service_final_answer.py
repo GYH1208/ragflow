@@ -76,6 +76,62 @@ def _install_cv2_stub_if_unavailable():
 _install_cv2_stub_if_unavailable()
 
 from api.db.services import dialog_service  # noqa: E402
+from common.constants import LLMType  # noqa: E402
+
+
+def test_get_rerank_model_returns_none_without_rerank_id():
+    dialog = SimpleNamespace(
+        tenant_id="tenant-1",
+        rerank_id="",
+    )
+
+    assert dialog_service.get_rerank_model(dialog) is None
+
+
+def test_get_rerank_model_uses_dialog_tenant_and_config(monkeypatch):
+    config = {"llm_name": "reranker"}
+    created = {}
+    bundle = object()
+
+    def fake_config(tenant_id, llm_type, rerank_id):
+        created["config_args"] = (tenant_id, llm_type, rerank_id)
+        return config
+
+    def fake_bundle(tenant_id, model_config, **kwargs):
+        created["bundle_args"] = (tenant_id, model_config, kwargs)
+        return bundle
+
+    monkeypatch.setattr(
+        dialog_service,
+        "get_model_config_from_provider_instance",
+        fake_config,
+    )
+    monkeypatch.setattr(dialog_service, "LLMBundle", fake_bundle)
+    dialog = SimpleNamespace(
+        tenant_id="tenant-1",
+        rerank_id="reranker-1",
+    )
+
+    result = dialog_service.get_rerank_model(
+        dialog,
+        trace_context={"trace_id": "trace-1"},
+        langfuse_session_id="session-1",
+    )
+
+    assert result is bundle
+    assert created["config_args"] == (
+        "tenant-1",
+        LLMType.RERANK,
+        "reranker-1",
+    )
+    assert created["bundle_args"] == (
+        "tenant-1",
+        config,
+        {
+            "trace_context": {"trace_id": "trace-1"},
+            "langfuse_session_id": "session-1",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
