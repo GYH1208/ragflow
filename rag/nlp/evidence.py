@@ -36,6 +36,10 @@ class EvidenceChunk:
     content: str
     image_id: str | None = None
     vector: list[float] | None = None
+    similarity: float = float("nan")
+    vector_similarity: float = float("nan")
+    term_similarity: float = float("nan")
+    retrieval_rank: int = 0
 
 
 @dataclass(frozen=True)
@@ -207,6 +211,59 @@ def _usable_vector(vector: object, dim: int) -> bool:
         return bool(np.any(np.asarray(vector, dtype=float)))
     except (TypeError, ValueError):
         return False
+
+
+def _finite_score(value: object) -> bool:
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
+
+
+def _passes_hard_gates(
+    chunk: EvidenceChunk,
+    retrieval_similarity_threshold: float,
+) -> bool:
+    return (
+        bool(chunk.chunk_id)
+        and bool(chunk.content.strip())
+        and bool(chunk.image_id)
+        and _finite_score(chunk.similarity)
+        and _finite_score(chunk.vector_similarity)
+        and _finite_score(chunk.term_similarity)
+        and chunk.similarity >= retrieval_similarity_threshold
+    )
+
+
+def build_unit_shortlist(
+    unit: EvidenceUnit,
+    chunks: list[EvidenceChunk],
+    retrieval_similarity_threshold: float,
+    shortlist_size: int,
+) -> list[EvidenceChunk]:
+    eligible = [
+        chunk
+        for chunk in chunks
+        if _passes_hard_gates(
+            chunk,
+            retrieval_similarity_threshold,
+        )
+    ]
+    cited = [
+        chunks[index]
+        for index in unit.citation_indexes
+        if 0 <= index < len(chunks) and chunks[index] in eligible
+    ]
+    ordered: list[EvidenceChunk] = []
+    for chunk in cited + sorted(
+        eligible,
+        key=lambda item: item.retrieval_rank,
+    ):
+        if chunk not in ordered:
+            ordered.append(chunk)
+        if len(ordered) == shortlist_size:
+            break
+    return ordered
 
 
 def _tokenize(text: str) -> list[str]:

@@ -63,6 +63,63 @@ def test_split_evidence_units_reads_non_ascii_digits():
     assert [unit.citation_indexes for unit in units] == [(2,), (1,)]
 
 
+def _candidate_chunk(
+    chunk_id,
+    image_id,
+    rank,
+    similarity=0.8,
+    vector_similarity=0.8,
+    term_similarity=0.8,
+):
+    return evidence_module.EvidenceChunk(
+        chunk_id=chunk_id,
+        content=f"{chunk_id} 内容",
+        image_id=image_id,
+        similarity=similarity,
+        vector_similarity=vector_similarity,
+        term_similarity=term_similarity,
+        retrieval_rank=rank,
+    )
+
+
+def test_shortlist_keeps_cited_image_then_adds_top_ranked_competitors():
+    chunks = [
+        _candidate_chunk("c0", "img0", 0),
+        _candidate_chunk("c1", "img1", 1),
+        _candidate_chunk("c2", "img2", 2),
+        _candidate_chunk("c3", "img3", 3),
+    ]
+    unit = evidence_module.EvidenceUnit(0, "回答点", (2,))
+
+    shortlist = evidence_module.build_unit_shortlist(unit, chunks, 0.2, 3)
+
+    assert [chunk.chunk_id for chunk in shortlist] == ["c2", "c0", "c1"]
+
+
+def test_shortlist_rejects_chunks_outside_hard_gates():
+    chunks = [
+        _candidate_chunk("no-image", "", 0),
+        _candidate_chunk("low", "img-low", 1, similarity=0.1),
+        _candidate_chunk("nan", "img-nan", 2, vector_similarity=float("nan")),
+        _candidate_chunk("valid", "img-valid", 3),
+    ]
+    unit = evidence_module.EvidenceUnit(0, "回答点", (0, 1, 2, 3))
+
+    shortlist = evidence_module.build_unit_shortlist(unit, chunks, 0.2, 3)
+
+    assert [chunk.chunk_id for chunk in shortlist] == ["valid"]
+
+
+def test_shortlist_ignores_out_of_range_citation_without_substitution():
+    chunks = [_candidate_chunk("competitor", "img", 0)]
+    unit = evidence_module.EvidenceUnit(0, "回答点", (9,))
+
+    shortlist = evidence_module.build_unit_shortlist(unit, chunks, 0.2, 3)
+
+    assert [chunk.chunk_id for chunk in shortlist] == ["competitor"]
+    assert unit.citation_indexes == (9,)
+
+
 class FakeEmbedding:
     def __init__(self, vectors):
         self.vectors = vectors
