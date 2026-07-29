@@ -49,6 +49,82 @@ async def test_ws_request_resolves_matching_response():
 
 
 @pytest.mark.asyncio
+async def test_ws_request_reuses_explicit_request_id():
+    channel = make_channel()
+    task = asyncio.create_task(
+        channel._ws_request(
+            "aibot_respond_msg",
+            {"msgtype": "stream"},
+            request_id="callback-1",
+        )
+    )
+    await asyncio.sleep(0)
+    sent = channel._ws.send_json.await_args.args[0]
+
+    assert sent["headers"] == {"req_id": "callback-1"}
+
+    response = {
+        "cmd": "aibot_respond_msg",
+        "headers": {"req_id": "callback-1"},
+        "errcode": 0,
+        "body": {},
+    }
+    await channel._handle_ws_payload(json.dumps(response))
+    assert await task == response
+
+
+@pytest.mark.asyncio
+async def test_websocket_stream_reply_reuses_callback_request_and_stream_ids(monkeypatch):
+    channel = make_channel()
+    request = AsyncMock(return_value={"body": {}})
+    monkeypatch.setattr(channel, "_ws_request", request)
+
+    await channel.send_stream(
+        OutgoingMessage(
+            chat_id="chat-1",
+            text="完整正文",
+            reply_to_message_id="callback-1",
+        ),
+        stream_id="stream-1",
+        finish=False,
+    )
+
+    request.assert_awaited_once_with(
+        "aibot_respond_msg",
+        {
+            "msgtype": "stream",
+            "stream": {
+                "id": "stream-1",
+                "content": "完整正文",
+                "finish": False,
+            },
+        },
+        request_id="callback-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_websocket_stream_sends_attachments_only_after_final_frame(monkeypatch):
+    channel = make_channel()
+    request = AsyncMock(return_value={"body": {}})
+    attachments = AsyncMock()
+    monkeypatch.setattr(channel, "_ws_request", request)
+    monkeypatch.setattr(channel, "_send_websocket_attachments", attachments)
+    message = OutgoingMessage(
+        chat_id="chat-1",
+        text="完整正文",
+        reply_to_message_id="callback-1",
+        images=[OutgoingImage("image-1")],
+    )
+
+    await channel.send_stream(message, stream_id="stream-1", finish=False)
+    attachments.assert_not_awaited()
+
+    await channel.send_stream(message, stream_id="stream-1", finish=True)
+    attachments.assert_awaited_once_with(message)
+
+
+@pytest.mark.asyncio
 async def test_ws_request_raises_for_protocol_error():
     channel = make_channel()
     task = asyncio.create_task(channel._ws_request("aibot_send_msg", {}))
