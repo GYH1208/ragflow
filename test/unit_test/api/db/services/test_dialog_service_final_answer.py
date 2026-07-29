@@ -75,8 +75,8 @@ def _install_cv2_stub_if_unavailable():
 
 _install_cv2_stub_if_unavailable()
 
-from api.db.services import dialog_service  # noqa: E402
-from common.constants import LLMType  # noqa: E402
+from api.db.services import dialog_service
+from common.constants import LLMType
 
 
 def test_get_rerank_model_returns_none_without_rerank_id():

@@ -719,12 +719,11 @@ class WeComChannel(Channel):
                     image.image_id,
                 )
             except Exception:
-                LOGGER.error(
+                LOGGER.exception(
                     "[wecom:%s] image send failed "
                     "reason=image_send_error image_id=%s",
                     self.account_id,
                     image.image_id,
-                    exc_info=True,
                 )
 
         for source_file in message.files:

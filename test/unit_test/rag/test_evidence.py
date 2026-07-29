@@ -373,3 +373,97 @@ async def test_malformed_hidden_reasoning_fails_closed():
 
     assert result.status == "no_match"
     assert result.reason == "malformed_think_markup"
+
+
+@pytest.mark.asyncio
+async def test_approval_progress_never_sends_wrong_proxy_citation():
+    question = "怎么查看报销申请的进度？"
+    answer = "打开企业微信审批页面查看当前审批进度。[ID:1]"
+    chunks = [
+        evidence_module.EvidenceChunk(
+            chunk_id="eab6502820610ded",
+            content="进入报销审批页面，查看审批进度、当前审批人和处理节点",
+            image_id="approval-progress-image",
+            similarity=0.82,
+            vector_similarity=0.79,
+            term_similarity=0.86,
+            retrieval_rank=0,
+        ),
+        evidence_module.EvidenceChunk(
+            chunk_id="dbb4bfdaf5619fa5",
+            content="打开企业微信工作台，设置我的代理人，代理报销或审批",
+            image_id="my-proxy-image",
+            similarity=0.76,
+            vector_similarity=0.74,
+            term_similarity=0.80,
+            retrieval_rank=1,
+        ),
+    ]
+    query = _rerank_query(
+        question,
+        "打开企业微信审批页面查看当前审批进度。",
+    )
+    reranker = FakeReranker(
+        {
+            (query, chunks[1].content): 0.6262,
+            (query, chunks[0].content): 0.7986,
+        }
+    )
+
+    result = await resolve_evidence(
+        question,
+        answer,
+        chunks,
+        reranker,
+        0.2,
+    )
+
+    assert result.status == "no_match"
+    assert result.used_chunk_ids == []
+    assert result.decisions[0].reason == "cited_candidate_not_top1"
+
+
+@pytest.mark.asyncio
+async def test_failed_second_unit_does_not_suppress_confirmed_first_unit():
+    question = "怎么查审批进度，怎么设置代理人？"
+    answer = "查看审批记录。[ID:0]\n设置代理人。[ID:1]"
+    chunks = [
+        dataclasses.replace(
+            _candidate_chunk("approval", "img-approval", 0),
+            content="查看审批进度",
+        ),
+        dataclasses.replace(
+            _candidate_chunk("proxy", "img-proxy", 1),
+            content="设置审批代理",
+        ),
+        dataclasses.replace(
+            _candidate_chunk("other", "img-other", 2),
+            content="审批代理说明",
+        ),
+    ]
+    first_query = _rerank_query(question, "查看审批记录。")
+    second_query = _rerank_query(question, "设置代理人。")
+    reranker = FakeReranker(
+        {
+            (first_query, chunks[0].content): 0.95,
+            (first_query, chunks[1].content): 0.40,
+            (first_query, chunks[2].content): 0.30,
+            (second_query, chunks[1].content): 0.82,
+            (second_query, chunks[0].content): 0.20,
+            (second_query, chunks[2].content): 0.78,
+        }
+    )
+
+    result = await resolve_evidence(
+        question,
+        answer,
+        chunks,
+        reranker,
+        0.2,
+    )
+
+    assert result.used_chunk_ids == ["approval"]
+    assert [decision.reason for decision in result.decisions] == [
+        "accepted",
+        "below_score_margin",
+    ]
