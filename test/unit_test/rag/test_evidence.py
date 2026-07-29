@@ -3,12 +3,64 @@ import pytest
 
 from api.channels.bootstrap import _images_for_used_chunks
 from api.channels.core.base import OutgoingImage
+from rag.nlp import evidence as evidence_module
 from rag.nlp.evidence import (
     EvidenceChunk,
     EvidenceConfig,
     resolve_evidence,
     split_evidence_segments,
 )
+
+
+def test_split_evidence_units_removes_think_and_preserves_citations():
+    answer = (
+        "<think>内部分析引用 [ID:9]</think>"
+        "1. 查看审批进度。[ID:0]\n"
+        "2. 设置审批代理人。[1]"
+    )
+
+    units = evidence_module.split_evidence_units(answer)
+
+    assert [(unit.index, unit.text, unit.citation_indexes) for unit in units] == [
+        (0, "查看审批进度。", (0,)),
+        (1, "设置审批代理人。", (1,)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "<think>未闭合的内部分析",
+        "正文</think>",
+        "<think>第一层<think>嵌套</think></think>正文。[ID:0]",
+    ],
+)
+def test_split_evidence_units_rejects_malformed_think_markup(answer):
+    with pytest.raises(ValueError, match="malformed_think_markup"):
+        evidence_module.split_evidence_units(answer)
+
+
+def test_split_evidence_units_ignores_citation_only_and_duplicate_units():
+    answer = (
+        "[ID:0]\n"
+        "查看审批进度。[ID:0]\n"
+        "查看审批进度。[ID:0]\n"
+        "知识库未找到截图。[ID:1]"
+    )
+
+    units = evidence_module.split_evidence_units(answer)
+
+    assert [(unit.text, unit.citation_indexes) for unit in units] == [
+        ("查看审批进度。", (0,)),
+    ]
+
+
+def test_split_evidence_units_reads_non_ascii_digits():
+    units = evidence_module.split_evidence_units(
+        "查看审批进度。[ID:٢]\n设置代理人。[ID:۱]"
+    )
+
+    assert [unit.citation_indexes for unit in units] == [(2,), (1,)]
 
 
 class FakeEmbedding:
