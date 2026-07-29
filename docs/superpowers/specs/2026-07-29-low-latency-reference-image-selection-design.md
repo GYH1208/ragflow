@@ -1,416 +1,353 @@
-# Low-Latency Reference Image Selection Design
+# 低延迟引用图片选择设计
 
-## Status
+## 状态
 
-Approved in conversation on 2026-07-29.
+本设计已于 2026-07-29 在对话中确认。
 
-## Problem
+## 问题
 
-The existing post-response evidence resolver can send an unrelated reference
-image even when its configured score thresholds are met. The observed failure
-was a question about checking approval progress that caused the "My Agent"
-image to be sent.
+现有的回答后证据解析器即使满足了配置的分数阈值，仍可能发送不相关的引用图片。已经观察到的真实问题是：用户询问如何查看审批进度，系统却发送了“我的代理人”图片。
 
-The failure has two causes:
+问题主要有两个原因：
 
-1. The resolver scores answer fragments against chunks without consistently
-   preserving the original user question as the primary intent.
-2. Passing an absolute threshold is treated as sufficient evidence, so several
-   semantically adjacent chunks can qualify at the same time.
+1. 解析器使用回答片段与 chunk 进行匹配，但没有始终把用户原始问题作为首要意图。
+2. 当前逻辑把“超过绝对阈值”视为充分证据，导致多个语义相近的 chunk 可以同时通过。
 
-The desired product behavior is precision-first:
+产品期望采用准确率优先的策略：
 
-- It is acceptable to omit a useful image.
-- It is not acceptable to send an unrelated image.
-- Text delivery must not wait for image selection.
-- Image selection should normally finish within one second.
-- A response may send at most two images, but the second image must support a
-  different answer point.
+- 可以漏掉一张有用的图片。
+- 不能发送不相关的图片。
+- 文字回复不能等待图片选择完成后才发送。
+- 图片选择通常应在一秒内完成。
+- 一次回答最多发送两张图片，但第二张图片必须支持另一个独立回答点。
 
-## Scope
+## 范围
 
-This change is limited to post-response image selection for channels that
-support reference images, initially WeCom.
+本次改动仅涉及支持引用图片的消息渠道在回答生成后的图片选择，首个目标渠道是企业微信。
 
-In scope:
+本次范围包括：
 
-- visible-answer parsing;
-- evidence-unit extraction;
-- selection from the chunks already returned by retrieval;
-- hard candidate gates;
-- bounded semantic reranking;
-- strict acceptance and rejection;
-- at most two image sends;
-- observability and regression tests.
+- 可见回答解析；
+- 证据单元提取；
+- 从现有检索结果中选择候选 chunk；
+- 候选硬门控；
+- 有界的语义 rerank；
+- 严格接受和拒绝；
+- 最多发送两张图片；
+- 可观测性和回归测试。
 
-Out of scope:
+本次范围不包括：
 
-- changing document parsers;
-- changing chunk boundaries;
-- introducing `image_sets`, `image_assets`, or a list of image IDs per chunk;
-- splitting or inspecting a composite image at runtime;
-- runtime vision-model calls;
-- a second knowledge-base retrieval;
-- changing the existing image upload or WeCom media-send protocol.
+- 修改文档解析器；
+- 修改 chunk 边界；
+- 引入 `image_sets`、`image_assets` 或单个 chunk 对应多个图片 ID 的结构；
+- 在运行时拆分或检查拼接图片；
+- 调用运行时视觉模型；
+- 发起第二次知识库检索；
+- 修改现有图片上传或企业微信媒体发送协议。
 
-If several source images were already joined into one stored image, the joined
-image remains one indivisible `image_id` and is sent unchanged.
+如果多张源图片已经被拼接为一张存储图片，那么这张拼接图仍然作为不可拆分的单个 `image_id`，并保持原样发送。
 
-## Retrieval Terminology
+## 检索术语
 
-RAGFlow uses two retrieval limits:
+RAGFlow 使用两个检索数量限制：
 
-- `top_k` is the larger internal search window.
-- `top_n` is the final, thresholded and ranked chunk list returned to the
-  answer/reference flow.
+- `top_k`：较大的内部搜索候选窗口。
+- `top_n`：经过阈值过滤和排序后，最终返回给回答及引用流程的 chunk 列表。
 
-The image selector receives only `reference.chunks`, which is the final Top-N
-result after the normal retrieval pipeline. It never searches the whole
-knowledge base and never sees the full internal Top-K window.
+图片选择器只接收 `reference.chunks`，即正常检索流程产生的最终 Top-N 结果。它不会重新搜索整个知识库，也不会看到完整的内部 Top-K 候选窗口。
 
-For this design:
+在本设计中：
 
-- **retrieval pool** means the image-bearing chunks in `reference.chunks`;
-- **evidence unit** means one visible answer paragraph, list item, or sentence
-  containing at least one valid citation;
-- **unit shortlist** means at most three image-bearing chunks from the retrieval
-  pool that are compared for one evidence unit.
+- **检索池**：`reference.chunks` 中所有带图片的 chunk；
+- **证据单元**：至少包含一个有效引用的可见回答段落、列表项或句子；
+- **单元候选短名单**：针对一个证据单元进行比较的、最多三个带图片 chunk。
 
-## Chosen Approach
+## 选定方案
 
-Use three layers:
+采用三层处理：
 
-1. fast hard gates;
-2. one bounded semantic-rerank round;
-3. strict fail-closed acceptance.
+1. 快速硬门控；
+2. 一轮有界的语义 rerank；
+3. 严格的失败关闭式接受策略。
 
-This approach adds semantic verification without adding an embedding call or a
-vision-model call. It also preserves the existing parser, stored images, and
-channel sender.
+该方案不增加 embedding 调用或视觉模型调用，通过语义复核提高准确率，同时保留现有解析器、图片存储方式和渠道发送器。
 
-### Alternatives Considered
+### 已考虑的替代方案
 
-#### Local rules only
+#### 只使用本地规则
 
-This has the lowest latency, but keyword overlap and existing retrieval scores
-cannot reliably separate semantically adjacent chunks. It is kept as the first
-gate, not used as the final decision.
+该方案延迟最低，但关键词重合和现有检索分数无法可靠地区分语义相近的 chunk。因此，本地规则只作为第一层门控，不作为最终决策。
 
-#### Runtime vision verification
+#### 运行时视觉复核
 
-This could inspect image pixels, including a composite image, but has variable
-latency and higher cost. It is outside the one-second reliability target and is
-not part of this change.
+该方案可以检查图片像素，包括拼接图片，但延迟波动和成本都更高，难以稳定满足一秒目标，因此不纳入本次改动。
 
-#### Send the global Top-2 images
+#### 直接发送全局 Top-2 图片
 
-This supports multi-part questions but can send a correct image and a similar
-wrong image for the same answer point. It is rejected. The design permits one
-winner per distinct evidence unit instead.
+该方案可以覆盖多部分问题，但可能针对同一个回答点同时发送一张正确图片和一张相似的错误图片，因此不采用。本设计改为每个独立证据单元最多产生一个胜出图片。
 
-## Data Flow
+## 数据流
 
-1. Complete the LLM response and send its text.
-2. Remove hidden reasoning and non-visible markup from the answer.
-3. Split the visible answer into ordered evidence units.
-4. Retain at most the first two distinct evidence units that:
-   - contain a valid citation;
-   - refer to at least one chunk in `reference.chunks`; and
-   - have at least one image-bearing candidate in the retrieval pool.
-5. Build a shortlist of at most three image-bearing chunks for each retained
-   unit.
-6. Rerank each shortlist using the original question plus that unit's visible
-   text as the query.
-7. Evaluate each unit independently with strict acceptance rules.
-8. Deduplicate accepted `image_id` values.
-9. If more than two unique images survive, retain the two with the strongest
-   confidence, then send them in answer order.
-10. On timeout or uncertainty, send no unconfirmed image.
+1. 完成 LLM 回答并发送文字。
+2. 从回答中删除隐藏推理和不可见标记。
+3. 将可见回答拆分为有顺序的证据单元。
+4. 最多保留前两个不同的证据单元，且每个单元必须：
+   - 包含有效引用；
+   - 至少引用 `reference.chunks` 中的一个 chunk；
+   - 在检索池中至少存在一个带图片的候选。
+5. 为每个保留的证据单元构建最多包含三个带图片 chunk 的候选短名单。
+6. 使用“用户原始问题 + 当前证据单元可见文本”作为查询，对每个短名单进行 rerank。
+7. 按照严格接受规则独立评估每个证据单元。
+8. 对接受结果中的 `image_id` 去重。
+9. 如果将来有超过两张唯一图片通过，则保留置信度最高的两张，再按照回答中的出现顺序发送。
+10. 发生超时或结果不确定时，不发送尚未确认的图片。
 
-Text delivery is not rolled back if image selection fails.
+图片选择失败不会撤回或改变已经发送的文字回复。
 
-## Visible Answer and Evidence Units
+## 可见回答与证据单元
 
-The selector must not score hidden reasoning. It removes complete
-`<think>...</think>` blocks before segmentation. Malformed or unclosed think
-markup causes image selection to fail closed for that response.
+图片选择器不得对隐藏推理进行评分。分段前必须删除完整的 `<think>...</think>` 内容。如果 think 标记格式错误或未闭合，则本次图片选择失败关闭，不发送图片。
 
-The visible answer is split using:
+可见回答按以下边界拆分：
 
-- paragraph boundaries;
-- Markdown list-item boundaries;
-- sentence boundaries when several citations occur in one paragraph.
+- 段落边界；
+- Markdown 列表项边界；
+- 当一个段落包含多个引用时，再按句子边界拆分。
 
-An evidence unit is eligible only when it contains at least one citation that
-resolves to an ID in `reference.chunks`. Empty text, citation-only text,
-boilerplate, and duplicate normalized units are ignored.
+只有当一个证据单元包含至少一个能够解析到 `reference.chunks` 中 chunk ID 的引用时，该单元才有资格参与选择。空文本、只有引用标记的文本、模板化文本以及规范化后重复的单元均忽略。
 
-Two images may be sent only when they come from two different eligible evidence
-units. Two chunks competing for the same evidence unit can never both be sent.
+只有当两张图片分别来自两个不同的合格证据单元时，才允许发送两张图片。同一个证据单元内相互竞争的两个 chunk 不能同时发送。
 
-## Candidate Construction
+## 候选构建
 
-For each eligible evidence unit:
+对于每个合格证据单元：
 
-1. Start with image-bearing chunks explicitly cited by the unit.
-2. Add the highest-ranked image-bearing chunks from `reference.chunks` as
-   competitors.
-3. Preserve original retrieval order and stop at three candidates.
+1. 首先加入该单元明确引用的、带图片的 chunk。
+2. 再加入 `reference.chunks` 中原始排名靠前的带图片 chunk，作为竞争候选。
+3. 保留原始检索顺序，候选数量达到三个后停止。
 
-If including competitors would exceed the limit, cited candidates are retained
-first and remaining slots are filled by retrieval rank.
+如果加入竞争候选会超过数量上限，优先保留被引用的候选，其余位置按照原始检索排名补充。
 
-The competing chunks are comparison-only. A chunk may be sent only if it was
-explicitly cited by that evidence unit. Therefore:
+竞争候选只用于比较。只有被该证据单元明确引用的 chunk 才能最终发送。因此：
 
-- a wrong cited chunk can lose to a stronger uncited competitor, causing
-  rejection;
-- an uncited chunk is never substituted and sent silently;
-- a relevant chunk outside `reference.chunks` is invisible, so the selector
-  omits the image instead of performing another retrieval.
+- 错误引用的 chunk 可能败给更相关但未被引用的竞争候选，从而触发拒绝；
+- 未引用的 chunk 永远不能被静默替换并发送；
+- `reference.chunks` 之外的相关 chunk 对图片选择器不可见，系统会放弃发送，而不是再次检索。
 
-Before reranking, a candidate must pass all hard gates:
+rerank 前，候选必须通过全部硬门控：
 
-- non-empty chunk ID;
-- non-empty `image_id`;
-- non-empty chunk content;
-- finite original similarity fields;
-- membership in `reference.chunks`;
-- quote/reference-image behavior enabled for the channel;
-- confirmed successful text delivery.
+- chunk ID 非空；
+- `image_id` 非空；
+- chunk 内容非空；
+- 原始相似度字段是有限数值；
+- chunk 属于 `reference.chunks`；
+- 当前渠道已启用引用及引用图片能力；
+- 文字发送已经确认成功。
 
-## Semantic Reranking
+## 语义 Rerank
 
-For each retained evidence unit, construct:
+为每个保留的证据单元构造以下查询：
 
 ```text
-Original user question:
+用户原始问题：
 {question}
 
-Relevant answer point:
-{visible evidence unit without citation markers}
+回答中的相关回答点：
+{删除引用标记后的可见证据单元}
 ```
 
-The reranker documents are the chunk contents in that unit's shortlist.
+reranker 的文档输入为当前单元候选短名单中的 chunk 内容。
 
-At most two evidence units are reranked. Their reranker calls execute
-concurrently as one bounded semantic-verification round. Each call compares one
-query with no more than three documents.
+最多对两个证据单元进行 rerank。两个 reranker 调用并发执行，共同构成一轮有界语义复核。每个调用使用一个查询，比较不超过三个文档。
 
-This design deliberately does not generate fresh embeddings. It reuses the
-normal retrieval result for coarse relevance and spends the latency budget on
-one cross-encoder-style semantic verification round.
+本设计明确不生成新的 embedding。系统复用正常检索结果完成粗粒度相关性判断，把延迟预算用于一轮 cross-encoder 类型的语义复核。
 
-## Acceptance Rules
+## 接受规则
 
-Each evidence unit is evaluated independently. Its winner is accepted only
-when all of the following are true:
+每个证据单元独立评估。只有同时满足以下全部条件时，当前单元的胜出 chunk 才会被接受：
 
-1. The winning chunk is explicitly cited by the evidence unit.
-2. The winning chunk passed every hard gate.
-3. The winner is the rerank Top-1 for that unit.
-4. The winner's rerank score is at least `0.75`.
-5. When a runner-up exists, the Top-1 minus Top-2 rerank margin is at least
-   `0.10`.
-6. The original retrieval score is not below the dialog's configured
-   similarity threshold.
+1. 胜出 chunk 被当前证据单元明确引用。
+2. 胜出 chunk 通过了全部硬门控。
+3. 胜出 chunk 是当前单元的 rerank Top-1。
+4. 胜出 chunk 的 rerank 分数不低于 `0.75`。
+5. 存在第二名时，Top-1 与 Top-2 的 rerank 分差不低于 `0.10`。
+6. 原始检索分数不低于当前对话配置的相似度阈值。
 
-The initial `0.75` score and `0.10` margin are precision-first release defaults.
-They must remain configuration values so a labeled regression set can tune
-them without changing the algorithm.
+初始的 `0.75` 分数阈值和 `0.10` 分差是准确率优先的发布默认值。这两个值必须保留为配置项，以便以后使用带标注的回归集调优，而无需修改算法。
 
-If a shortlist contains only one candidate, there is no artificial margin.
-The candidate must still satisfy the absolute rerank threshold and every other
-gate.
+如果候选短名单只有一个候选，则不人为构造分差；该候选仍必须满足绝对 rerank 阈值和其他全部门控。
 
-## Selecting Up to Two Images
+## 最多选择两张图片
 
-Accepted winners are deduplicated by `image_id`.
+对通过接受规则的结果按照 `image_id` 去重。
 
-- Zero accepted winners: send no image.
-- One accepted winner: send one image.
-- Two accepted winners from distinct evidence units: send two images.
-- The same image accepted for two units: send it once.
-- Two candidates from one unit: send only the accepted Top-1.
+- 没有胜出结果：不发送图片。
+- 一个胜出结果：发送一张图片。
+- 两个胜出结果来自不同证据单元：发送两张图片。
+- 同一图片被两个单元接受：只发送一次。
+- 同一单元存在两个候选：只发送被接受的 Top-1。
 
-If more than two distinct units could qualify in future, rank accepted winners
-by `(rerank score, rerank margin)` descending, retain two, and restore evidence
-unit order before sending. The initial implementation processes at most two
-eligible units, so this rule mainly defines stable future behavior.
+如果将来有超过两个不同单元可以通过，则先按照 `(rerank 分数, rerank 分差)` 降序选择两个，再恢复为证据单元在回答中的顺序进行发送。初始实现最多处理两个合格证据单元，因此该规则主要用于明确未来的稳定行为。
 
-Composite images remain unchanged. The selector evaluates the chunk text, not
-individual regions inside the stored image.
+拼接图片保持不变。图片选择器评估的是整个 chunk 的文本，不评估存储图片内部的单独区域。
 
-## Latency and Failure Behavior
+## 延迟与失败处理
 
-Image selection has a `0.9` second hard deadline measured from the start of
-post-response evidence resolution. The budget covers local parsing, candidate
-construction, reranking, and the final decision. It does not guarantee WeCom
-network upload time.
+图片选择从回答后证据解析开始计时，硬截止时间为 `0.9` 秒。该预算包括本地解析、候选构建、rerank 和最终决策，不保证企业微信网络上传时间。
 
-Recommended budget:
+建议预算分配：
 
-- visible-answer parsing and hard gates: up to 50 ms;
-- concurrent rerank round: up to 750 ms;
-- decision and scheduling reserve: 100 ms.
+- 可见回答解析和硬门控：最多 50 毫秒；
+- 并发 rerank：最多 750 毫秒；
+- 决策及调度预留：100 毫秒。
 
-There are no retries inside this deadline.
+截止时间内不进行重试。
 
-Fail closed and send no unconfirmed image when:
+发生以下情况时执行失败关闭，不发送尚未确认的图片：
 
-- the deadline expires;
-- the reranker is unavailable;
-- reranker output dimensions are invalid;
-- scores contain non-finite values;
-- think markup is malformed;
-- citations cannot be resolved;
-- the winner is uncited;
-- the score or margin gate fails;
-- loading or uploading a selected image fails.
+- 超过截止时间；
+- reranker 不可用；
+- reranker 输出维度不正确；
+- 分数包含非有限数值；
+- think 标记格式错误；
+- 引用无法解析；
+- 胜出 chunk 未被引用；
+- 分数或分差不满足要求；
+- 已选图片加载或上传失败。
 
-One evidence unit failing does not invalidate a separately confirmed unit. If
-one unit passes before the shared deadline and another returns a normal
-low-confidence result, the confirmed image may be sent. A global timeout or
-reranker exception rejects all unresolved units.
+一个证据单元失败不会使另一个已经独立确认的单元失效。如果一个单元在共享截止时间前通过，而另一个单元正常返回低置信度结果，则可以发送已经确认的图片。发生全局超时或 reranker 异常时，所有尚未完成确认的单元均拒绝。
 
-## Components and Responsibilities
+## 组件与职责
 
-### Evidence parser
+### 证据解析器
 
-- strips hidden reasoning and citation markers;
-- returns ordered evidence units and their cited chunk IDs;
-- contains no retrieval or model code.
+- 删除隐藏推理和引用标记；
+- 返回有序证据单元及其引用的 chunk ID；
+- 不包含检索或模型调用逻辑。
 
-### Candidate builder
+### 候选构建器
 
-- consumes only `reference.chunks`;
-- applies hard gates;
-- builds deterministic per-unit shortlists;
-- preserves original retrieval order.
+- 只消费 `reference.chunks`；
+- 应用硬门控；
+- 为每个单元构建确定性的候选短名单；
+- 保留原始检索顺序。
 
-### Semantic verifier
+### 语义验证器
 
-- builds the question-plus-answer-point query;
-- executes at most two concurrent reranker calls;
-- returns per-unit ranked scores;
-- owns no sending behavior.
+- 构造“原问题 + 回答点”查询；
+- 最多并发执行两个 reranker 调用；
+- 返回每个单元的排序分数；
+- 不负责发送。
 
-### Decision policy
+### 决策策略
 
-- applies score, margin, citation, and deduplication rules;
-- returns zero, one, or two selected chunk/image IDs;
-- records rejection reasons.
+- 应用分数、分差、引用和去重规则；
+- 返回零个、一个或两个选中的 chunk 及图片 ID；
+- 记录拒绝原因。
 
-### Channel integration
+### 渠道集成
 
-- sends text first;
-- starts evidence resolution only after confirmed text delivery;
-- loads and sends accepted stored images in answer order;
-- leaves existing composite-image handling unchanged.
+- 先发送文字；
+- 只有确认文字发送成功后才启动证据解析；
+- 按照回答顺序加载并发送已接受的存储图片；
+- 保持现有拼接图片处理方式不变。
 
-## Observability
+## 可观测性
 
-Emit one structured summary log per response with:
+每次回答输出一条结构化汇总日志，包含：
 
-- message and dialog identifiers;
-- total reference chunk count;
-- eligible evidence-unit count;
-- candidate chunk IDs per unit;
-- original retrieval scores;
-- rerank scores and margins;
-- accepted chunk and image IDs;
-- per-unit rejection reasons;
-- total decision duration;
-- timeout or model-error status.
+- 消息和对话标识；
+- 引用 chunk 总数；
+- 合格证据单元数量；
+- 每个单元的候选 chunk ID；
+- 原始检索分数；
+- rerank 分数和分差；
+- 被接受的 chunk ID 和图片 ID；
+- 每个单元的拒绝原因；
+- 决策总耗时；
+- 超时或模型异常状态。
 
-Do not log full user questions, answer text, image bytes, or document contents at
-info level.
+info 级别日志中不得记录完整用户问题、回答文本、图片二进制数据或文档内容。
 
-Required rejection reason codes:
+必须支持以下拒绝原因代码：
 
-- `no_visible_evidence_units`;
-- `no_image_candidates`;
-- `citation_not_found`;
-- `cited_candidate_not_top1`;
-- `below_rerank_threshold`;
-- `below_score_margin`;
-- `duplicate_image`;
-- `malformed_think_markup`;
-- `rerank_timeout`;
-- `rerank_error`;
-- `image_load_error`;
-- `image_send_error`.
+- `no_visible_evidence_units`；
+- `no_image_candidates`；
+- `citation_not_found`；
+- `cited_candidate_not_top1`；
+- `below_rerank_threshold`；
+- `below_score_margin`；
+- `duplicate_image`；
+- `malformed_think_markup`；
+- `rerank_timeout`；
+- `rerank_error`；
+- `image_load_error`；
+- `image_send_error`。
 
-## Configuration
+## 配置
 
-Add or retain explicit evidence-selection configuration for:
+新增或保留以下显式证据选择配置：
 
-- `max_evidence_units = 2`;
-- `shortlist_size = 3`;
-- `max_images = 2`;
-- `min_rerank_score = 0.75`;
-- `min_score_margin = 0.10`;
-- `timeout_seconds = 0.9`.
+- `max_evidence_units = 2`；
+- `shortlist_size = 3`；
+- `max_images = 2`；
+- `min_rerank_score = 0.75`；
+- `min_score_margin = 0.10`；
+- `timeout_seconds = 0.9`。
 
-Values are server-side configuration. This change does not require a frontend
-control.
+这些值均为服务端配置，本次改动不需要增加前端控制项。
 
-## Testing
+## 测试
 
-### Unit tests
+### 单元测试
 
-- hidden reasoning is excluded from evidence units;
-- malformed think markup fails closed;
-- citation-only and duplicate units are ignored;
-- candidates come only from `reference.chunks`;
-- cited candidates are retained when competitors fill the shortlist;
-- uncited competitors can block but can never be sent;
-- low absolute score is rejected;
-- insufficient Top-1/Top-2 margin is rejected;
-- a one-candidate shortlist uses the absolute threshold without a fake margin;
-- duplicate image IDs are sent once;
-- one evidence unit produces at most one image;
-- two distinct evidence units can produce two images;
-- timeout and malformed reranker output fail closed.
+- 隐藏推理不会进入证据单元；
+- think 标记格式错误时失败关闭；
+- 忽略只有引用的单元和重复单元；
+- 候选只来自 `reference.chunks`；
+- 竞争候选占用短名单位置时仍优先保留被引用候选；
+- 未引用竞争候选可以阻止发送，但永远不能被发送；
+- 绝对分数不足时拒绝；
+- Top-1/Top-2 分差不足时拒绝；
+- 只有一个候选时使用绝对阈值，不使用虚假分差；
+- 重复图片 ID 只发送一次；
+- 一个证据单元最多产生一张图片；
+- 两个不同证据单元可以产生两张图片；
+- 超时和 reranker 输出格式错误时失败关闭。
 
-### Regression tests
+### 回归测试
 
-- "check approval progress" does not send the "My Agent" image;
-- the formerly correct and incorrect candidates that both passed old thresholds
-  are separated by the question-plus-answer-point rerank query;
-- a multi-part question about approval progress and proxy setup can send two
-  independently verified images;
-- two similar candidates for one answer point never produce two images;
-- a composite image is sent unchanged;
-- a failed second unit does not suppress a normally completed first unit;
-- a global timeout sends no unresolved image.
+- “查看审批进度”不能发送“我的代理人”图片；
+- 使用“原问题 + 回答点”rerank 查询，能够区分旧逻辑中同时超过阈值的正确候选和错误候选；
+- 同时询问审批进度和代理设置的多部分问题，可以发送两张分别独立验证的图片；
+- 同一个回答点存在两个相似候选时，不能发送两张图片；
+- 拼接图片保持原样发送；
+- 第二个单元失败时，不会压制第一个正常完成的单元；
+- 发生全局超时时，不发送尚未完成确认的图片。
 
-### Integration tests
+### 集成测试
 
-- text is sent before evidence resolution starts;
-- no image is sent when text delivery is unconfirmed;
-- one accepted image produces one channel send;
-- two accepted images produce two ordered channel sends;
-- duplicate image IDs produce one channel send;
-- upload failure is logged without retrying or changing the text response.
+- 证据解析开始前已先发送文字；
+- 文字发送未确认时不发送图片；
+- 接受一张图片时产生一次渠道图片发送；
+- 接受两张图片时按照回答顺序产生两次渠道图片发送；
+- 重复图片 ID 只产生一次渠道图片发送；
+- 上传失败时记录日志，不重试，也不改变文字回复。
 
-## Rollout
+## 发布步骤
 
-1. Run the real incident replay and the labeled positive/negative image cases in
-   the backend test environment.
-2. Record precision, image-send rate, rejection reasons, and p50/p95 decision
-   latency.
-3. Require zero known false-positive image sends in the labeled regression set
-   before enabling the policy.
-4. Enable for the controlled WeCom path first.
-5. Tune only the configurable score and margin thresholds if the false-negative
-   rate is too high; do not relax citation, distinct-unit, or fail-closed rules.
+1. 在后端测试环境中运行真实事故回放以及带标注的正负图片用例。
+2. 记录准确率、图片发送率、拒绝原因以及决策延迟的 p50/p95。
+3. 启用该策略前，要求带标注回归集中已知的错误图片发送数量为零。
+4. 首先在受控企业微信路径启用。
+5. 如果漏发率过高，只调节可配置的分数和分差阈值，不放宽引用、独立单元或失败关闭规则。
 
-## Success Criteria
+## 成功标准
 
-- The known approval-progress/My-Agent false positive is rejected.
-- No labeled negative case sends an image.
-- A multi-part labeled case can send two independently supported images.
-- One answer point never sends two images.
-- Image-selection p95 is at or below 900 ms, excluding WeCom upload time.
-- Text delivery remains independent of evidence-selection success.
+- 已知的“审批进度/我的代理人”误发问题被拒绝。
+- 所有带标注的负例均不发送图片。
+- 多部分正例可以发送两张分别独立支持的图片。
+- 一个回答点绝不发送两张图片。
+- 图片选择 p95 不高于 900 毫秒，不包含企业微信上传时间。
+- 文字发送始终独立于图片选择是否成功。
