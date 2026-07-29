@@ -699,7 +699,8 @@ class WeComChannel(Channel):
                 image_data = self._load_stored_image(image.image_id)
                 if not image_data:
                     LOGGER.error(
-                        "[wecom:%s] image not found: %s",
+                        "[wecom:%s] image skipped "
+                        "reason=image_load_error image_id=%s",
                         self.account_id,
                         image.image_id,
                     )
@@ -719,7 +720,8 @@ class WeComChannel(Channel):
                 )
             except Exception:
                 LOGGER.error(
-                    "[wecom:%s] websocket image send failed image_id=%s",
+                    "[wecom:%s] image send failed "
+                    "reason=image_send_error image_id=%s",
                     self.account_id,
                     image.image_id,
                     exc_info=True,

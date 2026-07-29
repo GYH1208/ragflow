@@ -88,6 +88,25 @@ def test_images_for_used_chunks_never_uses_citation_index():
     assert bootstrap._images_for_used_chunks(chunks, ["0"]) == []
 
 
+def test_images_for_used_chunks_caps_at_two_after_deduplication():
+    chunks = [
+        {"id": "c1", "image_id": "img-shared"},
+        {"id": "c2", "image_id": "img-two"},
+        {"id": "c3", "image_id": "img-three"},
+        {"id": "c4", "image_id": "img-shared"},
+    ]
+
+    images = bootstrap._images_for_used_chunks(
+        chunks,
+        ["c4", "c2", "c3", "c1"],
+    )
+
+    assert images == [
+        OutgoingImage("img-shared"),
+        OutgoingImage("img-two"),
+    ]
+
+
 async def _run_handler_case(
     monkeypatch,
     *,
@@ -286,6 +305,49 @@ async def test_handler_sends_text_before_resolving_and_sending_images(
             [],
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_handler_sends_two_verified_images_after_text_in_unit_order(
+    monkeypatch,
+):
+    chunks = [
+        {
+            "id": "approval",
+            "content": "审批进度",
+            "image_id": "img-approval",
+        },
+        {
+            "id": "proxy",
+            "content": "代理设置",
+            "image_id": "img-proxy",
+        },
+    ]
+    resolution = EvidenceResolution(
+        ["approval", "proxy"],
+        [],
+        [],
+        "resolved",
+        20.0,
+    )
+
+    events, sent_messages = await _run_handler_case(
+        monkeypatch,
+        question="怎么查进度和设置代理人？",
+        answer="查审批进度。[ID:0]\n设置代理人。[ID:1]",
+        chunks=chunks,
+        resolution=resolution,
+    )
+
+    assert sent_messages[0].text == "查审批进度。\n设置代理人。"
+    assert sent_messages[0].images == []
+    assert sent_messages[1].text == ""
+    assert sent_messages[1].images == [
+        OutgoingImage("img-approval"),
+        OutgoingImage("img-proxy"),
+    ]
+    event_names = [event[0] for event in events]
+    assert event_names.index("resolve") > event_names.index("send")
 
 
 @pytest.mark.asyncio

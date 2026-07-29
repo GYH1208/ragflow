@@ -375,7 +375,10 @@ async def test_websocket_sends_text_then_images_in_order(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_image_failure_does_not_block_later_images(monkeypatch):
+async def test_image_failure_does_not_block_later_images(
+    monkeypatch,
+    caplog,
+):
     channel = make_channel()
     request = AsyncMock(return_value={"body": {}})
     monkeypatch.setattr(channel, "_ws_request", request)
@@ -397,10 +400,12 @@ async def test_image_failure_does_not_block_later_images(monkeypatch):
     )
 
     send_image.assert_awaited_once_with("chat-1", "media-b")
+    assert "reason=image_send_error" in caplog.text
+    assert "image_id=image-a" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_missing_stored_image_is_skipped(monkeypatch):
+async def test_missing_stored_image_is_skipped(monkeypatch, caplog):
     channel = make_channel()
     request = AsyncMock(return_value={"body": {}})
     monkeypatch.setattr(channel, "_ws_request", request)
@@ -417,6 +422,8 @@ async def test_missing_stored_image_is_skipped(monkeypatch):
     )
 
     upload.assert_not_awaited()
+    assert "reason=image_load_error" in caplog.text
+    assert "image_id=missing" in caplog.text
 
 
 @pytest.mark.asyncio

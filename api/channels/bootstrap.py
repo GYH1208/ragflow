@@ -126,6 +126,7 @@ def _prepare_cited_output(
 def _images_for_used_chunks(
     chunks: object,
     used_chunk_ids: list[str],
+    max_images: int = 2,
 ) -> list[OutgoingImage]:
     valid_chunks = chunks if isinstance(chunks, list) else []
     chunks_by_id = {
@@ -144,6 +145,8 @@ def _images_for_used_chunks(
             continue
         seen_image_ids.add(image_id)
         images.append(OutgoingImage(image_id=image_id))
+        if len(images) == max_images:
+            break
     return images
 
 
