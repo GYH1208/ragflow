@@ -231,6 +231,38 @@ async def test_message_callback_does_not_block_ack_processing():
 
 
 @pytest.mark.asyncio
+async def test_websocket_voice_message_dispatches_wecom_transcript():
+    channel = make_channel()
+    received = []
+
+    async def handler(message):
+        received.append(message)
+
+    channel.set_message_handler(handler)
+    raw = {"cmd": "aibot_msg_callback"}
+
+    await channel._handle_ws_message(
+        {"req_id": "voice-request-1"},
+        {
+            "msgtype": "voice",
+            "from": {"userid": "user-1"},
+            "chatid": "chat-1",
+            "chattype": "group",
+            "voice": {"content": "我的年假有多少天"},
+        },
+        raw,
+    )
+
+    assert len(received) == 1
+    assert received[0].text == "我的年假有多少天"
+    assert received[0].sender_id == "user-1"
+    assert received[0].chat_id == "chat-1"
+    assert received[0].chat_type == "group"
+    assert received[0].message_id == "voice-request-1"
+    assert received[0].raw is raw
+
+
+@pytest.mark.asyncio
 async def test_websocket_message_logs_sender_identifiers_without_content(caplog):
     channel = make_channel()
 
@@ -247,10 +279,7 @@ async def test_websocket_message_logs_sender_identifiers_without_content(caplog)
             {},
         )
 
-    assert (
-        "[wecom:acc] inbound message user_id=user-1 chat_id=chat-1 "
-        "chat_type=group req_id=request-1"
-    ) in caplog.messages
+    assert ("[wecom:acc] inbound message user_id=user-1 chat_id=chat-1 chat_type=group req_id=request-1") in caplog.messages
     assert "private question" not in caplog.text
 
 

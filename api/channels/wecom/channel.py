@@ -568,7 +568,11 @@ class WeComChannel(Channel):
         if not isinstance(body, dict):
             return
         msgtype = str(body.get("msgtype") or "")
-        if msgtype != "text":
+        if msgtype == "text":
+            content = str((body.get("text") or {}).get("content") or "")
+        elif msgtype == "voice":
+            content = str((body.get("voice") or {}).get("content") or "")
+        else:
             return
         sender = body.get("from") or {}
         sender_id = str(sender.get("userid") or "")
@@ -577,7 +581,6 @@ class WeComChannel(Channel):
         chat_type = str(body.get("chattype") or "")
         chat_id = str(body.get("chatid") or sender_id or "")
         req_id = str((headers or {}).get("req_id") or body.get("msgid") or "")
-        content = str((body.get("text") or {}).get("content") or "")
         LOGGER.info(
             "[wecom:%s] inbound message user_id=%s chat_id=%s chat_type=%s req_id=%s",
             self.account_id,
