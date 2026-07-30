@@ -253,7 +253,12 @@ class _FakeLangfuseClient:
 def _collect(async_gen):
     async def _run():
         return [ev async for ev in async_gen]
-    return asyncio.run(_run())
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_run())
+    finally:
+        loop.close()
 
 
 # ---------------------------------------------------------------------------
