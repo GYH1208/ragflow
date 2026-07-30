@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 
 from rag.nlp import evidence as evidence_module
-from rag.nlp.evidence import EvidenceConfig, resolve_evidence
+from rag.nlp.evidence import (
+    EvidenceConfig,
+    RerankBusyError,
+    resolve_evidence,
+)
 
 
 class FakeReranker:
@@ -12,7 +16,7 @@ class FakeReranker:
         self.scores = scores
         self.calls = []
 
-    def similarity(self, query, documents):
+    async def __call__(self, query, documents):
         self.calls.append((query, list(documents)))
         return np.asarray(
             [self.scores[(query, document)] for document in documents]
@@ -171,7 +175,7 @@ async def test_resolver_rejects_wrong_citation_when_uncited_competitor_wins():
         question=question,
         answer=answer,
         chunks=chunks,
-        rerank_model=reranker,
+        rerank_similarity=reranker,
         retrieval_similarity_threshold=0.2,
     )
 
@@ -330,7 +334,7 @@ async def test_two_units_with_same_image_id_are_deduplicated():
 @pytest.mark.asyncio
 async def test_non_finite_rerank_output_is_fail_closed():
     class NonFiniteReranker:
-        def similarity(self, query, documents):
+        async def __call__(self, query, documents):
             return np.asarray([float("nan")]), 0
 
     result = await resolve_evidence(
@@ -344,6 +348,25 @@ async def test_non_finite_rerank_output_is_fail_closed():
     assert result.status == "error"
     assert result.used_chunk_ids == []
     assert result.decisions[0].reason == "rerank_error"
+
+
+@pytest.mark.asyncio
+async def test_busy_reranker_is_fail_closed_with_stable_reason():
+    async def busy_similarity(query, documents):
+        raise RerankBusyError("capacity detail")
+
+    result = await resolve_evidence(
+        "怎么查审批？",
+        "查看审批。[ID:0]",
+        [_candidate_chunk("approval", "img", 0)],
+        busy_similarity,
+        0.2,
+    )
+
+    assert result.status == "error"
+    assert result.used_chunk_ids == []
+    assert result.reason == "rerank_busy"
+    assert result.decisions[0].reason == "rerank_busy"
 
 
 @pytest.mark.asyncio

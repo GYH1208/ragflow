@@ -5,10 +5,12 @@ import logging
 from timeit import default_timer as timer
 
 from api.db.services.dialog_service import get_rerank_model
+from api.db.services.evidence_rerank_executor import EvidenceRerankLease
 from rag.nlp.evidence import (
     EvidenceChunk,
     EvidenceConfig,
     EvidenceResolution,
+    RerankBusyError,
     resolve_evidence,
 )
 
@@ -49,7 +51,7 @@ class EvidenceService:
         started_at = timer()
         config = config or EvidenceConfig()
         deadline = started_at + config.timeout_seconds
-        rerank_model = None
+        rerank_lease = None
         try:
             evidence_chunks = [
                 EvidenceChunk(
@@ -86,6 +88,7 @@ class EvidenceService:
                     started_at,
                     "model_unavailable",
                 )
+            rerank_lease = EvidenceRerankLease(rerank_model)
 
             remaining_seconds = deadline - timer()
             if remaining_seconds <= 0:
@@ -99,7 +102,7 @@ class EvidenceService:
                     question=question,
                     answer=answer,
                     chunks=evidence_chunks,
-                    rerank_model=rerank_model,
+                    rerank_similarity=rerank_lease.similarity,
                     retrieval_similarity_threshold=float(
                         dialog.similarity_threshold
                     ),
@@ -176,19 +179,23 @@ class EvidenceService:
                 started_at,
                 "rerank_timeout",
             )
-        except Exception as exc:
+        except RerankBusyError:
             LOGGER.warning(
-                "evidence service failed error_type=%s",
-                type(exc).__name__,
-                exc_info=True,
+                "evidence reranker unavailable reason=rerank_busy"
             )
             return _error_resolution(
                 started_at,
+                "rerank_busy",
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "evidence service failed error_type=%s",
                 type(exc).__name__,
             )
+            return _error_resolution(
+                started_at,
+                "rerank_error",
+            )
         finally:
-            if (
-                rerank_model is not None
-                and hasattr(rerank_model, "close")
-            ):
-                rerank_model.close()
+            if rerank_lease is not None:
+                rerank_lease.seal()

@@ -47,6 +47,7 @@ class Channel(ABC):
     """One configured bot identity on one messaging platform."""
 
     channel_id: ClassVar[str]
+    supports_streaming: bool = False
     supports_reference_images: bool = False
     supports_source_files: bool = False
     hides_reference_markers: bool = False
@@ -65,6 +66,17 @@ class Channel(ABC):
             await self._handler(message)
         except Exception:  # framework boundary — keep one bad msg from killing the channel
             LOGGER.error("[%s:%s] handler error", self.channel_id, self.account_id, exc_info=True)
+
+    async def send_stream(
+        self,
+        message: OutgoingMessage,
+        stream_id: str,
+        finish: bool,
+    ) -> bool | None:
+        """Send a streaming update, falling back to one final ordinary message."""
+        if finish:
+            return await self.send(message)
+        return None
 
     @abstractmethod
     async def start(self) -> None: ...

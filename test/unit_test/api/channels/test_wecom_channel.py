@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 from unittest.mock import AsyncMock, call
 
 import pytest
@@ -112,6 +113,87 @@ async def test_ws_request_resolves_matching_response():
 
 
 @pytest.mark.asyncio
+async def test_ws_request_reuses_explicit_request_id():
+    channel = make_channel()
+    task = asyncio.create_task(
+        channel._ws_request(
+            "aibot_respond_msg",
+            {"msgtype": "stream"},
+            request_id="callback-1",
+        )
+    )
+    await asyncio.sleep(0)
+    sent = channel._ws.send_json.await_args.args[0]
+
+    assert sent["headers"] == {"req_id": "callback-1"}
+
+    response = {
+        "cmd": "aibot_respond_msg",
+        "headers": {"req_id": "callback-1"},
+        "errcode": 0,
+        "body": {},
+    }
+    await channel._handle_ws_payload(json.dumps(response))
+    assert await task == response
+
+
+@pytest.mark.asyncio
+async def test_websocket_stream_reply_reuses_callback_request_and_stream_ids(monkeypatch):
+    channel = make_channel()
+    request = AsyncMock(return_value={"body": {}})
+    monkeypatch.setattr(channel, "_ws_request", request)
+
+    await channel.send_stream(
+        OutgoingMessage(
+            chat_id="chat-1",
+            text="完整正文",
+            reply_to_message_id="callback-1",
+        ),
+        stream_id="stream-1",
+        finish=False,
+    )
+
+    request.assert_awaited_once_with(
+        "aibot_respond_msg",
+        {
+            "msgtype": "stream",
+            "stream": {
+                "id": "stream-1",
+                "content": "完整正文",
+                "finish": False,
+            },
+        },
+        request_id="callback-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_websocket_stream_sends_attachments_only_after_final_frame(monkeypatch):
+    channel = make_channel()
+    request = AsyncMock(return_value={"body": {}})
+    attachments = AsyncMock()
+    monkeypatch.setattr(channel, "_ws_request", request)
+    monkeypatch.setattr(channel, "_send_websocket_attachments", attachments)
+    message = OutgoingMessage(
+        chat_id="chat-1",
+        text="完整正文",
+        reply_to_message_id="callback-1",
+        images=[OutgoingImage("image-1")],
+    )
+
+    await channel.send_stream(message, stream_id="stream-1", finish=False)
+    attachments.assert_not_awaited()
+
+    final_result = await channel.send_stream(
+        message,
+        stream_id="stream-1",
+        finish=True,
+    )
+    attachments.assert_awaited_once_with(message)
+    assert final_result is True
+
+
+@pytest.mark.asyncio
 async def test_ws_request_raises_for_protocol_error():
     channel = make_channel()
     task = asyncio.create_task(channel._ws_request("aibot_send_msg", {}))
@@ -215,6 +297,59 @@ async def test_message_callback_does_not_block_ack_processing():
     )
 
     await asyncio.wait_for(handler_done.wait(), 0.1)
+
+
+@pytest.mark.asyncio
+async def test_websocket_voice_message_dispatches_wecom_transcript():
+    channel = make_channel()
+    received = []
+
+    async def handler(message):
+        received.append(message)
+
+    channel.set_message_handler(handler)
+    raw = {"cmd": "aibot_msg_callback"}
+
+    await channel._handle_ws_message(
+        {"req_id": "voice-request-1"},
+        {
+            "msgtype": "voice",
+            "from": {"userid": "user-1"},
+            "chatid": "chat-1",
+            "chattype": "group",
+            "voice": {"content": "我的年假有多少天"},
+        },
+        raw,
+    )
+
+    assert len(received) == 1
+    assert received[0].text == "我的年假有多少天"
+    assert received[0].sender_id == "user-1"
+    assert received[0].chat_id == "chat-1"
+    assert received[0].chat_type == "group"
+    assert received[0].message_id == "voice-request-1"
+    assert received[0].raw is raw
+
+
+@pytest.mark.asyncio
+async def test_websocket_message_logs_sender_identifiers_without_content(caplog):
+    channel = make_channel()
+
+    with caplog.at_level(logging.INFO, logger="api.channels.wecom.channel"):
+        await channel._handle_ws_message(
+            {"req_id": "request-1"},
+            {
+                "msgtype": "text",
+                "from": {"userid": "user-1"},
+                "chatid": "chat-1",
+                "chattype": "group",
+                "text": {"content": "private question"},
+            },
+            {},
+        )
+
+    assert ("[wecom:acc] inbound message user_id=user-1 chat_id=chat-1 chat_type=group req_id=request-1") in caplog.messages
+    assert "private question" not in caplog.text
 
 
 @pytest.mark.asyncio

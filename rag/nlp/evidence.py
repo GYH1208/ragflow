@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from timeit import default_timer as timer
 from typing import Literal
 
 import numpy as np
-
-from common.misc_utils import thread_pool_exec
 
 _CITATION_TOKEN = r"\[(?:ID:)?[0-9\u0660-\u0669\u06F0-\u06F9]+\]"
 _CITATION_PATTERN = re.compile(
@@ -29,6 +28,16 @@ _META_ONLY = (
 
 class EvidenceParseError(ValueError):
     pass
+
+
+class RerankBusyError(RuntimeError):
+    pass
+
+
+AsyncRerankSimilarity = Callable[
+    [str, list[str]],
+    Awaitable[tuple[object, object]],
+]
 
 
 @dataclass(frozen=True)
@@ -261,10 +270,9 @@ async def _rerank_unit(
     question: str,
     unit: EvidenceUnit,
     shortlist: list[EvidenceChunk],
-    rerank_model,
+    rerank_similarity: AsyncRerankSimilarity,
 ) -> np.ndarray:
-    scores, _ = await thread_pool_exec(
-        rerank_model.similarity,
+    scores, _ = await rerank_similarity(
         _rerank_query(question, unit),
         [chunk.content for chunk in shortlist],
     )
@@ -282,7 +290,7 @@ async def resolve_evidence(
     question: str,
     answer: str,
     chunks: list[EvidenceChunk],
-    rerank_model,
+    rerank_similarity: AsyncRerankSimilarity,
     retrieval_similarity_threshold: float,
     config: EvidenceConfig | None = None,
 ) -> EvidenceResolution:
@@ -381,7 +389,7 @@ async def resolve_evidence(
                 question,
                 unit,
                 shortlist,
-                rerank_model,
+                rerank_similarity,
             )
             for unit, shortlist, _ in work
         ],
@@ -394,13 +402,19 @@ async def resolve_evidence(
     unmatched_segments: list[int] = list(pre_unmatched)
     seen_image_ids: set[str] = set()
     saw_rerank_error = False
+    saw_rerank_busy = False
 
     for (unit, shortlist, cited_chunk_ids), result in zip(
         work,
         rerank_results,
     ):
         if isinstance(result, BaseException):
-            saw_rerank_error = True
+            if isinstance(result, RerankBusyError):
+                saw_rerank_busy = True
+                failure_reason = "rerank_busy"
+            else:
+                saw_rerank_error = True
+                failure_reason = "rerank_error"
             unmatched_segments.append(unit.index)
             decisions.append(
                 EvidenceDecision(
@@ -412,7 +426,7 @@ async def resolve_evidence(
                     selected_chunk_id=None,
                     rerank_scores=[],
                     margin=None,
-                    reason="rerank_error",
+                    reason=failure_reason,
                 )
             )
             continue
@@ -487,6 +501,9 @@ async def resolve_evidence(
             "resolved"
         )
         reason = None
+    elif saw_rerank_busy:
+        status = "error"
+        reason = "rerank_busy"
     elif saw_rerank_error:
         status = "error"
         reason = "rerank_error"

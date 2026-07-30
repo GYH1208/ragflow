@@ -152,6 +152,7 @@ class WeComChannel(Channel):
         self.account = account
         self.account_id = account.account_id
         self.connection_type = (account.connection_type or "webhook").strip().lower()
+        self.supports_streaming = self.connection_type == "websocket"
         self.supports_reference_images = self.connection_type == "websocket"
         self.supports_source_files = self.connection_type == "websocket"
         self.crypto = WeChatCrypto(account.token, account.aes_key, account.corp_id) if self.connection_type == "webhook" else None
@@ -456,11 +457,11 @@ class WeComChannel(Channel):
                 exc_info=(type(error), error, error.__traceback__),
             )
 
-    async def _ws_request(self, cmd: str, body: dict) -> dict:
+    async def _ws_request(self, cmd: str, body: dict, *, request_id: str | None = None) -> dict:
         if self._ws is None or self._ws.closed:
             raise ConnectionError("wecom websocket is not connected")
 
-        req_id = f"req-{time.time_ns()}"
+        req_id = request_id or f"req-{time.time_ns()}"
         future = asyncio.get_running_loop().create_future()
         self._ws_pending[req_id] = future
         payload = {
@@ -567,7 +568,11 @@ class WeComChannel(Channel):
         if not isinstance(body, dict):
             return
         msgtype = str(body.get("msgtype") or "")
-        if msgtype != "text":
+        if msgtype == "text":
+            content = str((body.get("text") or {}).get("content") or "")
+        elif msgtype == "voice":
+            content = str((body.get("voice") or {}).get("content") or "")
+        else:
             return
         sender = body.get("from") or {}
         sender_id = str(sender.get("userid") or "")
@@ -576,7 +581,14 @@ class WeComChannel(Channel):
         chat_type = str(body.get("chattype") or "")
         chat_id = str(body.get("chatid") or sender_id or "")
         req_id = str((headers or {}).get("req_id") or body.get("msgid") or "")
-        content = str((body.get("text") or {}).get("content") or "")
+        LOGGER.info(
+            "[wecom:%s] inbound message user_id=%s chat_id=%s chat_type=%s req_id=%s",
+            self.account_id,
+            sender_id,
+            chat_id,
+            chat_type,
+            req_id,
+        )
         await self._handle_text_message(
             chat_id=chat_id or sender_id,
             sender_id=sender_id,
@@ -694,6 +706,51 @@ class WeComChannel(Channel):
                 LOGGER.error("[wecom:%s] websocket send failed", self.account_id, exc_info=True)
                 return False
 
+        attachments_sent = await self._send_websocket_attachments(
+            message
+        )
+        return sent_any or attachments_sent
+
+    async def send_stream(
+        self,
+        message: OutgoingMessage,
+        stream_id: str,
+        finish: bool,
+    ) -> bool | None:
+        if self.connection_type != "websocket":
+            return await super().send_stream(
+                message,
+                stream_id,
+                finish,
+            )
+        if not message.reply_to_message_id:
+            raise ValueError("wecom stream reply requires reply_to_message_id")
+        if not stream_id:
+            raise ValueError("wecom stream reply requires stream_id")
+        if not message.text:
+            raise ValueError("wecom stream reply requires non-empty text")
+
+        await self._ws_request(
+            "aibot_respond_msg",
+            {
+                "msgtype": "stream",
+                "stream": {
+                    "id": stream_id,
+                    "content": message.text,
+                    "finish": finish,
+                },
+            },
+            request_id=message.reply_to_message_id,
+        )
+        if finish:
+            await self._send_websocket_attachments(message)
+        return True
+
+    async def _send_websocket_attachments(
+        self,
+        message: OutgoingMessage,
+    ) -> bool:
+        sent_any = False
         for image in message.images:
             try:
                 image_data = self._load_stored_image(image.image_id)

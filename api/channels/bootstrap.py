@@ -196,11 +196,12 @@ def _build_one(account_id: str, channel: str, credential: dict):
 def _make_chat_handler(ch):
     """Build the inbound-message handler bound to a single channel.
 
-    Mirrors the non-streaming path of ``session_completion``: the message is
-    appended to a per-end-user conversation under the dialog connected to the
-    bot, a RAG completion is run against that dialog, and the answer is sent
-    back. The connected dialog is resolved per message, so connection changes
-    take effect immediately without restarting the channel. Channels with no
+    The message is appended to a per-end-user conversation under the dialog
+    connected to the bot, a RAG completion is run against that dialog, and the
+    answer is sent back. Streaming-capable channels receive cumulative answer
+    updates; all other channels retain the one-shot response path. The
+    connected dialog is resolved per message, so connection changes take
+    effect immediately without restarting the channel. Channels with no
     connected dialog ignore inbound messages.
     """
     from api.channels.core.base import IncomingMessage, OutgoingMessage
@@ -256,6 +257,10 @@ def _make_chat_handler(ch):
         raw_answer = ""
         reference = {}
         completion_succeeded = False
+        stream_completed = False
+        stream_started = False
+        stream_id = ""
+        text_send_result: bool | None = None
         try:
             send_source_files = bool(ch.supports_source_files and (dia.prompt_config or {}).get("send_source_file", False))
             chat_kwargs = {
@@ -264,38 +269,153 @@ def _make_chat_handler(ch):
             }
             if "{knowledge}" in (dia.prompt_config or {}).get("system", ""):
                 chat_kwargs["knowledge"] = ""
-            async for ans in async_chat(dia, history, False, **chat_kwargs):
-                structure_answer(conv, ans, message_id, conv.id)
-                raw_answer = (ans or {}).get("answer", "") or ""
-                reference = (ans or {}).get("reference") or {}
-                prepared_text, _, cited_files = _prepare_cited_output(
-                    raw_answer,
-                    reference.get("chunks"),
-                    include_source_files=send_source_files,
-                    allowed_dataset_ids=dia.kb_ids,
-                )
-                answer_text = prepared_text if ch.hides_reference_markers else raw_answer
-                answer_files = cited_files if send_source_files else []
+            use_streaming = bool(ch.supports_streaming and msg.message_id)
+            if use_streaming:
+                stream_id = get_uuid()
+                try:
+                    await ch.send_stream(
+                        OutgoingMessage(
+                            chat_id=msg.chat_id,
+                            text="正在查询知识库，请稍候…",
+                            reply_to_message_id=msg.message_id,
+                        ),
+                        stream_id,
+                        False,
+                    )
+                    stream_started = True
+                except Exception as ex:
+                    LOGGER.warning(
+                        "[%s:%s] stream start failed; falling back to complete response: %s",
+                        ch.channel_id,
+                        ch.account_id,
+                        ex,
+                    )
+                    use_streaming = False
+
+            if use_streaming:
+                visible_answer = ""
+                thinking = False
+                async for ans in async_chat(dia, history, True, **chat_kwargs):
+                    structure_answer(conv, ans, message_id, conv.id)
+                    if (ans or {}).get("start_to_think"):
+                        thinking = True
+                        continue
+                    if (ans or {}).get("end_to_think"):
+                        thinking = False
+                        continue
+                    if not (ans or {}).get("final"):
+                        if thinking:
+                            continue
+                        visible_answer += (ans or {}).get("answer", "") or ""
+                        prepared_partial = _prepare_cited_output(visible_answer, None)[0] if ch.hides_reference_markers else visible_answer
+                        if prepared_partial:
+                            await ch.send_stream(
+                                OutgoingMessage(
+                                    chat_id=msg.chat_id,
+                                    text=prepared_partial,
+                                    reply_to_message_id=msg.message_id,
+                                ),
+                                stream_id,
+                                False,
+                            )
+                        continue
+
+                    raw_answer = (ans or {}).get("answer", "") or visible_answer
+                    reference = (ans or {}).get("reference") or {}
+                    prepared_text, _, cited_files = _prepare_cited_output(
+                        raw_answer,
+                        reference.get("chunks"),
+                        include_source_files=send_source_files,
+                        allowed_dataset_ids=dia.kb_ids,
+                    )
+                    answer_text = prepared_text if ch.hides_reference_markers else raw_answer
+                    answer_files = cited_files if send_source_files else []
+                    if not answer_text:
+                        answer_text = "未生成有效回答。"
+                    text_send_result = await ch.send_stream(
+                        OutgoingMessage(
+                            chat_id=msg.chat_id,
+                            text=answer_text,
+                            reply_to_message_id=msg.message_id,
+                            images=[],
+                            files=answer_files,
+                        ),
+                        stream_id,
+                        True,
+                    )
+                    stream_completed = True
+                    completion_succeeded = True
+                    break
+                if not stream_completed:
+                    raw_answer = visible_answer
+                    reference = {}
+                    answer_text = _prepare_cited_output(visible_answer, None)[0] if ch.hides_reference_markers else visible_answer
+                    if not answer_text:
+                        answer_text = "未生成有效回答。"
+                    text_send_result = await ch.send_stream(
+                        OutgoingMessage(
+                            chat_id=msg.chat_id,
+                            text=answer_text,
+                            reply_to_message_id=msg.message_id,
+                            images=[],
+                        ),
+                        stream_id,
+                        True,
+                    )
+                    stream_completed = True
+                    completion_succeeded = True
                 ConversationService.update_by_id(conv.id, conv.to_dict())
-                completion_succeeded = True
-                break
+            else:
+                async for ans in async_chat(dia, history, False, **chat_kwargs):
+                    structure_answer(conv, ans, message_id, conv.id)
+                    raw_answer = (ans or {}).get("answer", "") or ""
+                    reference = (ans or {}).get("reference") or {}
+                    prepared_text, _, cited_files = _prepare_cited_output(
+                        raw_answer,
+                        reference.get("chunks"),
+                        include_source_files=send_source_files,
+                        allowed_dataset_ids=dia.kb_ids,
+                    )
+                    answer_text = prepared_text if ch.hides_reference_markers else raw_answer
+                    answer_files = cited_files if send_source_files else []
+                    ConversationService.update_by_id(conv.id, conv.to_dict())
+                    completion_succeeded = True
+                    break
         except Exception as ex:
-            LOGGER.exception("[%s:%s] completion failed: %s", ch.channel_id, ch.account_id, ex)
+            LOGGER.exception("[%s:%s] completion failed", ch.channel_id, ch.account_id)
             answer_text = f"**ERROR**: {ex}"
+            if stream_started:
+                try:
+                    text_send_result = await ch.send_stream(
+                        OutgoingMessage(
+                            chat_id=msg.chat_id,
+                            text=answer_text,
+                            reply_to_message_id=msg.message_id,
+                            images=[],
+                        ),
+                        stream_id,
+                        True,
+                    )
+                    stream_completed = True
+                except Exception:
+                    LOGGER.exception(
+                        "[%s:%s] failed to finish errored stream",
+                        ch.channel_id,
+                        ch.account_id,
+                    )
 
-        if not answer_text:
-            return
-
-        text_send_result = await ch.send(
-            OutgoingMessage(
-                chat_id=msg.chat_id,
-                text=answer_text,
-                reply_to_message_id=msg.message_id or None,
-                images=[],
-                files=answer_files,
+        if answer_text and not stream_completed:
+            text_send_result = await ch.send(
+                OutgoingMessage(
+                    chat_id=msg.chat_id,
+                    text=answer_text,
+                    reply_to_message_id=msg.message_id or None,
+                    images=[],
+                    files=answer_files,
+                )
             )
-        )
-        if not completion_succeeded:
+
+        if not answer_text or not completion_succeeded:
             return
 
         valid_chunks = (
