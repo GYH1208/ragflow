@@ -22,7 +22,10 @@ import { INodeEvent, MessageEventType } from '@/hooks/use-send-message';
 import { cn } from '@/lib/utils';
 import { AgentChatContext } from '@/pages/agent/context';
 import { WorkFlowTimeline } from '@/pages/agent/log-sheet/workflow-timeline';
-import { citationMarkerReg } from '@/utils/citation-utils';
+import {
+  citationMarkerReg,
+  getRenderableReferenceDocuments,
+} from '@/utils/citation-utils';
 import { getDirAttribute } from '@/utils/text-direction';
 import { isEmpty } from 'lodash';
 import { Atom, ChevronDown, ChevronUp } from 'lucide-react';
@@ -86,6 +89,7 @@ function MessageItem({
   const { theme } = useTheme();
   const isAssistant = item.role === MessageType.Assistant;
   const isUser = item.role === MessageType.User;
+  const messageContent = item.content;
   const [showThinking, setShowThinking] = useState(false);
   const { setLastSendLoadingFunc } = useContext(AgentChatContext);
 
@@ -96,17 +100,13 @@ function MessageItem({
   }, [loading, setLastSendLoadingFunc, item.id]);
 
   const referenceDocuments = useMemo(() => {
-    const docs = reference?.doc_aggs ?? {};
-
-    return Object.values(docs);
-  }, [reference?.doc_aggs]);
+    return getRenderableReferenceDocuments(messageContent, reference);
+  }, [messageContent, reference]);
 
   const documentDownloadInfos = useMemo(
     () => item.downloads ?? [],
     [item.downloads],
   );
-  const messageContent = item.content;
-
   const handleRegenerateMessage = useCallback(() => {
     regenerateMessage?.(item);
   }, [regenerateMessage, item]);

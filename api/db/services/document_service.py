@@ -42,6 +42,26 @@ class DocumentService(CommonService):
     model = Document
 
     @classmethod
+    @DB.connection_context()
+    def get_ready_by_name_keyword(cls, kb_ids, keyword):
+        if not kb_ids or not keyword:
+            return []
+        return list(
+            cls.model.select(
+                cls.model.id,
+                cls.model.kb_id,
+                cls.model.name,
+            )
+            .where(
+                cls.model.kb_id.in_(kb_ids),
+                fn.LOWER(cls.model.name).contains(keyword.lower()),
+                cls.model.run == TaskStatus.DONE.value,
+                cls.model.status == StatusEnum.VALID.value,
+            )
+            .dicts()
+        )
+
+    @classmethod
     def try_start_parse(cls, doc_id, update_data):
         """Atomically mark a non-running document as running."""
         return (

@@ -25,7 +25,7 @@ import {
   replaceTextByOldReg,
   replaceThinkToSection,
 } from '@/utils/chat';
-import { citationMarkerReg } from '@/utils/citation-utils';
+import { citationMarkerReg, hasReferenceChunk } from '@/utils/citation-utils';
 import { getDirAttribute } from '@/utils/text-direction';
 
 import { useFetchDocumentThumbnailsByIds } from '@/hooks/use-document-request';
@@ -332,6 +332,9 @@ function MarkdownContent({
     (text: string) => {
       const replacedText = reactStringReplace(text, currentReg, (match, i) => {
         const chunkIndex = getChunkIndex(match);
+        if (!hasReferenceChunk(reference, chunkIndex)) {
+          return null;
+        }
 
         return (
           <HoverCard key={i}>
@@ -349,7 +352,7 @@ function MarkdownContent({
 
       return replacedText;
     },
-    [renderPopoverContent],
+    [reference, renderPopoverContent],
   );
 
   const dir = getDirAttribute(content.replace(citationMarkerReg, ''));

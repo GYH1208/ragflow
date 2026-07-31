@@ -31,6 +31,7 @@ from common.constants import LLMType, ParserType, StatusEnum
 from api.db.db_models import DB, Dialog
 from api.db.services.common_service import CommonService
 from api.db.services.doc_metadata_service import DocMetadataService
+from api.db.services.document_service import DocumentService
 from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.langfuse_service import TenantLangfuseService
 from api.db.services.llm_service import LLMBundle
@@ -522,6 +523,127 @@ BAD_CITATION_PATTERNS = [
     re.compile(r"ref\s*(\d+)", flags=re.IGNORECASE),  # ref12、REF 12
 ]
 CITATION_MARKER_PATTERN = re.compile(r"\[(?:ID:)?([0-9\u0660-\u0669\u06F0-\u06F9]+)\]")
+DOCUMENT_IDENTIFIER_PATTERN = re.compile(
+    r"(?<![A-Z0-9])"
+    r"([A-Z][A-Z0-9]{1,11}(?:-[A-Z0-9]{1,12}){2,4}"
+    r"(?:[_-]V\d+(?:\.\d+)*)?)"
+    r"(?![A-Z0-9])",
+    flags=re.IGNORECASE,
+)
+DEFAULT_NO_EVIDENCE_RESPONSE = (
+    "知识库中未找到明确依据。请确认文件已上传并完成解析，"
+    "或补充文件名、文件编号、版本号或具体业务场景。"
+)
+
+
+def _normalize_answer_citations(
+    answer: str,
+    chunk_count: int,
+) -> tuple[str, set[int], list[int], int]:
+    valid_indices: set[int] = set()
+    invalid_indices: list[int] = []
+    citation_count = 0
+
+    def replace_marker(match: re.Match) -> str:
+        nonlocal citation_count
+        citation_count += 1
+        digits = normalize_arabic_digits(match.group(1))
+        try:
+            index = int(digits)
+        except (TypeError, ValueError):
+            return ""
+        if 0 <= index < chunk_count:
+            valid_indices.add(index)
+            return match.group(0)
+        invalid_indices.append(index)
+        return ""
+
+    cleaned_answer = CITATION_MARKER_PATTERN.sub(replace_marker, answer or "")
+    return (
+        cleaned_answer,
+        valid_indices,
+        list(dict.fromkeys(invalid_indices)),
+        citation_count,
+    )
+
+
+def _build_cited_doc_aggs(
+    chunks: list[dict],
+    cited_indices: set[int],
+) -> list[dict]:
+    docs_by_id: dict[str, dict] = {}
+
+    for index in sorted(cited_indices):
+        if index < 0 or index >= len(chunks):
+            continue
+        chunk = chunks[index]
+        doc_id = str(chunk.get("doc_id") or chunk.get("document_id") or "")
+        if not doc_id:
+            continue
+        if doc_id not in docs_by_id:
+            doc = {
+                "doc_id": doc_id,
+                "doc_name": (
+                    chunk.get("docnm_kwd")
+                    or chunk.get("document_name")
+                    or ""
+                ),
+                "count": 0,
+            }
+            if chunk.get("url"):
+                doc["url"] = chunk["url"]
+            docs_by_id[doc_id] = doc
+        docs_by_id[doc_id]["count"] += 1
+
+    return list(docs_by_id.values())
+
+
+def _extract_document_identifiers(question: str) -> list[str]:
+    identifiers = []
+    for match in DOCUMENT_IDENTIFIER_PATTERN.finditer(question or ""):
+        identifier = match.group(1).upper()
+        if identifier not in identifiers:
+            identifiers.append(identifier)
+    return identifiers
+
+
+def _normalize_document_identifier(value: str) -> str:
+    return re.sub(r"[_\s-]+", "-", (value or "").upper())
+
+
+def _resolve_document_code_scope(
+    question: str,
+    kb_ids: list[str],
+) -> tuple[list[str], list[str] | None]:
+    identifiers = _extract_document_identifiers(question)
+    if not identifiers:
+        return [], None
+
+    ready_document_ids = []
+    try:
+        for identifier in identifiers:
+            code = re.split(r"[_-]V\d", identifier, maxsplit=1)[0]
+            docs = DocumentService.get_ready_by_name_keyword(kb_ids, code)
+            normalized_identifier = _normalize_document_identifier(identifier)
+            for doc in docs:
+                if normalized_identifier not in _normalize_document_identifier(
+                    doc.get("name", "")
+                ):
+                    continue
+                doc_id = doc.get("id")
+                if doc_id and doc_id not in ready_document_ids:
+                    ready_document_ids.append(doc_id)
+    except Exception as exc:  # noqa: BLE001 - exact lookup is an optimization
+        logger.warning(
+            "Exact document identifier lookup failed; using normal retrieval: "
+            "identifier_count=%d kb_count=%d error=%s",
+            len(identifiers),
+            len(kb_ids),
+            type(exc).__name__,
+        )
+        return identifiers, None
+
+    return identifiers, ready_document_ids
 
 
 def repair_bad_citation_formats(answer: str, kbinfos: dict, idx: set):
@@ -674,13 +796,44 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         if p["key"] not in kwargs:
             prompt_config["system"] = prompt_config["system"].replace("{%s}" % p["key"], " ")
 
-    if len(questions) > 1 and prompt_config.get("refine_multiturn"):
+    used_multiturn_refinement = bool(
+        len(questions) > 1 and prompt_config.get("refine_multiturn")
+    )
+    if used_multiturn_refinement:
         questions = [await full_question(dialog.tenant_id, dialog.llm_id, messages)]
     else:
         questions = questions[-1:]
 
     if prompt_config.get("cross_languages"):
         questions = [await cross_languages(dialog.tenant_id, dialog.llm_id, questions[0], prompt_config["cross_languages"])]
+
+    generation_question = questions[-1]
+    exact_identifiers, exact_document_ids = [], None
+    if attachments is None:
+        exact_identifiers, exact_document_ids = _resolve_document_code_scope(
+            generation_question,
+            dialog.kb_ids,
+        )
+        if exact_document_ids is not None:
+            attachments = exact_document_ids
+    if exact_identifiers and exact_document_ids == []:
+        no_evidence_response = (
+            prompt_config.get("empty_response") or DEFAULT_NO_EVIDENCE_RESPONSE
+        )
+        logger.info(
+            "Exact document identifiers not found in ready documents: "
+            "identifier_count=%d kb_count=%d",
+            len(exact_identifiers),
+            len(dialog.kb_ids),
+        )
+        yield {
+            "answer": no_evidence_response,
+            "reference": {"total": 0, "chunks": [], "doc_aggs": []},
+            "prompt": "\n\n### Query:\n%s" % generation_question,
+            "audio_binary": tts(tts_mdl, no_evidence_response),
+            "final": True,
+        }
+        return
 
     if dialog.meta_data_filter:
         attachments = await apply_meta_data_filter(
@@ -787,8 +940,10 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     logging.debug("{}->{}".format(" ".join(questions), "\n->".join(knowledges)))
 
     retrieval_ts = timer()
-    if not knowledges and prompt_config.get("empty_response"):
-        empty_res = prompt_config["empty_response"]
+    if not knowledges and "knowledge" in param_keys:
+        empty_res = (
+            prompt_config.get("empty_response") or DEFAULT_NO_EVIDENCE_RESPONSE
+        )
         yield {"answer": empty_res, "reference": kbinfos, "prompt": "\n\n### Query:\n%s" % " ".join(questions), "audio_binary": tts(tts_mdl, empty_res), "final": True}
         return
 
@@ -813,7 +968,10 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     )
     if include_references:
         prompt4citation = citation_prompt()
-    msg.extend([{"role": m["role"], "content": re.sub(r"##\d+\$\$", "", m["content"])} for m in messages if m["role"] != "system"])
+    if used_multiturn_refinement:
+        msg.append({"role": "user", "content": generation_question})
+    else:
+        msg.extend([{"role": m["role"], "content": re.sub(r"##\d+\$\$", "", m["content"])} for m in messages if m["role"] != "system"])
     used_token_count, msg = message_fit_in(msg, int(max_tokens * 0.95))
     if llm_model_config["model_type"] == "chat" and image_attachments:
         convert_last_user_msg_to_multimodal(msg, image_attachments, factory)
@@ -834,38 +992,71 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             answer = ans[1]
 
         if include_references:
-            idx = set([])
-            normalized_answer = normalize_arabic_digits(answer) or ""
-            if embd_mdl and not CITATION_MARKER_PATTERN.search(normalized_answer):
+            candidate_doc_count = len(kbinfos.get("doc_aggs", []))
+            chunks = kbinfos.get("chunks", [])
+            had_explicit_citations = bool(
+                CITATION_MARKER_PATTERN.search(answer or "")
+            )
+            reference_mode = "explicit" if had_explicit_citations else "none"
+            idx: set[int] = set()
+            if embd_mdl and not had_explicit_citations:
                 # Main retrieval no longer ships chunk vectors back from ES.
                 # Pull them on demand for the chunks we are about to cite.
-                await _hydrate_chunk_vectors(retriever, kbinfos.get("chunks", []), tenant_ids, dialog.kb_ids)
+                await _hydrate_chunk_vectors(
+                    retriever,
+                    chunks,
+                    tenant_ids,
+                    dialog.kb_ids,
+                )
                 answer, idx = retriever.insert_citations(
                     answer,
-                    [ck["content_ltks"] for ck in kbinfos["chunks"]],
-                    [ck["vector"] for ck in kbinfos["chunks"]],
+                    [ck["content_ltks"] for ck in chunks],
+                    [ck["vector"] for ck in chunks],
                     embd_mdl,
                     tkweight=1 - dialog.vector_similarity_weight,
                     vtweight=dialog.vector_similarity_weight,
                 )
-            else:
-                for match in CITATION_MARKER_PATTERN.finditer(normalized_answer):
-                    i = int(match.group(1))
-                    if i < len(kbinfos["chunks"]):
-                        idx.add(i)
+                if idx:
+                    reference_mode = "auto_inserted"
 
             answer, idx = repair_bad_citation_formats(answer, kbinfos, idx)
-
-            idx = set([kbinfos["chunks"][int(i)]["doc_id"] for i in idx])
-            recall_docs = [d for d in kbinfos["doc_aggs"] if d["doc_id"] in idx]
-            if not recall_docs:
-                recall_docs = kbinfos["doc_aggs"]
-            kbinfos["doc_aggs"] = recall_docs
+            answer, parsed_idx, invalid_idx, explicit_count = (
+                _normalize_answer_citations(answer, len(chunks))
+            )
+            idx.update(parsed_idx)
+            idx = {index for index in idx if 0 <= index < len(chunks)}
 
             refs = deepcopy(kbinfos)
+            refs["doc_aggs"] = _build_cited_doc_aggs(chunks, idx)
             for c in refs["chunks"]:
                 if c.get("vector"):
                     del c["vector"]
+
+            log_args = {
+                "chunk_count": len(chunks),
+                "candidate_doc_count": candidate_doc_count,
+                "explicit_citation_count": explicit_count,
+                "valid_citation_count": len(idx),
+                "invalid_citation_ids": invalid_idx,
+                "final_doc_count": len(refs["doc_aggs"]),
+                "reference_mode": reference_mode,
+            }
+            if session_id:
+                log_args["session_id"] = session_id
+            if trace_context.get("trace_id"):
+                log_args["trace_id"] = trace_context["trace_id"]
+
+            if invalid_idx:
+                logger.warning("Invalid chat citations removed: %s", log_args)
+            else:
+                logger.info("Chat references finalized: %s", log_args)
+
+            if explicit_count and not idx:
+                answer = (
+                    prompt_config.get("empty_response")
+                    or DEFAULT_NO_EVIDENCE_RESPONSE
+                )
+                think = ""
 
         if answer.lower().find("invalid key") >= 0 or answer.lower().find("invalid api") >= 0:
             answer += " Please set LLM API-Key in 'User Setting -> Model providers -> API-Key'"

@@ -196,6 +196,35 @@ class _StubRetriever:
         return answer, set()
 
 
+class _ReferenceRetriever(_StubRetriever):
+    def __init__(self, kbinfos, inserted_indices=None):
+        self.kbinfos = deepcopy(kbinfos)
+        self.inserted_indices = set(inserted_indices or [])
+        self.retrieval_calls = []
+
+    async def retrieval(self, *args, **kwargs):
+        self.retrieval_calls.append((args, kwargs))
+        return deepcopy(self.kbinfos)
+
+    def insert_citations(self, answer, *_args, **_kwargs):
+        if not self.inserted_indices:
+            return answer, set()
+        markers = "".join(
+            f" [ID:{index}]" for index in sorted(self.inserted_indices)
+        )
+        return answer + markers, self.inserted_indices
+
+
+class _RecordingChatModel(_StreamingChatModel):
+    def __init__(self, answer):
+        super().__init__(answer)
+        self.chat_calls = []
+
+    async def async_chat(self, system_prompt, messages, gen_conf, **kwargs):
+        self.chat_calls.append((system_prompt, deepcopy(messages), gen_conf, kwargs))
+        return self.answer
+
+
 class _FakePropagateAttributesContext:
     """No-op context manager for fake propagate_attributes."""
 
@@ -259,6 +288,125 @@ def _collect(async_gen):
         return loop.run_until_complete(_run())
     finally:
         loop.close()
+
+
+def _make_reference_kbinfos():
+    chunks = [
+        {
+            "chunk_id": f"chunk-{index}",
+            "doc_id": f"doc-{index % 3}",
+            "docnm_kwd": f"文档-{index % 3}.docx",
+            "content_ltks": f"知识块 {index}",
+            "content_with_weight": f"知识块 {index}",
+            "vector": [0.1, 0.2, 0.3],
+        }
+        for index in range(10)
+    ]
+    return {
+        "chunks": chunks,
+        "doc_aggs": [
+            {
+                "doc_id": f"candidate-{index}",
+                "doc_name": f"候选-{index}.docx",
+                "count": 1,
+            }
+            for index in range(25)
+        ],
+        "total": 70,
+    }
+
+
+def _run_reference_async_chat(
+    monkeypatch,
+    *,
+    answer,
+    kbinfos,
+    inserted_indices=None,
+    messages=None,
+    refine_multiturn=False,
+    refined_question=None,
+    document_code_scope=None,
+):
+    chat_mdl = _RecordingChatModel(answer)
+    retriever = _ReferenceRetriever(kbinfos, inserted_indices)
+
+    monkeypatch.setattr(
+        dialog_service,
+        "get_model_type_by_name",
+        lambda _tenant_id, _llm_id: ["chat"],
+    )
+    monkeypatch.setattr(
+        dialog_service,
+        "get_model_config_from_provider_instance",
+        lambda _tenant_id, _model_type, _llm_id: _LLM_CONFIG,
+    )
+    monkeypatch.setattr(
+        dialog_service.TenantLangfuseService,
+        "filter_by_tenant",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        dialog_service,
+        "get_models",
+        lambda _dialog, **_kwargs: (
+            [_KB],
+            chat_mdl,
+            None,
+            chat_mdl,
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        dialog_service.KnowledgebaseService,
+        "get_field_map",
+        lambda _kb_ids: {},
+    )
+    monkeypatch.setattr(
+        dialog_service.KnowledgebaseService,
+        "get_by_ids",
+        lambda _kb_ids: [_KB],
+    )
+    monkeypatch.setattr(
+        dialog_service.settings,
+        "retriever",
+        retriever,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dialog_service,
+        "label_question",
+        lambda _question, _kbs: "",
+    )
+    monkeypatch.setattr(
+        dialog_service,
+        "kb_prompt",
+        lambda _kbinfos, _max_tokens, **_kwargs: ["当前知识块"],
+    )
+    if refined_question is not None:
+        async def fake_full_question(*_args, **_kwargs):
+            return refined_question
+
+        monkeypatch.setattr(dialog_service, "full_question", fake_full_question)
+    if document_code_scope is not None:
+        monkeypatch.setattr(
+            dialog_service,
+            "_resolve_document_code_scope",
+            lambda _question, _kb_ids: document_code_scope,
+        )
+
+    dialog = _make_dialog(chat_mdl)
+    dialog.prompt_config["refine_multiturn"] = refine_multiturn
+    events = _collect(
+        dialog_service.async_chat(
+            dialog,
+            messages or [{"role": "user", "content": "测试引用。"}],
+            stream=False,
+            quote=True,
+            session_id="session-reference-test",
+        )
+    )
+    assert len(events) == 1
+    return events[0], chat_mdl, retriever
 
 
 # ---------------------------------------------------------------------------
@@ -745,3 +893,318 @@ def test_async_chat_continues_when_langfuse_observation_start_fails(monkeypatch)
     assert len(_FakeLangfuseClient.instances) == 1
     assert _FakeLangfuseClient.instances[0].observation_kwargs is None
     assert _FakeLangfuseClient.instances[0].observation.ended is False
+
+
+@pytest.mark.parametrize(
+    (
+        "answer",
+        "chunk_count",
+        "expected_answer",
+        "expected_valid",
+        "expected_invalid",
+        "expected_count",
+    ),
+    [
+        (
+            "有效 [ID:0]，无效 [ID:42]。",
+            10,
+            "有效 [ID:0]，无效 。",
+            {0},
+            [42],
+            2,
+        ),
+        (
+            "阿拉伯数字 [ID:١]，波斯数字 [۲]。",
+            3,
+            "阿拉伯数字 [ID:١]，波斯数字 [۲]。",
+            {1, 2},
+            [],
+            2,
+        ),
+        (
+            "全部越界 [ID:42][ID:43]。",
+            10,
+            "全部越界 。",
+            set(),
+            [42, 43],
+            2,
+        ),
+    ],
+)
+def test_normalize_answer_citations(
+    answer,
+    chunk_count,
+    expected_answer,
+    expected_valid,
+    expected_invalid,
+    expected_count,
+):
+    assert dialog_service._normalize_answer_citations(
+        answer,
+        chunk_count,
+    ) == (
+        expected_answer,
+        expected_valid,
+        expected_invalid,
+        expected_count,
+    )
+
+
+def test_build_cited_doc_aggs_deduplicates_by_doc_id():
+    chunks = [
+        {
+            "chunk_id": "chunk-0",
+            "doc_id": "doc-a",
+            "docnm_kwd": "模板.docx",
+        },
+        {
+            "chunk_id": "chunk-1",
+            "doc_id": "doc-a",
+            "docnm_kwd": "模板.docx",
+        },
+        {
+            "chunk_id": "chunk-2",
+            "doc_id": "doc-b",
+            "docnm_kwd": "模板.docx",
+            "url": "https://example.test/doc-b",
+        },
+        {
+            "chunk_id": "chunk-3",
+            "doc_id": "",
+            "docnm_kwd": "缺少ID.docx",
+        },
+    ]
+
+    assert dialog_service._build_cited_doc_aggs(
+        chunks,
+        {0, 1, 2, 3, 99},
+    ) == [
+        {
+            "doc_id": "doc-a",
+            "doc_name": "模板.docx",
+            "count": 2,
+        },
+        {
+            "doc_id": "doc-b",
+            "doc_name": "模板.docx",
+            "count": 1,
+            "url": "https://example.test/doc-b",
+        },
+    ]
+
+
+@pytest.mark.p2
+def test_async_chat_prunes_candidate_docs_to_explicit_citations(monkeypatch):
+    answer = "依据一 [ID:0]，依据二 [ID:1]。"
+
+    final, _, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer=answer,
+        kbinfos=_make_reference_kbinfos(),
+    )
+
+    assert final["answer"] == answer
+    assert [doc["doc_id"] for doc in final["reference"]["doc_aggs"]] == [
+        "doc-0",
+        "doc-1",
+    ]
+    assert len(final["reference"]["chunks"]) == 10
+
+
+@pytest.mark.p2
+def test_async_chat_drops_all_docs_when_explicit_citations_are_out_of_range(
+    monkeypatch,
+    caplog,
+):
+    final, _, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="无源 [ID:42]，报告 [ID:43]，有源 [ID:44][ID:45]。",
+        kbinfos=_make_reference_kbinfos(),
+    )
+
+    assert "[ID:42]" not in final["answer"]
+    assert "[ID:45]" not in final["answer"]
+    assert final["reference"]["doc_aggs"] == []
+    assert "invalid_citation_ids" in caplog.text
+
+
+@pytest.mark.p2
+def test_async_chat_keeps_valid_docs_and_removes_only_invalid_markers(monkeypatch):
+    final, _, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="有效 [ID:0]，无效 [ID:42]。",
+        kbinfos=_make_reference_kbinfos(),
+    )
+
+    assert "[ID:0]" in final["answer"]
+    assert "[ID:42]" not in final["answer"]
+    assert [doc["doc_id"] for doc in final["reference"]["doc_aggs"]] == [
+        "doc-0",
+    ]
+
+
+@pytest.mark.p2
+def test_async_chat_uses_only_auto_inserted_citation_docs(monkeypatch):
+    final, _, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="没有显式引用的回答。",
+        kbinfos=_make_reference_kbinfos(),
+        inserted_indices={2},
+    )
+
+    assert "[ID:2]" in final["answer"]
+    assert [doc["doc_id"] for doc in final["reference"]["doc_aggs"]] == [
+        "doc-2",
+    ]
+
+
+@pytest.mark.p2
+def test_async_chat_returns_no_docs_when_auto_insertion_finds_no_evidence(
+    monkeypatch,
+):
+    final, _, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="没有证据匹配的回答。",
+        kbinfos=_make_reference_kbinfos(),
+        inserted_indices=set(),
+    )
+
+    assert final["reference"]["doc_aggs"] == []
+
+
+@pytest.mark.p2
+def test_refined_multiturn_generation_excludes_untrusted_assistant_history(
+    monkeypatch,
+):
+    messages = [
+        {"role": "user", "content": "关键工序验证模板是什么？"},
+        {
+            "role": "assistant",
+            "content": "错误历史：使用 BDMB-YF-223 和 BDMB-YF-224。",
+        },
+        {"role": "user", "content": "再确认一下，方案和报告用哪个模板？"},
+    ]
+    final, chat_mdl, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="使用 BDMB-YF-099 和 BDMB-YF-100 [ID:0][ID:1]。",
+        kbinfos=_make_reference_kbinfos(),
+        messages=messages,
+        refine_multiturn=True,
+        refined_question="关键工序验证的方案和报告分别用哪个模板？",
+    )
+
+    assert "BDMB-YF-099" in final["answer"]
+    generation_messages = chat_mdl.chat_calls[-1][1]
+    assert generation_messages == [
+        {
+            "role": "user",
+            "content": "关键工序验证的方案和报告分别用哪个模板？",
+        }
+    ]
+    assert "BDMB-YF-223" not in str(generation_messages)
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        (
+            "帮我找一下 BDMB-YF-099_V1.0",
+            ["BDMB-YF-099_V1.0"],
+        ),
+        (
+            "对比 bdmb-yf-099 和 BDMB-YF-100。",
+            ["BDMB-YF-099", "BDMB-YF-100"],
+        ),
+        ("ISO-13485 有什么要求？", []),
+    ],
+)
+def test_extract_document_identifiers(question, expected):
+    assert dialog_service._extract_document_identifiers(question) == expected
+
+
+def test_resolve_document_code_scope_matches_normalized_version(monkeypatch):
+    calls = []
+
+    def fake_get_ready_by_name_keyword(kb_ids, keyword):
+        calls.append((kb_ids, keyword))
+        return [
+            {
+                "id": "doc-ready",
+                "name": "软件/BDMB-YF-099-V1.0_关键工序验证方案.docx",
+            },
+            {
+                "id": "doc-other-version",
+                "name": "软件/BDMB-YF-099_V2.0_关键工序验证方案.docx",
+            },
+        ]
+
+    monkeypatch.setattr(
+        dialog_service.DocumentService,
+        "get_ready_by_name_keyword",
+        fake_get_ready_by_name_keyword,
+    )
+
+    assert dialog_service._resolve_document_code_scope(
+        "帮我找 BDMB-YF-099_V1.0",
+        ["kb-1"],
+    ) == (
+        ["BDMB-YF-099_V1.0"],
+        ["doc-ready"],
+    )
+    assert calls == [(["kb-1"], "BDMB-YF-099")]
+
+
+@pytest.mark.p2
+def test_exact_document_identifier_scopes_retrieval_to_ready_documents(
+    monkeypatch,
+):
+    final, _, retriever = _run_reference_async_chat(
+        monkeypatch,
+        answer="使用指定模板 [ID:0]。",
+        kbinfos=_make_reference_kbinfos(),
+        messages=[
+            {
+                "role": "user",
+                "content": "帮我找一下 BDMB-YF-099_V1.0",
+            }
+        ],
+        document_code_scope=(
+            ["BDMB-YF-099_V1.0"],
+            ["ready-document-id"],
+        ),
+    )
+
+    assert final["reference"]["doc_aggs"]
+    assert retriever.retrieval_calls[-1][1]["doc_ids"] == [
+        "ready-document-id",
+    ]
+
+
+@pytest.mark.p2
+def test_missing_exact_document_identifier_returns_no_evidence_response(
+    monkeypatch,
+):
+    final, chat_mdl, retriever = _run_reference_async_chat(
+        monkeypatch,
+        answer="不应调用模型。",
+        kbinfos=_make_reference_kbinfos(),
+        messages=[
+            {
+                "role": "user",
+                "content": "帮我找一下 BDMB-YF-223_V1.0",
+            }
+        ],
+        document_code_scope=(
+            ["BDMB-YF-223_V1.0"],
+            [],
+        ),
+    )
+
+    assert "知识库中未找到" in final["answer"]
+    assert final["reference"] == {
+        "chunks": [],
+        "doc_aggs": [],
+        "total": 0,
+    }
+    assert chat_mdl.chat_calls == []
+    assert retriever.retrieval_calls == []

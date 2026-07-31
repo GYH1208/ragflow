@@ -1,4 +1,8 @@
-Based on the provided document or chat history, add citations to the input text using the format specified later. 
+Add citations using only the document context provided for the current turn.
+Previous assistant messages are conversational context, not evidence. Never reuse a
+document name, number, version, or factual claim from chat history unless it is also
+supported by the current document context. If the current context does not support the
+answer, state that no clear basis was found instead of repeating a historical answer.
 
 # Citation Requirements:
 

@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next';
 
 import { IRegenerateMessage, IRemoveMessageById } from '@/hooks/logic-hooks';
 import { cn } from '@/lib/utils';
+import { getRenderableReferenceDocuments } from '@/utils/citation-utils';
 import { isEmpty } from 'lodash';
 import { DocumentDownloadButton } from '../document-download-button';
 import MarkdownContent from '../markdown-content';
@@ -58,21 +59,20 @@ const MessageItem = ({
   const { theme } = useTheme();
   const isAssistant = item.role === MessageType.Assistant;
   const isUser = item.role === MessageType.User;
+  const messageContent = item.content;
 
   const uploadedFiles = useMemo(() => {
     return item?.files ?? [];
   }, [item?.files]);
 
   const referenceDocumentList = useMemo(() => {
-    return reference?.doc_aggs ?? [];
-  }, [reference?.doc_aggs]);
+    return getRenderableReferenceDocuments(messageContent, reference);
+  }, [messageContent, reference]);
 
   const documentDownloadInfos = useMemo(
     () => item.downloads ?? [],
     [item.downloads],
   );
-  const messageContent = item.content;
-
   const handleRegenerateMessage = useCallback(() => {
     regenerateMessage?.(item);
   }, [regenerateMessage, item]);
