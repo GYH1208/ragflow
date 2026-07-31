@@ -2,9 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让聊天回答的行内引用、reference chunks 和来源文件列表保持一致，并在引用编号越界时严格返回空来源而不是全部检索候选文档。
+**Goal:** 让聊天回答的当前检索证据、行内引用、reference chunks 和来源文件列表保持
+一致；隔离历史错误答案，精确处理文件编号查询，并在没有有效证据时严格返回无依据响应。
 
-**Architecture:** 保留通用检索层对全部有效候选生成 `doc_aggs` 的既有语义，在聊天回答装饰阶段校验引用编号并按有效 chunk 重建最小来源文件集合。Web 端通过共享引用工具过滤历史错误数据，并在旧版和新版聊天 Markdown 渲染器中拒绝越界 `Fig.`。
+**Architecture:** 保留通用检索层对全部有效候选生成 `doc_aggs` 的既有语义，在聊天入口
+按已解析文件解析精确文件编号范围，多轮改写后只把本轮独立问题交给回答模型；在回答
+装饰阶段校验引用编号并按有效 chunk 重建最小来源文件集合。Web 端通过共享引用工具过滤
+历史错误数据，并在旧版和新版聊天 Markdown 渲染器中拒绝越界 `Fig.`。
 
 **Tech Stack:** Python 3.10+、pytest、Quart/Flask 服务层、TypeScript、React 18、Jest、Ruff、ESLint。
 
@@ -15,6 +19,9 @@
 - 不新增配置项、数据库字段或数据库迁移。
 - 显式引用全部越界时必须返回空 `doc_aggs`，不得回退到候选文档。
 - 无效引用不得渲染为可交互 `Fig.`。
+- 历史助手消息不得作为本轮文件名称、编号、版本或事实结论的证据。
+- 精确文件编号查询只使用当前知识库中状态有效且解析完成的匹配文件。
+- 知识库参数存在但本轮没有知识块时不得调用回答模型猜测答案。
 - 日志不得包含完整问题、完整回答或 chunk 正文。
 - 保持 reference JSON 的 `chunks`、`doc_aggs`、`total` 及既有可选字段结构兼容。
 - 实现遵循 TDD：先写失败测试，再做最小实现。
@@ -26,7 +33,12 @@
 - Modify: `api/db/services/dialog_service.py`
   - 新增回答引用规范化和按有效引用聚合文档的纯函数。
   - 在 `decorate_answer()` 中接入严格引用收口。
+  - 隔离多轮历史助手答案，增加精确文件编号范围和无证据兜底。
   - 记录不含正文内容的结构化诊断日志。
+- Modify: `api/db/services/document_service.py`
+  - 提供当前知识库中有效且已解析文件的轻量名称查询。
+- Modify: `rag/prompts/citation_prompt.md`
+  - 明确本轮文档上下文是唯一证据，历史助手消息不是证据。
 - Modify: `test/unit_test/api/db/services/test_dialog_service_final_answer.py`
   - 覆盖纯函数边界、流式聊天最终 reference 和无引用自动插入路径。
 - Modify: `web/src/utils/citation-utils.ts`
@@ -925,7 +937,71 @@ git commit -m "修复：前端过滤无效聊天引用"
 
 ---
 
-### Task 4: 完整回归与问题场景验收
+### Task 4: 修复检索证据质量与历史污染
+
+**Files:**
+
+- Modify: `api/db/services/dialog_service.py`
+- Modify: `api/db/services/document_service.py`
+- Modify: `rag/prompts/citation_prompt.md`
+- Modify: `test/unit_test/api/db/services/test_dialog_service_final_answer.py`
+
+**Interfaces:**
+
+- Produces: `_extract_document_identifiers(question) -> list[str]`
+- Produces: `_resolve_document_code_scope(question, kb_ids) -> tuple[list[str], list[str] | None]`
+- Produces: `DocumentService.get_ready_by_name_keyword(kb_ids, keyword) -> list[dict]`
+
+- [ ] **Step 1: 写多轮历史污染失败测试**
+
+构造历史助手回答包含错误 `BDMB-YF-223/224`、当前问题再次询问模板的消息。启用
+`refine_multiturn` 并让 `full_question()` 返回独立问题，断言回答模型只收到独立问题，
+没有收到历史助手消息。
+
+- [ ] **Step 2: 写精确文件编号失败测试**
+
+覆盖编号和版本识别、下划线与连字符规范化、只返回 `DONE + VALID` 文件，并断言匹配
+`doc_id` 作为 `retrieval(doc_ids=...)` 的范围。
+
+- [ ] **Step 3: 写无证据失败测试**
+
+覆盖不存在的精确编号和普通检索无知识块两类场景，断言不调用回答模型，返回默认或配置
+的无依据响应。
+
+- [ ] **Step 4: 实现历史隔离和精确范围**
+
+多轮问题完成 `full_question()` 后，用独立问题同时驱动检索和回答生成。仅在没有显式
+附件时启用精确文件编号范围，避免屏蔽用户上传文件。
+
+- [ ] **Step 5: 实现严格无证据兜底**
+
+知识库聊天没有知识块或显式引用全部越界时，停止生成并返回无依据响应。引用提示明确
+历史助手消息不是证据。
+
+- [ ] **Step 6: 运行回归**
+
+```bash
+POLARS_SKIP_CPU_CHECK=1 uv run pytest \
+  test/unit_test/api/db/services/test_dialog_service_final_answer.py -v
+uv tool run ruff check \
+  api/db/services/dialog_service.py \
+  api/db/services/document_service.py \
+  test/unit_test/api/db/services/test_dialog_service_final_answer.py
+```
+
+- [ ] **Step 7: 提交 Task 4**
+
+```bash
+git add api/db/services/dialog_service.py \
+  api/db/services/document_service.py \
+  rag/prompts/citation_prompt.md \
+  test/unit_test/api/db/services/test_dialog_service_final_answer.py
+git commit -m "修复：隔离历史回答并增强文件编号检索"
+```
+
+---
+
+### Task 5: 完整回归与问题场景验收
 
 **Files:**
 
@@ -936,7 +1012,7 @@ git commit -m "修复：前端过滤无效聊天引用"
 
 **Interfaces:**
 
-- Consumes: Task 1 至 Task 3 的全部接口。
+- Consumes: Task 1 至 Task 4 的全部接口。
 - Produces: 可交付的验证记录；本任务不新增功能接口。
 
 - [ ] **Step 1: 运行后端目标回归**
