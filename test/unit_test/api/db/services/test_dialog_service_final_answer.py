@@ -1154,6 +1154,32 @@ def test_resolve_document_code_scope_matches_normalized_version(monkeypatch):
     assert calls == [(["kb-1"], "BDMB-YF-099")]
 
 
+def test_resolve_document_code_scope_requires_every_identifier(monkeypatch):
+    def fake_get_ready_by_name_keyword(_kb_ids, keyword):
+        if keyword == "BDMB-YF-099":
+            return [
+                {
+                    "id": "doc-ready",
+                    "name": "BDMB-YF-099_V1.0_关键工序验证方案.docx",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(
+        dialog_service.DocumentService,
+        "get_ready_by_name_keyword",
+        fake_get_ready_by_name_keyword,
+    )
+
+    assert dialog_service._resolve_document_code_scope(
+        "对比 BDMB-YF-099 和 BDMB-YF-223",
+        ["kb-1"],
+    ) == (
+        ["BDMB-YF-099", "BDMB-YF-223"],
+        [],
+    )
+
+
 @pytest.mark.p2
 def test_exact_document_identifier_scopes_retrieval_to_ready_documents(
     monkeypatch,

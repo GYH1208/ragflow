@@ -625,14 +625,18 @@ def _resolve_document_code_scope(
             code = re.split(r"[_-]V\d", identifier, maxsplit=1)[0]
             docs = DocumentService.get_ready_by_name_keyword(kb_ids, code)
             normalized_identifier = _normalize_document_identifier(identifier)
+            matched_identifier = False
             for doc in docs:
                 if normalized_identifier not in _normalize_document_identifier(
                     doc.get("name", "")
                 ):
                     continue
+                matched_identifier = True
                 doc_id = doc.get("id")
                 if doc_id and doc_id not in ready_document_ids:
                     ready_document_ids.append(doc_id)
+            if not matched_identifier:
+                return identifiers, []
     except Exception as exc:  # noqa: BLE001 - exact lookup is an optimization
         logger.warning(
             "Exact document identifier lookup failed; using normal retrieval: "
