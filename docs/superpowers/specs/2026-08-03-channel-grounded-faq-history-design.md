@@ -34,6 +34,40 @@
 - 不删除或批量清理其他渠道、用户或会话。
 - 不增加数据库字段或迁移。
 
+## 兼容性硬约束
+
+本修复建立在 `a9cd4ba32` 及更早提交的现有行为之上，不得通过回退、重写或放宽这些
+行为来实现新需求：
+
+- 不修改 `api/db/services/evidence_service.py`、
+  `api/db/services/evidence_rerank_executor.py`、`rag/nlp/evidence.py`、
+  `api/channels/wecom/channel.py` 及前端引用渲染代码。
+- 不改变流式占位、增量输出、最终确认、可信图片证据发送、最多两张证据图片和来源文件
+  发送顺序。
+- 不改变显式/自动引用规范化、`doc_aggs` 收口、精确文件编号检索、无知识块兜底及
+  reference JSON 结构。
+- 不改变无知识库自由聊天的完整多轮上下文行为。
+- 不修改既有测试断言来迁就新实现；只允许增加覆盖本次行为的测试，或为新测试补充不改变
+  原行为的测试辅助参数。
+- 生产代码改动只允许位于 `api/channels/bootstrap.py` 和
+  `api/db/services/dialog_service.py` 的新增纯函数及对应调用点。若实现需要扩大范围，必须
+  停止并重新确认设计。
+- 会话清理必须在代码测试通过之后单独执行，不与代码提交绑定；清理失败不得影响代码
+  发布或其他会话。
+
+修改前已使用 `POLARS_SKIP_CPU_CHECK=1` 执行以下保护测试，基线为 107 项全部通过：
+
+- `test/unit_test/api/channels/test_bootstrap.py`
+- `test/unit_test/api/channels/test_wecom_channel.py`
+- `test/unit_test/api/db/services/test_dialog_service_final_answer.py`
+- `test/unit_test/api/db/services/test_evidence_service.py`
+- `test/unit_test/api/db/services/test_evidence_rerank_executor.py`
+- `test/unit_test/rag/test_evidence.py`
+
+修改后必须以同一命令得到至少相同的 107 项既有测试全部通过，并额外通过本次新增测试。
+若任何既有测试从通过变为失败，视为回归，停止发布并定位原因，不通过删除、跳过或改写
+原测试绕过。
+
 ## 方案比较
 
 ### 方案 A：历史隔离 + 精确 FAQ 抽取（选定）
@@ -144,6 +178,7 @@
 ### 回归验证
 
 - 运行渠道 bootstrap 单元测试和 dialog service 最终回答测试。
+- 重跑兼容性硬约束中列出的六个测试文件，并与修改前 107 项全通过的基线比较。
 - 运行 Ruff 检查修改的 Python 文件和测试文件。
 - 清空会话后依次复测：
   - 云文档相关问题 → `余李`；
@@ -159,6 +194,7 @@
 - 普通非精确文档问题仍能走现有 RAG 生成并返回兼容 reference。
 - 当前渠道会话有可恢复备份，清理操作只影响一行。
 - 不新增或修改任何流程图输出行为。
+- 修改范围未超出两个生产文件和对应测试文件，既有 107 项保护测试无回归。
 
 ## 发布与回滚
 
