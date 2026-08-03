@@ -193,6 +193,23 @@ def _build_one(account_id: str, channel: str, credential: dict):
     return instances[0] if instances else None
 
 
+def _select_channel_history(
+    messages: list[dict],
+    max_user_messages: int = 2,
+) -> list[dict]:
+    selected = []
+    for message in reversed(messages or []):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        selected.append(message)
+        if len(selected) >= max_user_messages:
+            break
+    return list(reversed(selected))
+
+
 def _make_chat_handler(ch):
     """Build the inbound-message handler bound to a single channel.
 
@@ -244,13 +261,7 @@ def _make_chat_handler(ch):
         conv.reference = [r for r in conv.reference if r]
         conv.reference.append({"chunks": [], "doc_aggs": []})
 
-        history = []
-        for m in conv.message:
-            if m["role"] == "system":
-                continue
-            if m["role"] == "assistant" and not history:
-                continue
-            history.append(m)
+        history = _select_channel_history(conv.message)
 
         answer_text = ""
         answer_files = []

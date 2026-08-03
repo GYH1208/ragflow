@@ -17,6 +17,7 @@ import asyncio
 import logging
 import re
 import time
+import unicodedata
 import uuid
 from copy import deepcopy
 
@@ -523,6 +524,13 @@ BAD_CITATION_PATTERNS = [
     re.compile(r"ref\s*(\d+)", flags=re.IGNORECASE),  # ref12、REF 12
 ]
 CITATION_MARKER_PATTERN = re.compile(r"\[(?:ID:)?([0-9\u0660-\u0669\u06F0-\u06F9]+)\]")
+FAQ_PAIR_PATTERN = re.compile(
+    r"问题\s*[:：]\s*(?P<question>.*?)\s*[;；]\s*"
+    r"(?:回答|回复)\s*[:：]\s*(?P<answer>.*?)"
+    r"(?=\s*[;；]\s*Unnamed\s*[:：]|\s*[—-]{2,}\s*Data\b|"
+    r"\s*问题\s*[:：]|\Z)",
+    flags=re.DOTALL,
+)
 DOCUMENT_IDENTIFIER_PATTERN = re.compile(
     r"(?<![A-Z0-9])"
     r"([A-Z][A-Z0-9]{1,11}(?:-[A-Z0-9]{1,12}){2,4}"
@@ -534,6 +542,43 @@ DEFAULT_NO_EVIDENCE_RESPONSE = (
     "知识库中未找到明确依据。请确认文件已上传并完成解析，"
     "或补充文件名、文件编号、版本号或具体业务场景。"
 )
+
+
+def _normalize_faq_question(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value or "").casefold()
+    normalized = re.sub(r"\s+", "", normalized)
+    return normalized.rstrip("?？")
+
+
+def _parse_faq_pairs(content: str) -> list[tuple[str, str]]:
+    pairs = []
+    for match in FAQ_PAIR_PATTERN.finditer(content or ""):
+        question = match.group("question").strip()
+        answer = match.group("answer").strip()
+        if question and answer:
+            pairs.append((question, answer))
+    return pairs
+
+
+def _sanitize_exact_faq_answer(answer: str) -> str:
+    sanitized = answer or ""
+    for pattern in BAD_CITATION_PATTERNS:
+        sanitized = pattern.sub("", sanitized)
+    sanitized = CITATION_MARKER_PATTERN.sub("", sanitized)
+    return re.sub(r"[ \t]+", " ", sanitized).strip()
+
+
+def _find_exact_faq_answer(
+    question: str,
+    chunks: list[dict],
+) -> tuple[str, int] | None:
+    normalized_question = _normalize_faq_question(question)
+    for index, chunk in enumerate(chunks or []):
+        content = chunk.get("content_with_weight") or chunk.get("content") or ""
+        for faq_question, faq_answer in _parse_faq_pairs(content):
+            if _normalize_faq_question(faq_question) == normalized_question:
+                return faq_answer, index
+    return None
 
 
 def _normalize_answer_citations(
@@ -697,6 +742,28 @@ def repair_bad_citation_formats(answer: str, kbinfos: dict, idx: set):
     return answer, idx
 
 
+def _recent_user_messages(
+    messages: list[dict],
+    limit: int = 2,
+) -> list[dict]:
+    if limit <= 0:
+        return []
+    user_contents = [
+        _normalize_text_from_content(message.get("content"))
+        for message in messages
+        if message.get("role") == "user"
+    ]
+    if not user_contents:
+        return []
+    prior_users = [
+        {"role": "user", "content": content}
+        for content in user_contents[:-1]
+        if content
+    ]
+    current_user = {"role": "user", "content": user_contents[-1]}
+    return (prior_users + [current_user])[-limit:]
+
+
 async def async_chat(dialog, messages, stream=True, **kwargs):
     logging.debug("Begin async_chat")
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
@@ -746,7 +813,10 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     bind_models_ts = timer()
 
     retriever = settings.retriever
-    questions = [m["content"] for m in messages if m["role"] == "user"][-3:]
+    recent_user_messages = _recent_user_messages(messages)
+    if not recent_user_messages or not recent_user_messages[-1]["content"]:
+        raise ValueError("The current user message has no textual content.")
+    questions = [message["content"] for message in recent_user_messages]
     attachments = None
     if "doc_ids" in kwargs:
         attachments = [doc_id for doc_id in kwargs["doc_ids"].split(",") if doc_id]
@@ -763,13 +833,31 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         attachments_ = "\n\n".join(text_attachments)
 
     prompt_config = dialog.prompt_config
+    used_multiturn_refinement = bool(
+        len(questions) > 1 and prompt_config.get("refine_multiturn")
+    )
+    if used_multiturn_refinement:
+        questions = [
+            await full_question(
+                dialog.tenant_id,
+                dialog.llm_id,
+                recent_user_messages,
+            )
+        ]
+    else:
+        questions = questions[-1:]
+
+    if prompt_config.get("cross_languages"):
+        questions = [await cross_languages(dialog.tenant_id, dialog.llm_id, questions[0], prompt_config["cross_languages"])]
+
+    generation_question = questions[-1]
     include_reference_metadata, metadata_fields = _resolve_reference_metadata(prompt_config, request_payload=kwargs)
     field_map = KnowledgebaseService.get_field_map(dialog.kb_ids)
     logging.debug(f"field_map retrieved: {field_map}")
     # try to use sql if field mapping is good to go
     if field_map:
-        logging.debug("Use SQL to retrieval:{}".format(questions[-1]))
-        ans = await use_sql(questions[-1], field_map, dialog.tenant_id, chat_mdl, prompt_config.get("quote", True), dialog.kb_ids)
+        logging.debug("Use SQL to retrieval:{}".format(generation_question))
+        ans = await use_sql(generation_question, field_map, dialog.tenant_id, chat_mdl, prompt_config.get("quote", True), dialog.kb_ids)
         # For aggregate queries (COUNT, SUM, etc.), chunks may be empty but answer is still valid
         if ans and (ans.get("reference", {}).get("chunks") or ans.get("answer")):
             if include_reference_metadata and ans.get("reference", {}).get("chunks"):
@@ -800,18 +888,6 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         if p["key"] not in kwargs:
             prompt_config["system"] = prompt_config["system"].replace("{%s}" % p["key"], " ")
 
-    used_multiturn_refinement = bool(
-        len(questions) > 1 and prompt_config.get("refine_multiturn")
-    )
-    if used_multiturn_refinement:
-        questions = [await full_question(dialog.tenant_id, dialog.llm_id, messages)]
-    else:
-        questions = questions[-1:]
-
-    if prompt_config.get("cross_languages"):
-        questions = [await cross_languages(dialog.tenant_id, dialog.llm_id, questions[0], prompt_config["cross_languages"])]
-
-    generation_question = questions[-1]
     exact_identifiers, exact_document_ids = [], None
     if attachments is None:
         exact_identifiers, exact_document_ids = _resolve_document_code_scope(
@@ -972,10 +1048,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     )
     if include_references:
         prompt4citation = citation_prompt()
-    if used_multiturn_refinement:
-        msg.append({"role": "user", "content": generation_question})
-    else:
-        msg.extend([{"role": m["role"], "content": re.sub(r"##\d+\$\$", "", m["content"])} for m in messages if m["role"] != "system"])
+    msg.append({"role": "user", "content": generation_question})
     used_token_count, msg = message_fit_in(msg, int(max_tokens * 0.95))
     if llm_model_config["model_type"] == "chat" and image_attachments:
         convert_last_user_msg_to_multimodal(msg, image_attachments, factory)
@@ -1106,6 +1179,36 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             langfuse_generation.end()
 
         return {"answer": think + answer, "reference": refs, "prompt": re.sub(r"\n", "  \n", prompt), "created_at": time.time()}
+
+    exact_faq = _find_exact_faq_answer(
+        generation_question,
+        kbinfos.get("chunks", []),
+    )
+    if exact_faq is not None:
+        exact_answer, chunk_index = exact_faq
+        exact_answer = _sanitize_exact_faq_answer(exact_answer)
+        if exact_answer:
+            if stream:
+                yield {
+                    "answer": exact_answer,
+                    "reference": {},
+                    "audio_binary": tts(tts_mdl, exact_answer),
+                    "final": False,
+                }
+
+            decorated_answer = exact_answer
+            if include_references:
+                decorated_answer = f"{decorated_answer} [ID:{chunk_index}]"
+            result = await decorate_answer(decorated_answer)
+            result["audio_binary"] = None if stream else tts(tts_mdl, exact_answer)
+            result["final"] = True
+            logger.info(
+                "Exact FAQ answer selected: chunk_index=%d chunk_count=%d",
+                chunk_index,
+                len(kbinfos.get("chunks", [])),
+            )
+            yield result
+            return
 
     if langfuse_tracer:
         try:

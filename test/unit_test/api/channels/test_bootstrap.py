@@ -140,6 +140,89 @@ def install_handler_service_stubs(
     monkeypatch.setitem(sys.modules, "common.misc_utils", misc_module)
 
 
+def test_select_channel_history_keeps_only_two_recent_user_messages():
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "旧问题"},
+        {"role": "assistant", "content": "错误联系人：IT-陶正浩"},
+        {"role": "user", "content": "上一问"},
+        {"role": "assistant", "content": "错误联系人：IT-刘尧"},
+        {"role": "user", "content": "当前问题", "id": "current"},
+    ]
+
+    assert bootstrap._select_channel_history(messages) == [
+        {"role": "user", "content": "上一问"},
+        {"role": "user", "content": "当前问题", "id": "current"},
+    ]
+
+
+def test_select_channel_history_ignores_empty_and_invalid_messages():
+    messages = [
+        {"role": "user", "content": ""},
+        {"role": "assistant", "content": "旧回答"},
+        {"role": "user", "content": "当前问题"},
+        {"role": "tool", "content": "工具结果"},
+    ]
+
+    assert bootstrap._select_channel_history(messages) == [
+        {"role": "user", "content": "当前问题"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handler_passes_only_recent_user_messages_to_kb_chat(monkeypatch):
+    channel = RecordingStreamingChannel()
+    conversation = FakeConversation()
+    conversation.message = [
+        {"role": "user", "content": "旧问题"},
+        {"role": "assistant", "content": "错误联系人：IT-陶正浩"},
+        {"role": "user", "content": "上一问"},
+        {"role": "assistant", "content": "错误联系人：IT-刘尧"},
+    ]
+    dialog = SimpleNamespace(
+        id="dialog-1",
+        kb_ids=["kb-1"],
+        prompt_config={"quote": True},
+    )
+    captured_histories = []
+
+    async def fake_async_chat(_dialog, history, _stream, **_kwargs):
+        captured_histories.append(history)
+        yield {
+            "answer": "当前回答",
+            "reference": {"chunks": [], "doc_aggs": []},
+            "final": True,
+        }
+
+    install_handler_service_stubs(
+        monkeypatch,
+        conversation=conversation,
+        dialog=dialog,
+        async_chat=fake_async_chat,
+        persisted=[],
+    )
+
+    handler = bootstrap._make_chat_handler(channel)
+    await handler(
+        IncomingMessage(
+            channel="wecom",
+            account_id="account-1",
+            chat_id="chat-1",
+            chat_type="p2p",
+            message_id="callback-1",
+            sender_id="user-1",
+            text="当前问题",
+        )
+    )
+
+    assert captured_histories == [
+        [
+            {"role": "user", "content": "上一问"},
+            {"role": "user", "content": "当前问题", "id": "generated-id"},
+        ]
+    ]
+
+
 def test_prepares_clean_text_and_cited_images_in_first_citation_order():
     chunks = [
         {"image_id": "bucket-zero.jpg"},

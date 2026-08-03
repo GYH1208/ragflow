@@ -316,6 +316,104 @@ def _make_reference_kbinfos():
     }
 
 
+def test_parse_faq_pairs_removes_csv_noise():
+    content = (
+        "问题：云文档的相关问题可以找谁咨询呢？；回答：余李; Unnamed: 2: nan ——Data\n"
+        "问题：EHR系统、培训系统、绩效系统的相关问题可以找谁咨询呢？；"
+        "回答：钟志斌或者陈国萌; Unnamed: 2: nan ——Data"
+    )
+
+    assert dialog_service._parse_faq_pairs(content) == [
+        ("云文档的相关问题可以找谁咨询呢？", "余李"),
+        (
+            "EHR系统、培训系统、绩效系统的相关问题可以找谁咨询呢？",
+            "钟志斌或者陈国萌",
+        ),
+    ]
+
+
+def test_parse_faq_pairs_accepts_reply_label_from_real_chunk():
+    content = (
+        "问题：云文档的相关问题可以找谁咨询呢？; 回复：余李; "
+        "Unnamed: 2：nan ——Data"
+    )
+
+    assert dialog_service._parse_faq_pairs(content) == [
+        ("云文档的相关问题可以找谁咨询呢？", "余李"),
+    ]
+
+
+def test_parse_faq_pairs_preserves_multiline_answers_and_same_line_records():
+    content = (
+        "问题：第一个问题？; 回复：第一行\n"
+        "第二行 ——Data 问题：第二个问题？; 回答：第二个答案"
+    )
+
+    assert dialog_service._parse_faq_pairs(content) == [
+        ("第一个问题？", "第一行\n第二行"),
+        ("第二个问题？", "第二个答案"),
+    ]
+
+
+def test_normalize_faq_question_is_strict_except_formatting():
+    assert dialog_service._normalize_faq_question(
+        " 云文档的相关问题可以找谁咨询呢? "
+    ) == dialog_service._normalize_faq_question(
+        "云文档的相关问题可以找谁咨询呢？"
+    )
+    assert dialog_service._normalize_faq_question(
+        "云文档找谁？"
+    ) != dialog_service._normalize_faq_question(
+        "云文档的相关问题可以找谁咨询呢？"
+    )
+
+
+def test_recent_user_messages_normalizes_text_parts_from_current_message():
+    messages = [
+        {"role": "user", "content": "上一问"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "当前文字问题"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+            ],
+        },
+    ]
+
+    assert dialog_service._recent_user_messages(messages) == [
+        {"role": "user", "content": "上一问"},
+        {"role": "user", "content": "当前文字问题"},
+    ]
+
+
+def _make_faq_kbinfos():
+    return {
+        "chunks": [
+            {
+                "chunk_id": "faq-chunk",
+                "doc_id": "faq-doc",
+                "docnm_kwd": "IT常问问题-工作表1.csv",
+                "content_ltks": "云文档 联系人 EHR 培训 绩效",
+                "content_with_weight": (
+                    "问题：云文档的相关问题可以找谁咨询呢？；回答：余李; "
+                    "Unnamed: 2: nan ——Data\n"
+                    "问题：EHR系统、培训系统、绩效系统的相关问题可以找谁咨询呢？；"
+                    "回答：钟志斌或者陈国萌; Unnamed: 2: nan ——Data"
+                ),
+                "vector": [0.1, 0.2, 0.3],
+            }
+        ],
+        "doc_aggs": [
+            {
+                "doc_id": "faq-doc",
+                "doc_name": "IT常问问题-工作表1.csv",
+                "count": 1,
+            }
+        ],
+        "total": 1,
+    }
+
+
 def _run_reference_async_chat(
     monkeypatch,
     *,
@@ -326,8 +424,14 @@ def _run_reference_async_chat(
     refine_multiturn=False,
     refined_question=None,
     document_code_scope=None,
+    stream=False,
+    quote=True,
+    field_map=None,
+    sql_answer=None,
 ):
     chat_mdl = _RecordingChatModel(answer)
+    chat_mdl.refinement_messages = []
+    chat_mdl.sql_questions = []
     retriever = _ReferenceRetriever(kbinfos, inserted_indices)
 
     monkeypatch.setattr(
@@ -359,7 +463,7 @@ def _run_reference_async_chat(
     monkeypatch.setattr(
         dialog_service.KnowledgebaseService,
         "get_field_map",
-        lambda _kb_ids: {},
+        lambda _kb_ids: deepcopy(field_map or {}),
     )
     monkeypatch.setattr(
         dialog_service.KnowledgebaseService,
@@ -383,10 +487,17 @@ def _run_reference_async_chat(
         lambda _kbinfos, _max_tokens, **_kwargs: ["当前知识块"],
     )
     if refined_question is not None:
-        async def fake_full_question(*_args, **_kwargs):
+        async def fake_full_question(_tenant_id, _llm_id, refinement_messages):
+            chat_mdl.refinement_messages = deepcopy(refinement_messages)
             return refined_question
 
         monkeypatch.setattr(dialog_service, "full_question", fake_full_question)
+    if sql_answer is not None:
+        async def fake_use_sql(question, *_args, **_kwargs):
+            chat_mdl.sql_questions.append(question)
+            return deepcopy(sql_answer)
+
+        monkeypatch.setattr(dialog_service, "use_sql", fake_use_sql)
     if document_code_scope is not None:
         monkeypatch.setattr(
             dialog_service,
@@ -400,11 +511,13 @@ def _run_reference_async_chat(
         dialog_service.async_chat(
             dialog,
             messages or [{"role": "user", "content": "测试引用。"}],
-            stream=False,
-            quote=True,
+            stream=stream,
+            quote=quote,
             session_id="session-reference-test",
         )
     )
+    if stream:
+        return events, chat_mdl, retriever
     assert len(events) == 1
     return events[0], chat_mdl, retriever
 
@@ -1102,6 +1215,188 @@ def test_refined_multiturn_generation_excludes_untrusted_assistant_history(
         }
     ]
     assert "BDMB-YF-223" not in str(generation_messages)
+
+
+@pytest.mark.p2
+def test_kb_generation_without_refinement_excludes_all_history(monkeypatch):
+    messages = [
+        {"role": "user", "content": "云文档找谁？"},
+        {"role": "assistant", "content": "错误联系人：IT-陶正浩"},
+        {"role": "user", "content": "EHR、培训、绩效系统找谁？"},
+    ]
+    _, chat_mdl, retriever = _run_reference_async_chat(
+        monkeypatch,
+        answer="钟志斌或者陈国萌 [ID:0]",
+        kbinfos=_make_reference_kbinfos(),
+        messages=messages,
+        refine_multiturn=False,
+    )
+
+    assert retriever.retrieval_calls[0][0][0] == "EHR、培训、绩效系统找谁？"
+    assert chat_mdl.chat_calls[-1][1] == [
+        {"role": "user", "content": "EHR、培训、绩效系统找谁？"},
+    ]
+
+
+@pytest.mark.p2
+def test_multiturn_refinement_uses_only_two_recent_user_messages(monkeypatch):
+    messages = [
+        {"role": "user", "content": "更早的问题"},
+        {"role": "assistant", "content": "更早的回答"},
+        {"role": "user", "content": "上一问"},
+        {"role": "assistant", "content": "错误历史答案"},
+        {"role": "user", "content": "再确认一下"},
+    ]
+    _, chat_mdl, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="当前答案 [ID:0]",
+        kbinfos=_make_reference_kbinfos(),
+        messages=messages,
+        refine_multiturn=True,
+        refined_question="改写后的独立问题",
+    )
+
+    assert chat_mdl.refinement_messages == [
+        {"role": "user", "content": "上一问"},
+        {"role": "user", "content": "再确认一下"},
+    ]
+    assert chat_mdl.chat_calls[-1][1] == [
+        {"role": "user", "content": "改写后的独立问题"},
+    ]
+
+
+@pytest.mark.p2
+def test_exact_faq_answer_bypasses_model(monkeypatch):
+    final, chat_mdl, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="错误联系人：IT-陶正浩",
+        kbinfos=_make_faq_kbinfos(),
+        messages=[
+            {
+                "role": "user",
+                "content": "云文档的相关问题可以找谁咨询呢？",
+            }
+        ],
+    )
+
+    assert final["answer"].startswith("余李")
+    assert final["reference"]["doc_aggs"][0]["doc_id"] == "faq-doc"
+    assert chat_mdl.chat_calls == []
+
+
+@pytest.mark.p2
+def test_approximate_faq_question_uses_rag_generation(monkeypatch):
+    _, chat_mdl, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="生成回答 [ID:0]",
+        kbinfos=_make_faq_kbinfos(),
+        messages=[{"role": "user", "content": "云文档找谁？"}],
+    )
+
+    assert len(chat_mdl.chat_calls) == 1
+
+
+@pytest.mark.p2
+@pytest.mark.parametrize("quote", [False, True])
+def test_exact_faq_stream_emits_visible_delta_before_final(monkeypatch, quote):
+    events, chat_mdl, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="错误联系人：IT-陶正浩",
+        kbinfos=_make_faq_kbinfos(),
+        messages=[
+            {
+                "role": "user",
+                "content": "云文档的相关问题可以找谁咨询呢？",
+            }
+        ],
+        stream=True,
+        quote=quote,
+    )
+
+    assert [event["answer"] for event in events if not event.get("final")] == [
+        "余李"
+    ]
+    assert events[-1]["final"] is True
+    assert events[-1]["answer"].startswith("余李")
+    assert chat_mdl.chat_calls == []
+
+
+@pytest.mark.p2
+def test_exact_faq_answer_ignores_source_citation_markers(monkeypatch):
+    kbinfos = _make_faq_kbinfos()
+    kbinfos["chunks"][0]["content_with_weight"] = (
+        "问题：云文档的相关问题可以找谁咨询呢？；回答：余李 [ID:9]"
+    )
+
+    final, chat_mdl, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="错误联系人：IT-陶正浩",
+        kbinfos=kbinfos,
+        messages=[
+            {
+                "role": "user",
+                "content": "云文档的相关问题可以找谁咨询呢？",
+            }
+        ],
+    )
+
+    assert final["answer"].startswith("余李")
+    assert "ID:9" not in final["answer"]
+    assert final["reference"]["doc_aggs"][0]["doc_id"] == "faq-doc"
+    assert chat_mdl.chat_calls == []
+
+
+@pytest.mark.p2
+def test_current_non_text_user_message_never_falls_back_to_old_question(monkeypatch):
+    messages = [
+        {"role": "user", "content": "旧问题"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+            ],
+        },
+    ]
+
+    with pytest.raises(ValueError, match="textual content"):
+        _run_reference_async_chat(
+            monkeypatch,
+            answer="不应生成",
+            kbinfos=_make_reference_kbinfos(),
+            messages=messages,
+        )
+
+
+@pytest.mark.p2
+def test_sql_retrieval_uses_refined_question(monkeypatch):
+    messages = [
+        {"role": "user", "content": "上一问"},
+        {"role": "assistant", "content": "不可信旧回答"},
+        {"role": "user", "content": "再确认一下"},
+    ]
+    sql_answer = {
+        "answer": "结构化查询答案",
+        "reference": {"chunks": [], "doc_aggs": []},
+    }
+
+    final, chat_mdl, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="不应调用生成模型",
+        kbinfos=_make_reference_kbinfos(),
+        messages=messages,
+        refine_multiturn=True,
+        refined_question="改写后的独立问题",
+        field_map={"department": "keyword"},
+        sql_answer=sql_answer,
+    )
+
+    assert final["answer"] == "结构化查询答案"
+    assert chat_mdl.refinement_messages == [
+        {"role": "user", "content": "上一问"},
+        {"role": "user", "content": "再确认一下"},
+    ]
+    assert chat_mdl.sql_questions == ["改写后的独立问题"]
+    assert chat_mdl.chat_calls == []
 
 
 @pytest.mark.parametrize(
