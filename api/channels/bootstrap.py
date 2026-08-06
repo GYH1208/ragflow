@@ -31,6 +31,7 @@ import json
 import logging
 import re
 import threading
+from collections.abc import Callable
 
 from api.channels.core.base import OutgoingFile, OutgoingImage
 
@@ -127,6 +128,7 @@ def _images_for_used_chunks(
     chunks: object,
     used_chunk_ids: list[str],
     max_images: int = 2,
+    image_allowed: Callable[[dict], bool] | None = None,
 ) -> list[OutgoingImage]:
     valid_chunks = chunks if isinstance(chunks, list) else []
     chunks_by_id = {
@@ -142,6 +144,8 @@ def _images_for_used_chunks(
             continue
         image_id = str(chunk.get("image_id") or "")
         if not image_id or image_id in seen_image_ids:
+            continue
+        if image_allowed is not None and not image_allowed(chunk):
             continue
         seen_image_ids.add(image_id)
         images.append(OutgoingImage(image_id=image_id))
@@ -503,6 +507,7 @@ def _make_chat_handler(ch):
             evidence_images = _images_for_used_chunks(
                 valid_chunks,
                 resolution.used_chunk_ids,
+                image_allowed=ch.allows_reference_image,
             )
             LOGGER.info(
                 "[%s:%s] evidence delivery conversation_id=%s "

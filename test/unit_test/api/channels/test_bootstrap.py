@@ -22,6 +22,9 @@ class RecordingStreamingChannel:
         self.events = events if events is not None else []
         self.final_stream_result = final_stream_result
 
+    def allows_reference_image(self, chunk):
+        return True
+
     async def send_stream(self, message, stream_id, finish):
         if finish:
             self.events.append("stream:final")
@@ -323,6 +326,38 @@ def test_images_for_used_chunks_caps_at_two_after_deduplication():
     ]
 
 
+def test_images_for_used_chunks_applies_policy_before_image_limit():
+    chunks = [
+        {
+            "id": "pdf",
+            "image_id": "pdf-image",
+            "document_name": "policy.pdf",
+        },
+        {
+            "id": "faq-1",
+            "image_id": "faq-image-1",
+            "document_name": "faq.docx",
+        },
+        {
+            "id": "faq-2",
+            "image_id": "faq-image-2",
+            "document_name": "answers.xlsx",
+        },
+    ]
+
+    images = bootstrap._images_for_used_chunks(
+        chunks,
+        ["pdf", "faq-1", "faq-2"],
+        image_allowed=lambda chunk: not chunk["document_name"].lower().endswith(".pdf"),
+    )
+
+    assert images == [
+        OutgoingImage("faq-image-1"),
+        OutgoingImage("faq-image-2"),
+    ]
+    assert chunks[0]["image_id"] == "pdf-image"
+
+
 async def _run_handler_case(
     monkeypatch,
     *,
@@ -418,6 +453,9 @@ async def _run_handler_case(
         supports_reference_images = True
         supports_source_files = True
         hides_reference_markers = True
+
+        def allows_reference_image(self, chunk):
+            return True
 
         async def send(self, outgoing):
             sent_messages.append(outgoing)
@@ -831,6 +869,68 @@ async def test_streaming_finalizes_text_before_resolving_and_sends_verified_imag
         OutgoingImage("image-a"),
         OutgoingImage("image-b"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_handler_keeps_pdf_reference_but_filters_it_from_channel_images(monkeypatch):
+    class PdfFilteringChannel(RecordingStreamingChannel):
+        def allows_reference_image(self, chunk):
+            filename = str(chunk.get("document_name") or "").lower()
+            return bool(filename) and not filename.endswith(".pdf")
+
+    channel = PdfFilteringChannel()
+    conversation = FakeConversation()
+    dialog = SimpleNamespace(
+        id="dialog-1",
+        kb_ids=["kb-1"],
+        prompt_config={"quote": True},
+    )
+
+    async def fake_async_chat(dia, history, stream, **kwargs):
+        yield {
+            "answer": "回答正文",
+            "reference": {
+                "chunks": [
+                    {
+                        "id": "pdf-chunk",
+                        "content": "制度内容",
+                        "image_id": "pdf-image",
+                        "document_name": "policy.pdf",
+                    },
+                    {
+                        "id": "faq-chunk",
+                        "content": "问答配图",
+                        "image_id": "faq-image",
+                        "document_name": "faq.docx",
+                    },
+                ]
+            },
+            "final": True,
+        }
+
+    install_handler_service_stubs(
+        monkeypatch,
+        conversation=conversation,
+        dialog=dialog,
+        async_chat=fake_async_chat,
+        persisted=[],
+    )
+
+    handler = bootstrap._make_chat_handler(channel)
+    await handler(
+        IncomingMessage(
+            channel="wecom",
+            account_id="account-1",
+            chat_id="chat-1",
+            chat_type="p2p",
+            message_id="callback-1",
+            sender_id="user-1",
+            text="问题",
+        )
+    )
+
+    assert conversation.reference[-1]["chunks"][0]["image_id"] == "pdf-image"
+    assert channel.messages[0].images == [OutgoingImage("faq-image")]
 
 
 @pytest.mark.asyncio
