@@ -39,6 +39,7 @@ class WeComAccount:
     bot_id: str = ""
     webhook_host: str = "0.0.0.0"
     webhook_port: int = 3002
+    send_pdf_reference_images: bool = False
 
 
 class _SharedWebhookServer:
@@ -167,6 +168,20 @@ class WeComChannel(Channel):
         self._ws_callback_tasks: set[asyncio.Task] = set()
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._stop_requested = False
+
+    def allows_reference_image(self, chunk: dict[str, Any]) -> bool:
+        if self.account.send_pdf_reference_images:
+            return True
+
+        filename = str(chunk.get("document_name") or chunk.get("docnm_kwd") or "").strip()
+        if not filename:
+            LOGGER.warning(
+                "[wecom:%s] reference image skipped reason=missing_document_name image_id=%s",
+                self.account_id,
+                chunk.get("image_id") or chunk.get("img_id") or "",
+            )
+            return False
+        return not filename.casefold().endswith(".pdf")
 
     async def start(self) -> None:
         self._stop_requested = False
@@ -848,6 +863,7 @@ def _build(account_id: str, cfg: dict) -> Channel:
             bot_id=bot_id,
             webhook_host=str(cfg.get("webhook_host", "0.0.0.0")),
             webhook_port=int(cfg.get("webhook_port", 3002)),
+            send_pdf_reference_images=cfg.get("send_pdf_reference_images") is True,
         )
     )
 

@@ -26,6 +26,17 @@ def test_channel_keeps_reference_markers_by_default():
     assert Channel.hides_reference_markers is False
 
 
+def test_channel_allows_reference_images_by_default():
+    channel = RecordingChannel()
+
+    assert channel.allows_reference_image(
+        {
+            "image_id": "image-1",
+            "document_name": "policy.pdf",
+        }
+    ) is True
+
+
 @pytest.mark.asyncio
 async def test_default_streaming_contract_only_sends_the_final_message():
     channel = RecordingChannel()

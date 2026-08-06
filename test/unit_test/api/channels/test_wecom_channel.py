@@ -8,16 +8,17 @@ from unittest.mock import AsyncMock, call
 import pytest
 
 from api.channels.core.base import OutgoingFile, OutgoingImage, OutgoingMessage
-from api.channels.wecom.channel import WeComAccount, WeComChannel
+from api.channels.wecom.channel import WeComAccount, WeComChannel, _build
 
 
-def make_channel():
+def make_channel(*, send_pdf_reference_images: bool = False):
     channel = WeComChannel(
         WeComAccount(
             account_id="acc",
             connection_type="websocket",
             bot_id="bot",
             secret="secret",
+            send_pdf_reference_images=send_pdf_reference_images,
         )
     )
     channel._ws = AsyncMock()
@@ -29,6 +30,94 @@ def make_channel():
 def test_wecom_hides_reference_markers():
     assert make_channel().hides_reference_markers is True
     assert make_channel().supports_source_files is True
+
+
+@pytest.mark.parametrize("filename", ["policy.pdf", "POLICY.PDF", " policy.PdF "])
+def test_wecom_rejects_pdf_reference_images_by_default(filename):
+    assert make_channel().allows_reference_image(
+        {
+            "image_id": "pdf-image",
+            "document_name": filename,
+        }
+    ) is False
+
+
+def test_wecom_rejects_pdf_reference_images_from_legacy_filename_field():
+    assert make_channel().allows_reference_image(
+        {
+            "image_id": "pdf-image",
+            "docnm_kwd": "policy.pdf",
+        }
+    ) is False
+
+
+def test_wecom_allows_non_pdf_reference_images_by_default():
+    assert make_channel().allows_reference_image(
+        {
+            "image_id": "answer-image",
+            "document_name": "faq.docx",
+        }
+    ) is True
+
+
+def test_wecom_rejects_reference_images_without_source_filename(caplog):
+    channel = make_channel()
+
+    with caplog.at_level(logging.WARNING, logger="api.channels.wecom.channel"):
+        allowed = channel.allows_reference_image({"image_id": "unknown-image"})
+
+    assert allowed is False
+    assert "reason=missing_document_name" in caplog.text
+
+
+def test_wecom_allows_pdf_reference_images_when_enabled():
+    assert make_channel(send_pdf_reference_images=True).allows_reference_image(
+        {
+            "image_id": "pdf-image",
+            "document_name": "policy.pdf",
+        }
+    ) is True
+
+
+def test_wecom_builder_defaults_pdf_reference_images_to_disabled():
+    channel = _build(
+        "acc",
+        {
+            "connection_type": "websocket",
+            "bot_id": "bot",
+            "secret": "secret",
+        },
+    )
+
+    assert channel.account.send_pdf_reference_images is False
+
+
+def test_wecom_builder_reads_enabled_pdf_reference_image_setting():
+    channel = _build(
+        "acc",
+        {
+            "connection_type": "websocket",
+            "bot_id": "bot",
+            "secret": "secret",
+            "send_pdf_reference_images": True,
+        },
+    )
+
+    assert channel.account.send_pdf_reference_images is True
+
+
+def test_wecom_builder_does_not_enable_pdf_images_for_string_values():
+    channel = _build(
+        "acc",
+        {
+            "connection_type": "websocket",
+            "bot_id": "bot",
+            "secret": "secret",
+            "send_pdf_reference_images": "true",
+        },
+    )
+
+    assert channel.account.send_pdf_reference_images is False
 
 
 @pytest.mark.asyncio

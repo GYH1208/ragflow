@@ -59,6 +59,10 @@ class Channel(ABC):
     def set_message_handler(self, handler: MessageHandler) -> None:
         self._handler = handler
 
+    def allows_reference_image(self, chunk: dict[str, Any]) -> bool:
+        """Return whether this channel may deliver an image from a reference chunk."""
+        return True
+
     async def _dispatch(self, message: IncomingMessage) -> None:
         if self._handler is None:
             return
