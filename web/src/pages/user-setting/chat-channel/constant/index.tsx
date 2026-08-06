@@ -632,6 +632,17 @@ export const ChatChannelFormFields: Record<ChatChannelKey, FormFieldConfig[]> =
           values?.config?.credential?.connection_type === 'websocket',
       },
       {
+        label: 'Send PDF reference screenshots',
+        name: 'config.credential.send_pdf_reference_images',
+        type: FormFieldType.Switch,
+        required: false,
+        defaultValue: false,
+        tooltip:
+          'When disabled, PDF page screenshots are not sent to WeCom. Non-PDF reference images and RAGFlow web references are unaffected.',
+        shouldRender: (values: any) =>
+          values?.config?.credential?.connection_type === 'websocket',
+      },
+      {
         label: 'Secret',
         name: 'config.credential.secret',
         type: FormFieldType.Password,
