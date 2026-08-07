@@ -39,7 +39,9 @@ class _DummyFulltextQueryer:
 
 _fake_query.FulltextQueryer = _DummyFulltextQueryer
 sys.modules.setdefault("rag.nlp.query", _fake_query)
-sys.modules.setdefault("common.settings", types.ModuleType("common.settings"))
+_fake_settings = types.ModuleType("common.settings")
+_fake_settings.DOC_ENGINE_INFINITY = True
+sys.modules.setdefault("common.settings", _fake_settings)
 
 from rag.nlp.search import Dealer  # noqa: E402
 
@@ -133,3 +135,35 @@ def test_matches_legacy_window_on_non_buggy_paths():
     for page_size in (1, 5, 7, 10, 30, 50, 64):
         # The non-rerank path was always page-aligned already -> must match.
         assert _rerank_window(page_size, 0) == legacy(page_size, 0, False)
+
+
+def test_insert_citations_returns_integer_indices():
+    """Citation indices must remain integers for downstream range checks."""
+
+    class _CitationQueryer:
+        @staticmethod
+        def rmWWW(text):
+            return text
+
+        @staticmethod
+        def hybrid_similarity(*_args, **_kwargs):
+            return [1.0, 0.2], [1.0, 0.2], [1.0, 0.2]
+
+    class _EmbeddingModel:
+        @staticmethod
+        def encode(texts):
+            return [[1.0, 0.0] for _ in texts], len(texts)
+
+    dealer = object.__new__(Dealer)
+    dealer.qryr = _CitationQueryer()
+
+    answer, cited_indices = dealer.insert_citations(
+        "这是一个足够长的测试回答。",
+        ["第一个相关知识切片", "第二个无关知识切片"],
+        [[1.0, 0.0], [0.0, 1.0]],
+        _EmbeddingModel(),
+    )
+
+    assert " [ID:0]" in answer
+    assert cited_indices == {0}
+    assert all(isinstance(index, int) for index in cited_indices)

@@ -310,7 +310,7 @@ class Dealer:
                 if mx < thr:
                     continue
                 cites[idx[i]] = list(
-                    set([str(ii) for ii in range(len(chunk_v)) if sim[ii] > mx]))[:4]
+                    {ii for ii in range(len(chunk_v)) if sim[ii] > mx})[:4]
             thr *= 0.8
 
         res = ""
