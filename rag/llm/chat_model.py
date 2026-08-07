@@ -117,7 +117,7 @@ def _apply_model_family_policies(
     sanitized_gen_conf = deepcopy(gen_conf) if gen_conf else {}
     sanitized_kwargs = dict(request_kwargs) if request_kwargs else {}
 
-    # Qwen3 family disables thinking by extra_body on non-stream chat requests.
+    # Qwen3 family disables thinking by extra_body on chat requests.
     if "qwen3" in model_name_lower:
         sanitized_kwargs["extra_body"] = {"enable_thinking": False}
 
@@ -1550,10 +1550,16 @@ class LiteLLMBase(ABC):
             history.insert(0, {"role": "system", "content": system})
         logging.info("[HISTORY STREAMLY]" + json.dumps(history, ensure_ascii=False, indent=4))
         gen_conf = self._clean_conf(gen_conf)
+        _, policy_kwargs = _apply_model_family_policies(
+            self.model_name,
+            backend="litellm",
+            provider=self.provider,
+            request_kwargs={},
+        )
         reasoning_start = False
         total_tokens = 0
 
-        completion_args = self._construct_completion_args(history=history, stream=True, tools=False, **gen_conf)
+        completion_args = self._construct_completion_args(history=history, stream=True, tools=False, **{**gen_conf, **policy_kwargs})
         stop = kwargs.get("stop")
         if stop:
             completion_args["stop"] = stop
