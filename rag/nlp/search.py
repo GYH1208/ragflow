@@ -309,8 +309,13 @@ class Dealer:
                 logging.debug("{} SIM: {}".format(pieces_[i], mx))
                 if mx < thr:
                     continue
-                cites[idx[i]] = list(
-                    {ii for ii in range(len(chunk_v)) if sim[ii] > mx})[:4]
+                candidates = [
+                    ii for ii in range(len(chunk_v)) if sim[ii] > mx
+                ]
+                cites[idx[i]] = sorted(
+                    candidates,
+                    key=lambda ii: (-sim[ii], ii),
+                )[:4]
             thr *= 0.8
 
         res = ""

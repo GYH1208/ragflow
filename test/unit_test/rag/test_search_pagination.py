@@ -23,6 +23,7 @@ deep pages silently drop results and come back short. These tests pin that
 invariant and verify cross-block pagination loses nothing.
 """
 import math
+import re
 import sys
 import types
 
@@ -167,3 +168,35 @@ def test_insert_citations_returns_integer_indices():
     assert " [ID:0]" in answer
     assert cited_indices == {0}
     assert all(isinstance(index, int) for index in cited_indices)
+
+
+def test_insert_citations_stably_selects_top_four_by_similarity():
+    """The highest-scoring citations win, with chunk index breaking ties."""
+
+    class _CitationQueryer:
+        @staticmethod
+        def rmWWW(text):
+            return text
+
+        @staticmethod
+        def hybrid_similarity(*_args, **_kwargs):
+            scores = [0.996, 1.0, 0.997, 1.0, 0.999, 0.2]
+            return scores, scores, scores
+
+    class _EmbeddingModel:
+        @staticmethod
+        def encode(texts):
+            return [[1.0, 0.0] for _ in texts], len(texts)
+
+    dealer = object.__new__(Dealer)
+    dealer.qryr = _CitationQueryer()
+
+    answer, cited_indices = dealer.insert_citations(
+        "这是一个足够长的测试回答。",
+        [f"知识切片{index}" for index in range(6)],
+        [[1.0, 0.0] for _ in range(6)],
+        _EmbeddingModel(),
+    )
+
+    assert re.findall(r"\[ID:(\d+)\]", answer) == ["1", "3", "4", "2"]
+    assert cited_indices == {1, 2, 3, 4}
