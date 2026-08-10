@@ -192,6 +192,7 @@ export const DocPreviewer: React.FC<DocPreviewerProps> = ({
               <DocxEditorViewer
                 editor={editor}
                 mode="read-only"
+                pageVirtualization={{ enabled: false }}
                 loadingState={
                   <div className="flex items-center justify-center p-8">
                     <Spin />
