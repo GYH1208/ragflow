@@ -16,6 +16,7 @@
 
 """Unit tests for api.apps.sdk.doc_validation module."""
 
+import uuid
 from unittest.mock import Mock
 
 import pytest
@@ -23,14 +24,43 @@ from pydantic import ValidationError
 
 from api.utils.pagination_utils import REST_API_MAX_PAGE_SIZE, validate_rest_api_page_size
 from api.utils.validation_utils import (
+    CreateDatasetCategoryReq,
+    CreateDatasetReq,
     ListDatasetReq,
     ListFileReq,
     ParserConfig,
+    UpdateDatasetCategoryReq,
     UpdateDocumentReq,
     validate_chunk_method,
     validate_document_name,
     validate_immutable_fields,
 )
+
+
+def test_category_name_is_trimmed_and_limited():
+    assert CreateDatasetCategoryReq(name="  财务  ").name == "财务"
+    with pytest.raises(ValidationError):
+        CreateDatasetCategoryReq(name=" ")
+    with pytest.raises(ValidationError):
+        CreateDatasetCategoryReq(name="a" * 129)
+
+
+def test_dataset_category_id_accepts_none_or_uuid1_hex():
+    category_id = uuid.uuid1().hex
+    assert CreateDatasetReq(name="kb", category_id=category_id).category_id == category_id
+    assert CreateDatasetReq(name="kb", category_id=None).category_id is None
+    with pytest.raises(ValidationError):
+        CreateDatasetReq(name="kb", category_id="not-a-uuid")
+
+
+def test_update_category_requires_valid_uuid1_path_id():
+    category_id = uuid.uuid1().hex
+    request = UpdateDatasetCategoryReq(name="财务", category_id=category_id)
+    assert request.category_id == category_id
+    with pytest.raises(ValidationError):
+        UpdateDatasetCategoryReq(name="财务", category_id="not-a-uuid")
+
+
 from api.constants import FILE_NAME_LEN_LIMIT
 from api.db import FileType
 from common.constants import RetCode

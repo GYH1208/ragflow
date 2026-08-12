@@ -257,6 +257,40 @@ export function deleteKnowledgeGraph(knowledgeId: string) {
 export const listDataset = (params?: IFetchKnowledgeListRequestParams) =>
   request.get(api.kbList, { params });
 
+export const listDatasetCategories = (
+  params?: Pick<IFetchKnowledgeListRequestParams, 'ext'>,
+) =>
+  request.get(api.datasetCategories, {
+    params,
+    skipErrorNotification: true,
+  });
+
+export const createDatasetCategory = (name: string) =>
+  request.post(api.datasetCategories, {
+    data: { name },
+    skipErrorNotification: true,
+  });
+
+export const updateDatasetCategory = (categoryId: string, name: string) =>
+  request.put(api.datasetCategory(categoryId), {
+    data: { name },
+    skipErrorNotification: true,
+  });
+
+export const deleteDatasetCategory = (categoryId: string) =>
+  request.delete(api.datasetCategory(categoryId), {
+    skipErrorNotification: true,
+  });
+
+export const moveDatasetToCategory = (
+  datasetId: string,
+  categoryId: string | null,
+) =>
+  request.put(api.updateKb(datasetId), {
+    data: { category_id: categoryId },
+    skipErrorNotification: true,
+  });
+
 export const updateKb = (datasetId: string, data: Record<string, any>) =>
   request.put(api.updateKb(datasetId), { data });
 

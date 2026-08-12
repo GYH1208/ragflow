@@ -17,21 +17,80 @@ import logging
 
 from peewee import OperationalError
 from quart import request
+
 from common.constants import RetCode
 from api.apps import login_required, current_user
 from api.utils.api_utils import get_error_argument_result, get_error_data_result, get_json_result, get_result, add_tenant_id_to_kwargs
 from api.utils.pagination_utils import validate_rest_api_page_size
 from api.utils.validation_utils import (
     CreateDatasetReq,
+    CreateDatasetCategoryReq,
     DeleteDatasetReq,
     ListDatasetReq,
     SearchDatasetReq,
     SearchDatasetsReq,
     UpdateDatasetReq,
+    UpdateDatasetCategoryReq,
     validate_and_parse_json_request,
     validate_and_parse_request_args,
+    validate_uuid1_hex,
 )
 from api.apps.services import dataset_api_service
+
+logger = logging.getLogger(__name__)
+
+
+@manager.route("/datasets/categories", methods=["GET"])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+def list_categories(tenant_id):
+    args, err = validate_and_parse_request_args(request, ListDatasetReq)
+    if err is not None:
+        return get_error_argument_result(err)
+    try:
+        success, result = dataset_api_service.list_dataset_categories(tenant_id, args)
+        return get_result(data=result) if success else get_error_data_result(message=result)
+    except OperationalError:
+        logger.exception("Failed to list dataset categories")
+        return get_error_data_result(message="Database operation failed")
+
+
+@manager.route("/datasets/categories", methods=["POST"])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+async def create_category(tenant_id):
+    req, err = await validate_and_parse_json_request(request, CreateDatasetCategoryReq)
+    if err is not None:
+        return get_error_argument_result(err)
+    success, result = dataset_api_service.create_dataset_category(tenant_id, req)
+    return get_result(data=result) if success else get_error_data_result(message=result)
+
+
+@manager.route("/datasets/categories/<category_id>", methods=["PUT"])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+async def update_category(tenant_id, category_id):
+    req, err = await validate_and_parse_json_request(
+        request,
+        UpdateDatasetCategoryReq,
+        extras={"category_id": category_id},
+    )
+    if err is not None:
+        return get_error_argument_result(err)
+    success, result = dataset_api_service.update_dataset_category(tenant_id, category_id, req)
+    return get_result(data=result) if success else get_error_data_result(message=result)
+
+
+@manager.route("/datasets/categories/<category_id>", methods=["DELETE"])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+def delete_category(tenant_id, category_id):
+    try:
+        category_id = validate_uuid1_hex(category_id)
+    except ValueError as error:
+        return get_error_argument_result(str(error))
+    success, result = dataset_api_service.delete_dataset_category(tenant_id, category_id)
+    return get_result(data=result) if success else get_error_data_result(message=result)
 
 
 @manager.route("/datasets/tags/aggregation", methods=["GET"])  # noqa: F821

@@ -442,7 +442,8 @@ class KnowledgebaseService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_list(cls, joined_tenant_ids, user_id,
-                 page_number, items_per_page, orderby, desc, id, name, keywords, parser_id=None):
+                 page_number, items_per_page, orderby, desc, id, name, keywords,
+                 parser_id=None, category_id=None, uncategorized=False):
         # Get list of knowledge bases with filtering and pagination
         # Args:
         #     joined_tenant_ids: List of tenant IDs
@@ -467,6 +468,10 @@ class KnowledgebaseService(CommonService):
             kbs = kbs.where(fn.LOWER(cls.model.name).contains(keywords.lower()))
         if parser_id:
             kbs = kbs.where(cls.model.parser_id == parser_id)
+        if uncategorized:
+            kbs = kbs.where(cls.model.category_id.is_null(True))
+        elif category_id:
+            kbs = kbs.where(cls.model.category_id == category_id)
 
         kbs = kbs.where(cls._visibility_and_status_filter(joined_tenant_ids, user_id))
 

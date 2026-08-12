@@ -16,6 +16,7 @@ export interface IDataset {
   avatar?: string;
   chunk_count: number;
   chunk_method: string;
+  category_id?: Nullable<string>;
   create_date: string;
   create_time: number;
   created_by: string;
@@ -47,6 +48,22 @@ export interface IDataset {
   update_time: number;
   vector_similarity_weight: number;
   connectors: IConnector[];
+}
+
+export interface IDatasetCategory {
+  id: string;
+  tenant_id: string;
+  name: string;
+  count: number;
+  can_manage: boolean;
+  create_time?: number;
+  update_time?: number;
+}
+
+export interface IDatasetCategorySummary {
+  categories: IDatasetCategory[];
+  total_count: number;
+  uncategorized_count: number;
 }
 
 interface Parserconfig {

@@ -500,12 +500,30 @@ class UpdateDocumentReq(Base):
         return meta_fields
 
 
+class CreateDatasetCategoryReq(Base):
+    """Request model for creating a dataset category."""
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=DATASET_NAME_LIMIT), Field(...)]
+
+
+class UpdateDatasetCategoryReq(CreateDatasetCategoryReq):
+    """Request model for renaming a dataset category."""
+
+    category_id: Annotated[str, Field(...)]
+
+    @field_validator("category_id", mode="before")
+    @classmethod
+    def validate_category_id(cls, value: Any) -> str:
+        return validate_uuid1_hex(value)
+
+
 class CreateDatasetReq(Base):
     """Request model for creating a dataset."""
 
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=DATASET_NAME_LIMIT), Field(...)]
     avatar: Annotated[str | None, Field(default=None, max_length=65535)]
     description: Annotated[str | None, Field(default=None, max_length=65535)]
+    category_id: Annotated[str | None, Field(default=None)]
     embedding_model: Annotated[str | None, Field(default=None, max_length=255, serialization_alias="embd_id")]
     permission: Annotated[Literal["me", "team"], Field(default="me", min_length=1, max_length=16)]
     parse_type: Annotated[int | None, Field(default=None, ge=0, le=64)]
@@ -514,6 +532,13 @@ class CreateDatasetReq(Base):
     parser_config: Annotated[ParserConfig | None, Field(default=None)]
     auto_metadata_config: Annotated[AutoMetadataConfig | None, Field(default=None)]
     ext: Annotated[dict, Field(default={})]
+
+    @field_validator("category_id", mode="before")
+    @classmethod
+    def validate_category_id(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        return validate_uuid1_hex(value)
 
     @field_validator("pipeline_id", mode="before")
     @classmethod

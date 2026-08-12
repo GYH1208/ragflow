@@ -28,6 +28,7 @@ export interface IFetchKnowledgeListRequestParams {
   page?: number;
   page_size?: number;
   ext?: {
+    category_id?: string;
     keywords?: string;
     owner_ids?: string[];
     parser_id?: string;

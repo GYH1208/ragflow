@@ -379,6 +379,32 @@ Example: A 1 KB message with 1024-dim embedding uses ~9 KB. The 5 MB default lim
       noMoreData: `That's all. Nothing more.`,
       parserRequired: 'Chunk method is required',
       dataFlowRequired: 'Data flow is required',
+      categories: 'Categories',
+      category: 'Category',
+      all: 'All',
+      uncategorized: 'Uncategorized',
+      createCategory: 'Create category',
+      renameCategory: 'Rename category',
+      deleteCategory: 'Delete category',
+      deleteCategoryDescription:
+        'The {{count}} datasets in this category will be moved to Uncategorized.',
+      categoryName: 'Category name',
+      categoryNamePlaceholder: 'Enter a category name',
+      categoryNameRequired: 'Enter a category name',
+      categoryNameTooLong: 'Category name cannot exceed 128 characters',
+      categoryNameExists: 'Category name already exists',
+      categoryNotFound: 'Category does not exist or has been deleted',
+      categoryManageForbidden:
+        'You do not have permission to manage this category',
+      categoryAssignForbidden:
+        'You do not have permission to move a dataset to this category',
+      loadCategoriesFailed: 'Failed to load categories',
+      createCategoryFailed: 'Failed to create category',
+      renameCategoryFailed: 'Failed to rename category',
+      deleteCategoryFailed: 'Failed to delete category',
+      moveDatasetFailed: 'Failed to move dataset',
+      categoryActions: 'Category actions for {{name}}',
+      moveToCategory: 'Move to category',
     },
     knowledgeDetails: {
       metadata: {

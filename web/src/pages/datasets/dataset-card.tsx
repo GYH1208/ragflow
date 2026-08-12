@@ -3,7 +3,7 @@ import { MoreButton } from '@/components/more-button';
 import { SharedBadge } from '@/components/shared-badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { useNavigatePage } from '@/hooks/logic-hooks/navigate-hooks';
-import { IDataset } from '@/interfaces/database/dataset';
+import { IDataset, IDatasetCategory } from '@/interfaces/database/dataset';
 import { t } from 'i18next';
 import { ChevronRight } from 'lucide-react';
 import { DatasetDropdown } from './dataset-dropdown';
@@ -11,10 +11,18 @@ import { useRenameDataset } from './use-rename-dataset';
 
 export type DatasetCardProps = {
   dataset: IDataset;
+  categories?: IDatasetCategory[];
+  canMove?: boolean;
+  onMove?: (datasetId: string, categoryId: string | null) => Promise<unknown>;
 } & Pick<ReturnType<typeof useRenameDataset>, 'showDatasetRenameModal'>;
+
+const noopMoveDataset = async () => undefined;
 
 export function DatasetCard({
   dataset,
+  categories = [],
+  canMove = false,
+  onMove = noopMoveDataset,
   showDatasetRenameModal,
 }: DatasetCardProps) {
   const { navigateToDataset } = useNavigatePage();
@@ -29,6 +37,9 @@ export function DatasetCard({
         <DatasetDropdown
           showDatasetRenameModal={showDatasetRenameModal}
           dataset={dataset}
+          categories={categories}
+          canMove={canMove}
+          onMove={onMove}
         >
           <MoreButton></MoreButton>
         </DatasetDropdown>

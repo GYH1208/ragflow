@@ -125,7 +125,7 @@ export const useTestRetrieval = () => {
   };
 };
 
-export const useFetchNextKnowledgeListByPage = () => {
+export const useFetchNextKnowledgeListByPage = (categoryId?: string) => {
   const { searchString, handleInputChange } = useHandleSearchChange();
   const { pagination, setPagination } = useGetPaginationWithRouter();
   const debouncedSearchString = useDebounce(searchString, { wait: 500 });
@@ -138,6 +138,7 @@ export const useFetchNextKnowledgeListByPage = () => {
         debouncedSearchString,
         ...pagination,
         filterValue,
+        categoryId,
       },
     ],
     initialData: {
@@ -152,6 +153,7 @@ export const useFetchNextKnowledgeListByPage = () => {
         ext: {
           keywords: debouncedSearchString,
           owner_ids: filterValue.owner as string[],
+          category_id: categoryId,
         },
       });
 

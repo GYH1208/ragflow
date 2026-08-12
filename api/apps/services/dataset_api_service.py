@@ -18,6 +18,8 @@ import json
 import os
 import re
 
+from peewee import IntegrityError
+
 from api.db.joint_services.tenant_model_service import get_model_config_from_provider_instance
 from common.constants import PAGERANK_FLD
 from common import settings
@@ -26,6 +28,7 @@ from api.db.services.document_service import DocumentService, queue_raptor_o_gra
 from api.db.services.file2document_service import File2DocumentService
 from api.db.services.file_service import FileService
 from api.db.services.knowledgebase_service import KnowledgebaseService
+from api.db.services.knowledgebase_category_service import KnowledgebaseCategoryService
 from api.db.services.connector_service import Connector2KbService
 from api.db.services.task_service import GRAPH_RAPTOR_FAKE_DOC_ID, TaskService
 from api.db.services.user_service import TenantService, UserService, UserTenantService
@@ -51,6 +54,68 @@ _INDEX_TYPE_TO_DISPLAY_NAME = {
     "raptor": "RAPTOR",
     "mindmap": "Mindmap",
 }
+
+
+def list_dataset_categories(user_id: str, args: dict):
+    owner_ids = args.get("ext", {}).get("owner_ids", [])
+    return True, KnowledgebaseCategoryService.list_with_counts(user_id, owner_ids)
+
+
+def create_dataset_category(user_id: str, req: dict):
+    name = req["name"].strip()
+    if KnowledgebaseCategoryService.name_exists(user_id, name):
+        return False, "Dataset category name already exists"
+    try:
+        category = KnowledgebaseCategoryService.insert(
+            tenant_id=user_id,
+            name=name,
+            created_by=user_id,
+            status=StatusEnum.VALID.value,
+        )
+    except IntegrityError:
+        return False, "Dataset category name already exists"
+    return True, category.to_dict()
+
+
+def update_dataset_category(user_id: str, category_id: str, req: dict):
+    category = KnowledgebaseCategoryService.get_or_none(id=category_id, status=StatusEnum.VALID.value)
+    if category is None:
+        return False, "Dataset category not found"
+    if category.tenant_id != user_id:
+        return False, "No authorization to manage this dataset category"
+
+    name = req["name"].strip()
+    if KnowledgebaseCategoryService.name_exists(user_id, name, exclude_id=category_id):
+        return False, "Dataset category name already exists"
+    try:
+        KnowledgebaseCategoryService.update_by_id(category_id, {"name": name})
+    except IntegrityError:
+        return False, "Dataset category name already exists"
+    ok, updated = KnowledgebaseCategoryService.get_by_id(category_id)
+    if not ok:
+        return False, "Dataset category not found"
+    return True, updated.to_dict()
+
+
+def delete_dataset_category(user_id: str, category_id: str):
+    unassigned_count = KnowledgebaseCategoryService.delete_and_unassign(category_id, user_id)
+    if unassigned_count is None:
+        category = KnowledgebaseCategoryService.get_or_none(id=category_id, status=StatusEnum.VALID.value)
+        if category is None:
+            return False, "Dataset category not found"
+        return False, "No authorization to manage this dataset category"
+    return True, {"unassigned_count": unassigned_count}
+
+
+def validate_category_assignment(user_id: str, kb_tenant_id: str, category_id: str | None):
+    if category_id is None:
+        return True, None
+    category = KnowledgebaseCategoryService.get_or_none(id=category_id, status=StatusEnum.VALID.value)
+    if category is None:
+        return False, "Dataset category not found"
+    if category.tenant_id != kb_tenant_id or kb_tenant_id != user_id:
+        return False, "No authorization to assign this dataset category"
+    return True, category
 
 
 async def create_dataset(tenant_id: str, req: dict):
@@ -83,6 +148,10 @@ async def create_dataset(tenant_id: str, req: dict):
         parser_cfg["enable_metadata"] = auto_meta.get("enabled", True)
         req["parser_config"] = parser_cfg
     req.update(ext_fields)
+
+    ok, category_or_error = validate_category_assignment(tenant_id, tenant_id, req.get("category_id"))
+    if not ok:
+        return False, category_or_error
 
     e, create_dict = KnowledgebaseService.create_with_name(name=req.pop("name", None), tenant_id=tenant_id, parser_id=req.pop("parser_id", None), **req)
 
@@ -254,6 +323,11 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
     if kb is None:
         return False, f"User '{tenant_id}' lacks permission for dataset '{dataset_id}'"
 
+    if "category_id" in req:
+        ok, category_or_error = validate_category_assignment(tenant_id, kb.tenant_id, req["category_id"])
+        if not ok:
+            return False, category_or_error
+
     # Extract ext field for additional parameters
     ext_fields = req.pop("ext", {})
 
@@ -371,6 +445,9 @@ def list_datasets(tenant_id: str, args: dict):
     ext_fields = args.get("ext", {})
     parser_id = ext_fields.get("parser_id")
     keywords = ext_fields.get("keywords", "")
+    category_filter = ext_fields.get("category_id")
+    uncategorized = category_filter == "uncategorized"
+    category_id = None if uncategorized else category_filter
     orderby = args.get("orderby", "create_time")
     desc_arg = args.get("desc", "true")
     if isinstance(desc_arg, str):
@@ -394,7 +471,20 @@ def list_datasets(tenant_id: str, args: dict):
     else:
         tenants = TenantService.get_joined_tenants_by_user_id(tenant_id)
         tenant_ids = [m["tenant_id"] for m in tenants]
-    kbs, total = KnowledgebaseService.get_list(tenant_ids, tenant_id, page, page_size, orderby, desc, kb_id, name, keywords, parser_id)
+    kbs, total = KnowledgebaseService.get_list(
+        tenant_ids,
+        tenant_id,
+        page,
+        page_size,
+        orderby,
+        desc,
+        kb_id,
+        name,
+        keywords,
+        parser_id,
+        category_id,
+        uncategorized,
+    )
     users = UserService.get_by_ids([m["tenant_id"] for m in kbs])
     user_map = {m.id: m.to_dict() for m in users}
     response_data_list = []
@@ -1095,6 +1185,7 @@ def check_embedding(dataset_id: str, tenant_id: str, req: dict):
     import random
 
     import numpy as np
+
     from common.constants import RetCode
     from common.doc_store.doc_store_base import OrderByExpr
     from rag.nlp import search

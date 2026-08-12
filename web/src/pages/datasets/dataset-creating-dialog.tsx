@@ -17,10 +17,12 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
+import { RAGFlowSelect } from '@/components/ui/select';
 import { FormLayout } from '@/constants/form';
 import { ParseType } from '@/constants/knowledge';
 import { useFetchDefaultModelDictionary } from '@/hooks/use-llm-request';
 import { IModalProps } from '@/interfaces/common';
+import { IDatasetCategory } from '@/interfaces/database/dataset';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { omit } from 'lodash';
 import { useEffect } from 'react';
@@ -32,12 +34,22 @@ import {
   EmbeddingModelItem,
   ParseTypeItem,
 } from '../dataset/dataset-setting/configuration/common-item';
+import { UNCATEGORIZED_CATEGORY } from './category-constants';
 
 const FormId = 'dataset-creating-form';
 
 const ChunkMethodName = 'chunk_method';
 
-export function InputForm({ onOk }: IModalProps<any>) {
+type DatasetCreatingCategoryProps = {
+  categories?: IDatasetCategory[];
+  defaultCategoryId?: string | null;
+};
+
+export function InputForm({
+  onOk,
+  categories = [],
+  defaultCategoryId,
+}: IModalProps<any> & DatasetCreatingCategoryProps) {
   const { t } = useTranslation();
   const defaultModelDictionary = useFetchDefaultModelDictionary();
 
@@ -49,6 +61,7 @@ export function InputForm({ onOk }: IModalProps<any>) {
           message: t('knowledgeList.namePlaceholder'),
         })
         .trim(),
+      category_id: z.string(),
       parseType: z.nativeEnum(ParseType).optional(),
       embedding_model: z
         .string()
@@ -85,6 +98,7 @@ export function InputForm({ onOk }: IModalProps<any>) {
     resolver: zodResolver(FormSchema),
     defaultValues: {
       name: '',
+      category_id: defaultCategoryId || UNCATEGORIZED_CATEGORY,
       parseType: ParseType.BuiltIn,
       [ChunkMethodName]: '',
       embedding_model: defaultModelDictionary?.embd_id,
@@ -97,9 +111,16 @@ export function InputForm({ onOk }: IModalProps<any>) {
   });
 
   function onSubmit(data: z.infer<typeof FormSchema>) {
-    const nextData =
-      parseType === ParseType.BuiltIn ? data : omit(data, ChunkMethodName);
-    onOk?.(nextData);
+    const normalizedData = {
+      ...data,
+      category_id:
+        data.category_id === UNCATEGORIZED_CATEGORY ? null : data.category_id,
+    };
+    const nextNormalizedData =
+      parseType === ParseType.BuiltIn
+        ? normalizedData
+        : omit(normalizedData, ChunkMethodName);
+    onOk?.(nextNormalizedData);
   }
 
   useEffect(() => {
@@ -140,6 +161,32 @@ export function InputForm({ onOk }: IModalProps<any>) {
           )}
         />
 
+        <FormField
+          control={form.control}
+          name="category_id"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>{t('knowledgeList.category')}</FormLabel>
+              <FormControl>
+                <RAGFlowSelect
+                  {...field}
+                  options={[
+                    {
+                      value: UNCATEGORIZED_CATEGORY,
+                      label: t('knowledgeList.uncategorized'),
+                    },
+                    ...categories.map((category) => ({
+                      value: category.id,
+                      label: category.name,
+                    })),
+                  ]}
+                />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
         <EmbeddingModelItem line={2} isEdit={false} />
         <ParseTypeItem />
         {parseType === ParseType.BuiltIn && (
@@ -162,7 +209,9 @@ export function DatasetCreatingDialog({
   hideModal,
   onOk,
   loading,
-}: IModalProps<any>) {
+  categories,
+  defaultCategoryId,
+}: IModalProps<any> & DatasetCreatingCategoryProps) {
   const { t } = useTranslation();
 
   return (
@@ -181,7 +230,11 @@ export function DatasetCreatingDialog({
           <DialogTitle>{t('knowledgeList.createKnowledgeBase')}</DialogTitle>
         </DialogHeader>
         <DialogDescription></DialogDescription>
-        <InputForm onOk={onOk}></InputForm>
+        <InputForm
+          onOk={onOk}
+          categories={categories}
+          defaultCategoryId={defaultCategoryId}
+        ></InputForm>
         <DialogFooter>
           <ButtonLoading type="submit" form={FormId} loading={loading}>
             {t('common.save')}

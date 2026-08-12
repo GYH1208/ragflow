@@ -15,6 +15,7 @@ import { RequestMethod, extend } from 'umi-request';
 import { convertTheKeysOfTheObjectToSnake, isFormData } from './common-util';
 import { setCachedLlmList } from './llm-cache';
 import { addTenantParams } from './llm-util';
+import { shouldShowApiErrorNotification } from './request-error-policy';
 
 const FAILED_TO_FETCH = 'Failed to fetch';
 
@@ -155,7 +156,9 @@ request.interceptors.response.use(async (response: Response, options) => {
     }
   }
 
-  if (data?.code === 100) {
+  const shouldShowError = shouldShowApiErrorNotification(options);
+
+  if (data?.code === 100 && shouldShowError) {
     message.error(data?.message);
   } else if (data?.code === 401) {
     if (!isRedirecting) {
@@ -170,7 +173,7 @@ request.interceptors.response.use(async (response: Response, options) => {
     }
     authorizationUtil.removeAll();
     redirectToLogin();
-  } else if (data?.code !== 0) {
+  } else if (data?.code !== 0 && shouldShowError) {
     notification.error({
       message: `${i18n.t('message.hint')} : ${data?.code}`,
       description: data?.message,

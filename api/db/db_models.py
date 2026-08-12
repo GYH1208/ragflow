@@ -864,6 +864,18 @@ class TenantLangfuse(DataBaseModel):
         db_table = "tenant_langfuse"
 
 
+class KnowledgebaseCategory(DataBaseModel):
+    id = CharField(max_length=32, primary_key=True)
+    tenant_id = CharField(max_length=32, null=False, index=True)
+    name = CharField(max_length=128, null=False)
+    created_by = CharField(max_length=32, null=False, index=True)
+    status = CharField(max_length=1, null=False, help_text="is it validate(0: wasted, 1: validate)", default="1", index=True)
+
+    class Meta:
+        db_table = "knowledgebase_category"
+        indexes = ((('tenant_id', 'name'), True),)
+
+
 class Knowledgebase(DataBaseModel):
     id = CharField(max_length=32, primary_key=True)
     avatar = TextField(null=True, help_text="avatar base64 string")
@@ -871,6 +883,7 @@ class Knowledgebase(DataBaseModel):
     name = CharField(max_length=128, null=False, help_text="KB name", index=True)
     language = CharField(max_length=32, null=True, default="Chinese" if "zh_CN" in os.getenv("LANG", "") else "English", help_text="English|Chinese", index=True)
     description = TextField(null=True, help_text="KB description")
+    category_id = CharField(max_length=32, null=True, index=True)
     embd_id = CharField(max_length=128, null=False, help_text="default embedding model ID", index=True)
     tenant_embd_id = IntegerField(null=True, help_text="id in tenant_llm", index=True)
     permission = CharField(max_length=16, null=False, help_text="me|team", default="me", index=True)
@@ -1720,6 +1733,7 @@ def migrate_db():
     alter_db_add_column(migrator, "tenant_llm", "max_tokens", IntegerField(default=8192, index=True))
     alter_db_add_column(migrator, "api_4_conversation", "dsl", JSONField(null=True, default={}))
     alter_db_add_column(migrator, "knowledgebase", "pagerank", IntegerField(default=0, index=False))
+    alter_db_add_column(migrator, "knowledgebase", "category_id", CharField(max_length=32, null=True, index=True))
     alter_db_add_column(migrator, "api_token", "beta", CharField(max_length=255, null=True, index=True))
     alter_db_add_column(migrator, "task", "digest", TextField(null=True, help_text="task digest", default=""))
     alter_db_add_column(migrator, "task", "chunk_ids", LongTextField(null=True, help_text="chunk ids", default=""))
