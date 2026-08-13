@@ -59,7 +59,12 @@ class Channel(ABC):
     def set_message_handler(self, handler: MessageHandler) -> None:
         self._handler = handler
 
-    def allows_reference_image(self, chunk: dict[str, Any]) -> bool:
+    def allows_reference_image(
+        self,
+        chunk: dict[str, Any],
+        *,
+        dialog_allows_pdf_images: bool = False,
+    ) -> bool:
         """Return whether this channel may deliver an image from a reference chunk."""
         return True
 

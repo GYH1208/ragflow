@@ -1087,6 +1087,9 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
       sendSourceFile: 'Send cited source files',
       sendSourceFileTip:
         'When enabled, supported chat channels send the original files actually cited by the answer. Each file is sent only once.',
+      sendPdfReferenceImages: 'Send PDF reference screenshots to chat channels',
+      sendPdfReferenceImagesTip:
+        'PDF reference screenshots are sent only when this chat assistant and the corresponding WeCom channel both enable this setting.',
       selfRag: 'Self-RAG',
       selfRagTip: 'Please refer to: https://huggingface.co/papers/2310.11511',
       overview: 'Chat ID',

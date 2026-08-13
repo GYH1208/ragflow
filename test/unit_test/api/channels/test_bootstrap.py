@@ -22,7 +22,12 @@ class RecordingStreamingChannel:
         self.events = events if events is not None else []
         self.final_stream_result = final_stream_result
 
-    def allows_reference_image(self, chunk):
+    def allows_reference_image(
+        self,
+        chunk,
+        *,
+        dialog_allows_pdf_images=False,
+    ):
         return True
 
     async def send_stream(self, message, stream_id, finish):
@@ -367,9 +372,12 @@ async def _run_handler_case(
     answer="回答正文。[ID:0]",
     text_send_result=True,
     persist_result=True,
+    channel_pdf_images_enabled=True,
+    dialog_pdf_images_enabled=True,
 ):
     events = []
     sent_messages = []
+    policy_calls = []
     conversation = SimpleNamespace(
         id="conversation-1",
         message=[],
@@ -386,6 +394,7 @@ async def _run_handler_case(
         prompt_config={
             "quote": True,
             "send_source_file": True,
+            "send_pdf_reference_images": dialog_pdf_images_enabled,
             "system": "{knowledge}",
         },
     )
@@ -454,7 +463,16 @@ async def _run_handler_case(
         supports_source_files = True
         hides_reference_markers = True
 
-        def allows_reference_image(self, chunk):
+        def allows_reference_image(
+            self,
+            chunk,
+            *,
+            dialog_allows_pdf_images=False,
+        ):
+            policy_calls.append((chunk["id"], dialog_allows_pdf_images))
+            filename = str(chunk.get("document_name") or "")
+            if filename.lower().endswith(".pdf"):
+                return channel_pdf_images_enabled and dialog_allows_pdf_images
             return True
 
         async def send(self, outgoing):
@@ -502,7 +520,95 @@ async def _run_handler_case(
         sender_id="user-1",
         text=question,
     ))
-    return events, sent_messages
+    return events, sent_messages, policy_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("channel_enabled", "dialog_enabled", "expected_images"),
+    [
+        (False, False, [OutgoingImage("docx-image")]),
+        (True, False, [OutgoingImage("docx-image")]),
+        (False, True, [OutgoingImage("docx-image")]),
+        (
+            True,
+            True,
+            [OutgoingImage("pdf-image"), OutgoingImage("docx-image")],
+        ),
+    ],
+)
+async def test_handler_applies_pdf_image_two_level_switches(
+    monkeypatch,
+    channel_enabled,
+    dialog_enabled,
+    expected_images,
+):
+    chunks = [
+        {
+            "id": "pdf",
+            "content": "PDF evidence",
+            "image_id": "pdf-image",
+            "document_name": "policy.pdf",
+        },
+        {
+            "id": "docx",
+            "content": "DOCX evidence",
+            "image_id": "docx-image",
+            "document_name": "faq.docx",
+        },
+    ]
+    resolution = EvidenceResolution(
+        ["pdf", "docx"],
+        [],
+        [],
+        "resolved",
+        1.0,
+    )
+
+    events, sent_messages, policy_calls = await _run_handler_case(
+        monkeypatch,
+        chunks=chunks,
+        resolution=resolution,
+        channel_pdf_images_enabled=channel_enabled,
+        dialog_pdf_images_enabled=dialog_enabled,
+    )
+
+    assert sent_messages[-1].images == expected_images
+    assert policy_calls == [
+        ("pdf", dialog_enabled is True),
+        ("docx", dialog_enabled is True),
+    ]
+    assert (
+        "persist",
+        "conversation-1",
+        "message-1",
+        ["pdf", "docx"],
+    ) in events
+    assert chunks[0]["image_id"] == "pdf-image"
+
+
+@pytest.mark.asyncio
+async def test_handler_does_not_enable_pdf_images_for_string_dialog_value(
+    monkeypatch,
+):
+    chunks = [{
+        "id": "pdf",
+        "content": "PDF evidence",
+        "image_id": "pdf-image",
+        "document_name": "policy.pdf",
+    }]
+
+    _, sent_messages, policy_calls = await _run_handler_case(
+        monkeypatch,
+        chunks=chunks,
+        resolution=EvidenceResolution(
+            ["pdf"], [], [], "resolved", 1.0
+        ),
+        dialog_pdf_images_enabled="true",
+    )
+
+    assert len(sent_messages) == 1
+    assert policy_calls == [("pdf", False)]
 
 
 @pytest.mark.asyncio
@@ -532,7 +638,7 @@ async def test_handler_sends_text_before_resolving_and_sending_images(
         12.0,
     )
 
-    events, _ = await _run_handler_case(
+    events, _, _ = await _run_handler_case(
         monkeypatch,
         chunks=chunks,
         resolution=resolution,
@@ -586,7 +692,7 @@ async def test_handler_sends_two_verified_images_after_text_in_unit_order(
         20.0,
     )
 
-    events, sent_messages = await _run_handler_case(
+    events, sent_messages, _ = await _run_handler_case(
         monkeypatch,
         question="怎么查进度和设置代理人？",
         answer="查审批进度。[ID:0]\n设置代理人。[ID:1]",
@@ -609,7 +715,7 @@ async def test_handler_sends_two_verified_images_after_text_in_unit_order(
 async def test_handler_does_not_resolve_when_text_send_returns_false(
     monkeypatch,
 ):
-    events, sent_messages = await _run_handler_case(
+    events, sent_messages, _ = await _run_handler_case(
         monkeypatch,
         chunks=[{"id": "c1", "content": "证据", "image_id": "image-1"}],
         resolution=EvidenceResolution(["c1"], [], [], "resolved", 1.0),
@@ -622,7 +728,7 @@ async def test_handler_does_not_resolve_when_text_send_returns_false(
 
 @pytest.mark.asyncio
 async def test_handler_does_not_resolve_without_image_candidates(monkeypatch):
-    events, sent_messages = await _run_handler_case(
+    events, sent_messages, _ = await _run_handler_case(
         monkeypatch,
         chunks=[{"id": "c1", "content": "纯文字证据", "image_id": ""}],
         resolution=EvidenceResolution(["c1"], [], [], "resolved", 1.0),
@@ -636,7 +742,7 @@ async def test_handler_does_not_resolve_without_image_candidates(monkeypatch):
 async def test_handler_sends_images_when_evidence_persistence_fails(
     monkeypatch,
 ):
-    events, sent_messages = await _run_handler_case(
+    events, sent_messages, _ = await _run_handler_case(
         monkeypatch,
         chunks=[{"id": "c1", "content": "证据", "image_id": "image-1"}],
         resolution=EvidenceResolution(["c1"], [], [], "resolved", 1.0),
@@ -649,7 +755,7 @@ async def test_handler_sends_images_when_evidence_persistence_fails(
 
 @pytest.mark.asyncio
 async def test_handler_sends_no_images_on_error_resolution(monkeypatch):
-    _, sent_messages = await _run_handler_case(
+    _, sent_messages, _ = await _run_handler_case(
         monkeypatch,
         chunks=[{"id": "c1", "content": "证据", "image_id": "image-1"}],
         resolution=EvidenceResolution(
@@ -697,7 +803,7 @@ async def test_capability_answer_never_sends_cited_approval_screenshot_without_t
         "财务流程：查询审批进度、报销相关操作。[ID:3]"
     )
 
-    events, sent_messages = await _run_handler_case(
+    events, sent_messages, _ = await _run_handler_case(
         monkeypatch,
         question="你都有什么功能？",
         answer=answer,
@@ -874,7 +980,12 @@ async def test_streaming_finalizes_text_before_resolving_and_sends_verified_imag
 @pytest.mark.asyncio
 async def test_handler_keeps_pdf_reference_but_filters_it_from_channel_images(monkeypatch):
     class PdfFilteringChannel(RecordingStreamingChannel):
-        def allows_reference_image(self, chunk):
+        def allows_reference_image(
+            self,
+            chunk,
+            *,
+            dialog_allows_pdf_images=False,
+        ):
             filename = str(chunk.get("document_name") or "").lower()
             return bool(filename) and not filename.endswith(".pdf")
 

@@ -27,6 +27,7 @@ export const useCreateChatDialog = () => {
         prologue: t('chat.setAnOpenerInitial'),
         quote: true,
         send_source_file: false,
+        send_pdf_reference_images: false,
         keyword: false,
         tts: false,
         system: t('chat.systemInitialValue'),

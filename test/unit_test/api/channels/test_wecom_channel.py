@@ -32,31 +32,59 @@ def test_wecom_hides_reference_markers():
     assert make_channel().supports_source_files is True
 
 
-@pytest.mark.parametrize("filename", ["policy.pdf", "POLICY.PDF", " policy.PdF "])
-def test_wecom_rejects_pdf_reference_images_by_default(filename):
-    assert make_channel().allows_reference_image(
+@pytest.mark.parametrize(
+    ("channel_enabled", "dialog_enabled", "expected"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (True, True, True),
+    ],
+)
+def test_wecom_pdf_reference_images_require_both_switches(
+    channel_enabled,
+    dialog_enabled,
+    expected,
+):
+    channel = make_channel(send_pdf_reference_images=channel_enabled)
+
+    assert channel.allows_reference_image(
         {
             "image_id": "pdf-image",
-            "document_name": filename,
-        }
-    ) is False
+            "document_name": " policy.PdF ",
+        },
+        dialog_allows_pdf_images=dialog_enabled,
+    ) is expected
 
 
-def test_wecom_rejects_pdf_reference_images_from_legacy_filename_field():
-    assert make_channel().allows_reference_image(
+@pytest.mark.parametrize(
+    ("channel_enabled", "dialog_enabled", "expected"),
+    [(False, True, False), (True, False, False), (True, True, True)],
+)
+def test_wecom_pdf_reference_images_from_legacy_filename_follow_both_switches(
+    channel_enabled,
+    dialog_enabled,
+    expected,
+):
+    channel = make_channel(send_pdf_reference_images=channel_enabled)
+
+    assert channel.allows_reference_image(
         {
             "image_id": "pdf-image",
             "docnm_kwd": "policy.pdf",
-        }
-    ) is False
+        },
+        dialog_allows_pdf_images=dialog_enabled,
+    ) is expected
 
 
-def test_wecom_allows_non_pdf_reference_images_by_default():
+@pytest.mark.parametrize("dialog_enabled", [False, True])
+def test_wecom_allows_non_pdf_reference_images_regardless_of_switches(dialog_enabled):
     assert make_channel().allows_reference_image(
         {
             "image_id": "answer-image",
             "document_name": "faq.docx",
-        }
+        },
+        dialog_allows_pdf_images=dialog_enabled,
     ) is True
 
 
@@ -70,13 +98,30 @@ def test_wecom_rejects_reference_images_without_source_filename(caplog):
     assert "reason=missing_document_name" in caplog.text
 
 
-def test_wecom_allows_pdf_reference_images_when_enabled():
-    assert make_channel(send_pdf_reference_images=True).allows_reference_image(
-        {
-            "image_id": "pdf-image",
-            "document_name": "policy.pdf",
-        }
-    ) is True
+def test_wecom_logs_channel_level_pdf_rejection(caplog):
+    channel = make_channel(send_pdf_reference_images=False)
+
+    with caplog.at_level(logging.INFO, logger="api.channels.wecom.channel"):
+        allowed = channel.allows_reference_image(
+            {"image_id": "pdf-image", "document_name": "policy.pdf"},
+            dialog_allows_pdf_images=True,
+        )
+
+    assert allowed is False
+    assert "reason=channel_pdf_images_disabled" in caplog.text
+
+
+def test_wecom_logs_dialog_level_pdf_rejection(caplog):
+    channel = make_channel(send_pdf_reference_images=True)
+
+    with caplog.at_level(logging.INFO, logger="api.channels.wecom.channel"):
+        allowed = channel.allows_reference_image(
+            {"image_id": "pdf-image", "document_name": "policy.pdf"},
+            dialog_allows_pdf_images=False,
+        )
+
+    assert allowed is False
+    assert "reason=dialog_pdf_images_disabled" in caplog.text
 
 
 def test_wecom_builder_defaults_pdf_reference_images_to_disabled():

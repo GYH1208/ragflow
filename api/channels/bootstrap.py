@@ -445,6 +445,9 @@ def _make_chat_handler(ch):
         quote_enabled = bool(
             (dia.prompt_config or {}).get("quote", True)
         )
+        dialog_allows_pdf_images = (
+            (dia.prompt_config or {}).get("send_pdf_reference_images") is True
+        )
         if not ch.supports_reference_images:
             LOGGER.info(
                 "[%s:%s] evidence skipped reason=unsupported_channel",
@@ -507,7 +510,10 @@ def _make_chat_handler(ch):
             evidence_images = _images_for_used_chunks(
                 valid_chunks,
                 resolution.used_chunk_ids,
-                image_allowed=ch.allows_reference_image,
+                image_allowed=lambda chunk: ch.allows_reference_image(
+                    chunk,
+                    dialog_allows_pdf_images=dialog_allows_pdf_images,
+                ),
             )
             LOGGER.info(
                 "[%s:%s] evidence delivery conversation_id=%s "

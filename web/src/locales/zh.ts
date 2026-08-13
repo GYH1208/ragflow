@@ -986,6 +986,9 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取实体和关系
       sendSourceFile: '发送引用原文件',
       sendSourceFileTip:
         '开启后，通过支持文件消息的聊天通道回复时，将发送本次回答实际引用的原文件。同一文件只发送一次。',
+      sendPdfReferenceImages: '发送 PDF 引用截图到聊天渠道',
+      sendPdfReferenceImagesTip:
+        '仅当当前聊天助手和对应企业微信渠道均开启此功能时，才会发送 PDF 引用截图。',
       selfRag: 'Self-RAG',
       selfRagTip: '请参考: https://huggingface.co/papers/2310.11511',
       overview: '聊天 ID',

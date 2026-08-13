@@ -16,6 +16,7 @@ export interface PromptConfig {
   tts?: boolean;
   quote: boolean;
   send_source_file?: boolean;
+  send_pdf_reference_images?: boolean;
   keyword: boolean;
   refine_multiturn: boolean;
   use_kg: boolean;

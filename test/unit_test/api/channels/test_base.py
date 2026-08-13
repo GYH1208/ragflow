@@ -26,14 +26,20 @@ def test_channel_keeps_reference_markers_by_default():
     assert Channel.hides_reference_markers is False
 
 
-def test_channel_allows_reference_images_by_default():
+def test_channel_allows_reference_images_regardless_of_dialog_pdf_setting():
     channel = RecordingChannel()
+    chunk = {
+        "image_id": "image-1",
+        "document_name": "policy.pdf",
+    }
 
     assert channel.allows_reference_image(
-        {
-            "image_id": "image-1",
-            "document_name": "policy.pdf",
-        }
+        chunk,
+        dialog_allows_pdf_images=False,
+    ) is True
+    assert channel.allows_reference_image(
+        chunk,
+        dialog_allows_pdf_images=True,
     ) is True
 
 

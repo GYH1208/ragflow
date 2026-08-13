@@ -169,10 +169,12 @@ class WeComChannel(Channel):
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._stop_requested = False
 
-    def allows_reference_image(self, chunk: dict[str, Any]) -> bool:
-        if self.account.send_pdf_reference_images:
-            return True
-
+    def allows_reference_image(
+        self,
+        chunk: dict[str, Any],
+        *,
+        dialog_allows_pdf_images: bool = False,
+    ) -> bool:
         filename = str(chunk.get("document_name") or chunk.get("docnm_kwd") or "").strip()
         if not filename:
             LOGGER.warning(
@@ -181,7 +183,26 @@ class WeComChannel(Channel):
                 chunk.get("image_id") or chunk.get("img_id") or "",
             )
             return False
-        return not filename.casefold().endswith(".pdf")
+        if not filename.casefold().endswith(".pdf"):
+            return True
+
+        if self.account.send_pdf_reference_images is not True:
+            LOGGER.info(
+                "[wecom:%s] reference image skipped reason=channel_pdf_images_disabled image_id=%s",
+                self.account_id,
+                chunk.get("image_id") or chunk.get("img_id") or "",
+            )
+            return False
+
+        if dialog_allows_pdf_images is not True:
+            LOGGER.info(
+                "[wecom:%s] reference image skipped reason=dialog_pdf_images_disabled image_id=%s",
+                self.account_id,
+                chunk.get("image_id") or chunk.get("img_id") or "",
+            )
+            return False
+
+        return True
 
     async def start(self) -> None:
         self._stop_requested = False

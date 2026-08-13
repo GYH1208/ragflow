@@ -123,6 +123,14 @@ export function ChatPromptEngine({ prefix = '' }: ChatPromptEngineProps) {
           tooltip={t('chat.sendSourceFileTip')}
         ></SwitchFormField>
         <SwitchFormField
+          name={prefixName(
+            prefix,
+            'prompt_config.send_pdf_reference_images',
+          )}
+          label={t('chat.sendPdfReferenceImages')}
+          tooltip={t('chat.sendPdfReferenceImagesTip')}
+        ></SwitchFormField>
+        <SwitchFormField
           name={prefixName(prefix, 'prompt_config.keyword')}
           label={t('chat.keyword')}
           tooltip={t('chat.keywordTip')}

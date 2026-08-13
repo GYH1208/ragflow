@@ -1199,6 +1199,7 @@ def test_chat_create_allows_default_knowledge_placeholder_without_sources_unit(m
     assert saved["kb_ids"] == []
     assert saved["prompt_config"]["system"].find("{knowledge}") >= 0
     assert saved["prompt_config"]["parameters"] == [{"key": "knowledge", "optional": False}]
+    assert saved["prompt_config"]["send_pdf_reference_images"] is False
 
 
 @pytest.mark.p2
@@ -1248,6 +1249,25 @@ def test_chat_create_uses_direct_chat_fields_unit(monkeypatch):
     assert "prompt" not in res["data"]
     assert "llm" not in res["data"]
     assert "avatar" not in res["data"]
+
+
+@pytest.mark.p2
+def test_default_completion_dialog_disables_pdf_reference_images_unit(monkeypatch):
+    module = _load_chat_routes_unit_module(monkeypatch)
+
+    dialog = module._build_default_completion_dialog()
+
+    assert dialog.prompt_config["send_pdf_reference_images"] is False
+
+
+@pytest.mark.p2
+def test_apply_prompt_defaults_preserves_explicit_pdf_reference_images_unit(monkeypatch):
+    module = _load_chat_routes_unit_module(monkeypatch)
+    request_data = {"prompt_config": {"send_pdf_reference_images": True}}
+
+    module._apply_prompt_defaults(request_data)
+
+    assert request_data["prompt_config"]["send_pdf_reference_images"] is True
 
 
 @pytest.mark.p2
@@ -1571,6 +1591,7 @@ def test_chat_create_prompt_contract(rest_client, clear_chats):
                 ("prompt_config", "empty_response"): DEFAULT_CHAT_EMPTY_RESPONSE,
                 ("prompt_config", "prologue"): DEFAULT_CHAT_PROLOGUE,
                 ("prompt_config", "quote"): True,
+                ("prompt_config", "send_pdf_reference_images"): False,
                 ("prompt_config", "system"): DEFAULT_CHAT_SYSTEM_PROMPT,
             },
         ),
@@ -1606,6 +1627,16 @@ def test_chat_create_prompt_contract(rest_client, clear_chats):
         ("prologue space", {"prompt_config": {"prologue": " "}}, {("prompt_config", "prologue"): " "}),
         ("quote true", {"prompt_config": {"quote": True}}, {("prompt_config", "quote"): True}),
         ("quote false", {"prompt_config": {"quote": False}}, {("prompt_config", "quote"): False}),
+        (
+            "send PDF reference images true",
+            {"prompt_config": {"send_pdf_reference_images": True}},
+            {("prompt_config", "send_pdf_reference_images"): True},
+        ),
+        (
+            "send PDF reference images false",
+            {"prompt_config": {"send_pdf_reference_images": False}},
+            {("prompt_config", "send_pdf_reference_images"): False},
+        ),
         ("system prompt with knowledge prefix", {"prompt_config": {"system": "Hello World {knowledge}"}}, {("prompt_config", "system"): "Hello World {knowledge}"}),
         ("system prompt only knowledge", {"prompt_config": {"system": "{knowledge}"}}, {("prompt_config", "system"): "{knowledge}"}),
         ("system prompt punctuation", {"prompt_config": {"system": "!@#$%^&*() {knowledge}"}}, {("prompt_config", "system"): "!@#$%^&*() {knowledge}"}),
@@ -1885,6 +1916,16 @@ def test_chat_update_prompt_contract(rest_client, clear_chats, ensure_parsed_doc
         ("prologue space", {"prompt_config": {"prologue": " "}}, {("prompt_config", "prologue"): " "}),
         ("quote true", {"prompt_config": {"quote": True}}, {("prompt_config", "quote"): True}),
         ("quote false", {"prompt_config": {"quote": False}}, {("prompt_config", "quote"): False}),
+        (
+            "send PDF reference images true",
+            {"prompt_config": {"send_pdf_reference_images": True}},
+            {("prompt_config", "send_pdf_reference_images"): True},
+        ),
+        (
+            "send PDF reference images false",
+            {"prompt_config": {"send_pdf_reference_images": False}},
+            {("prompt_config", "send_pdf_reference_images"): False},
+        ),
         ("system prompt with knowledge prefix", {"prompt_config": {"system": "Hello World {knowledge}"}}, {("prompt_config", "system"): "Hello World {knowledge}"}),
         ("system prompt only knowledge", {"prompt_config": {"system": "{knowledge}"}}, {("prompt_config", "system"): "{knowledge}"}),
         ("system prompt punctuation", {"prompt_config": {"system": "!@#$%^&*() {knowledge}"}}, {("prompt_config", "system"): "!@#$%^&*() {knowledge}"}),

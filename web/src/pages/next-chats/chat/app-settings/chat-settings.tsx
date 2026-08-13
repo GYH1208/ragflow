@@ -20,6 +20,7 @@ import { useParams } from 'react-router';
 import { z } from 'zod';
 import ChatBasicSetting from './chat-basic-settings';
 import { ChatPromptEngine } from './chat-prompt-engine';
+import { normalizePromptConfigPdfImageSetting } from './prompt-config';
 import { SavingButton } from './saving-button';
 import { useChatSettingSchema } from './use-chat-setting-schema';
 
@@ -49,6 +50,7 @@ export function ChatSettings({ hasSingleChatBox }: ChatSettingsProps) {
       prompt_config: {
         quote: true,
         send_source_file: false,
+        send_pdf_reference_images: false,
         keyword: false,
         tts: false,
         use_kg: false,
@@ -132,10 +134,10 @@ export function ChatSettings({ hasSingleChatBox }: ChatSettingsProps) {
 
     const nextData = {
       ...data,
-      prompt_config: {
-        ...data.prompt_config,
+      prompt_config: normalizePromptConfigPdfImageSetting({
+        ...(data.prompt_config || {}),
         reference_metadata: normalizedReferenceMetadata,
-      },
+      }),
       ...llmSettingEnabledValues,
     };
 

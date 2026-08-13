@@ -99,6 +99,7 @@ _DEFAULT_PROMPT_CONFIG = {
     "empty_response": "Sorry! No relevant content was found in the knowledge base!",
     "quote": True,
     "send_source_file": False,
+    "send_pdf_reference_images": False,
     "tts": False,
     "refine_multiturn": True,
 }
@@ -109,6 +110,7 @@ _DEFAULT_DIRECT_CHAT_PROMPT_CONFIG = {
     "empty_response": "",
     "quote": False,
     "send_source_file": False,
+    "send_pdf_reference_images": False,
     "tts": False,
     "refine_multiturn": True,
 }
