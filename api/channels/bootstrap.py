@@ -282,6 +282,8 @@ def _make_chat_handler(ch):
                 "quote": bool(ch.supports_reference_images or send_source_files),
                 "_channel_send_source_files": send_source_files,
             }
+            if ch.channel_id == "wecom":
+                chat_kwargs["_channel_disable_thinking"] = True
             if "{knowledge}" in (dia.prompt_config or {}).get("system", ""):
                 chat_kwargs["knowledge"] = ""
             use_streaming = bool(ch.supports_streaming and msg.message_id)

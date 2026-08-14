@@ -839,10 +839,12 @@ async def test_streaming_channel_sends_cumulative_visible_answer(monkeypatch):
         prompt_config={"quote": True},
     )
     stream_flags = []
+    captured_kwargs = {}
     persisted = []
 
     async def fake_async_chat(dia, history, stream, **kwargs):
         stream_flags.append(stream)
+        captured_kwargs.update(kwargs)
         yield {"answer": "", "reference": {}, "final": False, "start_to_think": True}
         yield {"answer": "internal reasoning", "reference": {}, "final": False}
         yield {"answer": "", "reference": {}, "final": False, "end_to_think": True}
@@ -885,6 +887,7 @@ async def test_streaming_channel_sends_cumulative_visible_answer(monkeypatch):
     )
 
     assert stream_flags == [True]
+    assert captured_kwargs["_channel_disable_thinking"] is True
     assert [update[0].text for update in channel.stream_updates] == [
         "正在查询知识库，请稍候…",
         "第一段",

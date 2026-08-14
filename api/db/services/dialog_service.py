@@ -288,7 +288,14 @@ class DialogService(CommonService):
         return list(objs)
 
 
-async def async_chat_solo(dialog, messages, stream=True, session_id=None):
+async def async_chat_solo(
+    dialog,
+    messages,
+    stream=True,
+    session_id=None,
+    gen_conf=None,
+):
+    gen_conf = deepcopy(dialog.llm_setting or {}) if gen_conf is None else gen_conf
     llm_types = get_model_type_by_name(dialog.tenant_id, dialog.llm_id)
     attachments = ""
     image_attachments = []
@@ -320,9 +327,9 @@ async def async_chat_solo(dialog, messages, stream=True, session_id=None):
         convert_last_user_msg_to_multimodal(msg, image_attachments, factory)
     if stream:
         if "chat" in llm_types:
-            stream_iter = chat_mdl.async_chat_streamly_delta(prompt_config.get("system", ""), msg, dialog.llm_setting)
+            stream_iter = chat_mdl.async_chat_streamly_delta(prompt_config.get("system", ""), msg, gen_conf)
         else:
-            stream_iter = chat_mdl.async_chat_streamly_delta(prompt_config.get("system", ""), msg, dialog.llm_setting, images=image_files)
+            stream_iter = chat_mdl.async_chat_streamly_delta(prompt_config.get("system", ""), msg, gen_conf, images=image_files)
         async for kind, value, state in _stream_with_think_delta(stream_iter):
             if kind == "marker":
                 flags = {"start_to_think": True} if value == "<think>" else {"end_to_think": True}
@@ -331,9 +338,9 @@ async def async_chat_solo(dialog, messages, stream=True, session_id=None):
             yield {"answer": value, "reference": {}, "audio_binary": tts(tts_mdl, value), "prompt": "", "created_at": time.time(), "final": False}
     else:
         if "chat" in llm_types:
-            answer = await chat_mdl.async_chat(prompt_config.get("system", ""), msg, dialog.llm_setting)
+            answer = await chat_mdl.async_chat(prompt_config.get("system", ""), msg, gen_conf)
         else:
-            answer = await chat_mdl.async_chat(prompt_config.get("system", ""), msg, dialog.llm_setting, images=image_files)
+            answer = await chat_mdl.async_chat(prompt_config.get("system", ""), msg, gen_conf, images=image_files)
         user_content = msg[-1].get("content", "[content not available]")
         logging.debug("User: {}|Assistant: {}".format(user_content, answer))
         yield {"answer": answer, "reference": {}, "audio_binary": tts(tts_mdl, answer), "prompt": "", "created_at": time.time()}
@@ -768,10 +775,19 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     logging.debug("Begin async_chat")
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
     session_id = kwargs.get("session_id")
+    gen_conf = deepcopy(dialog.llm_setting or {})
+    if kwargs.pop("_channel_disable_thinking", False):
+        gen_conf["_disable_thinking"] = True
     use_web_search = _should_use_web_search(dialog.prompt_config, kwargs.get("internet"))
     logging.debug("web_search kb=%s tavily=%s internet=%r enabled=%s", bool(dialog.kb_ids), bool(dialog.prompt_config.get("tavily_api_key")), kwargs.get("internet"), use_web_search)
     if not dialog.kb_ids and not use_web_search:
-        async for ans in async_chat_solo(dialog, messages, stream, session_id=session_id):
+        async for ans in async_chat_solo(
+            dialog,
+            messages,
+            stream,
+            session_id=session_id,
+            gen_conf=gen_conf,
+        ):
             yield ans
         return
 
@@ -1032,8 +1048,6 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     knowledge_text = "\n\n------\n\n".join(knowledges)
     if knowledge_text:
         kwargs["knowledge"] = "\n------\n" + knowledge_text
-    gen_conf = dialog.llm_setting
-
     system_content = prompt_config["system"].format(**kwargs) + attachments_
     # If knowledge was retrieved but the template has no {knowledge}
     # placeholder, auto-append it so the LLM still sees the context.

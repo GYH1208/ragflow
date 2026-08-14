@@ -125,6 +125,18 @@ def _apply_model_family_policies(
         return sanitized_gen_conf, sanitized_kwargs
 
     if backend == "litellm":
+        disable_thinking = sanitized_gen_conf.pop("_disable_thinking", False)
+        if (
+            disable_thinking is True
+            and provider == SupportedLiteLLMProvider.DeepSeek
+            and "deepseek-v4-" in model_name_lower
+        ):
+            extra_body = sanitized_gen_conf.get("extra_body")
+            if not isinstance(extra_body, dict):
+                extra_body = {}
+            extra_body["thinking"] = {"type": "disabled"}
+            sanitized_gen_conf["extra_body"] = extra_body
+
         if provider in {SupportedLiteLLMProvider.OpenAI, SupportedLiteLLMProvider.Azure_OpenAI} and "gpt-5" in model_name_lower:
             for key in ("temperature", "top_p", "logprobs", "top_logprobs"):
                 sanitized_gen_conf.pop(key, None)

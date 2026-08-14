@@ -428,6 +428,8 @@ def _run_reference_async_chat(
     quote=True,
     field_map=None,
     sql_answer=None,
+    dialog_llm_setting=None,
+    async_chat_kwargs=None,
 ):
     chat_mdl = _RecordingChatModel(answer)
     chat_mdl.refinement_messages = []
@@ -506,6 +508,8 @@ def _run_reference_async_chat(
         )
 
     dialog = _make_dialog(chat_mdl)
+    if dialog_llm_setting is not None:
+        dialog.llm_setting = dialog_llm_setting
     dialog.prompt_config["refine_multiturn"] = refine_multiturn
     events = _collect(
         dialog_service.async_chat(
@@ -514,6 +518,7 @@ def _run_reference_async_chat(
             stream=stream,
             quote=quote,
             session_id="session-reference-test",
+            **(async_chat_kwargs or {}),
         )
     )
     if stream:
@@ -678,6 +683,68 @@ def test_async_ask_stale_kb_ids_yields_error_final_event(monkeypatch):
 # ---------------------------------------------------------------------------
 # Tests for async_chat  (production code path)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.p2
+def test_async_chat_applies_channel_thinking_override_without_mutating_dialog(
+    monkeypatch,
+):
+    llm_setting = {"temperature": 0.1}
+
+    _, chat_mdl, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="渠道回答",
+        kbinfos=_KBINFOS,
+        stream=False,
+        dialog_llm_setting=llm_setting,
+        async_chat_kwargs={"_channel_disable_thinking": True},
+    )
+
+    assert chat_mdl.chat_calls[-1][2] == {
+        "temperature": 0.1,
+        "_disable_thinking": True,
+    }
+    assert llm_setting == {"temperature": 0.1}
+
+
+@pytest.mark.p2
+def test_async_chat_solo_applies_channel_thinking_override(monkeypatch):
+    chat_mdl = _RecordingChatModel("无知识库渠道回答")
+    monkeypatch.setattr(
+        dialog_service,
+        "get_model_type_by_name",
+        lambda _tenant_id, _llm_id: ["chat"],
+    )
+    monkeypatch.setattr(
+        dialog_service,
+        "get_model_config_from_provider_instance",
+        lambda _tenant_id, _model_type, _llm_id: _LLM_CONFIG,
+    )
+    monkeypatch.setattr(
+        dialog_service,
+        "LLMBundle",
+        lambda *_args, **_kwargs: chat_mdl,
+    )
+    dialog = _make_dialog(chat_mdl)
+    dialog.kb_ids = []
+    llm_setting = dialog.llm_setting
+
+    events = _collect(
+        dialog_service.async_chat(
+            dialog,
+            [{"role": "user", "content": "你好"}],
+            stream=False,
+            _channel_disable_thinking=True,
+        )
+    )
+
+    assert events[0]["answer"] == "无知识库渠道回答"
+    assert chat_mdl.chat_calls[-1][2] == {
+        "temperature": 0.1,
+        "_disable_thinking": True,
+    }
+    assert llm_setting == {"temperature": 0.1}
+
 
 def _make_dialog(chat_mdl_stub):
     """Build a minimal dialog SimpleNamespace for async_chat()."""
