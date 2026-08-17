@@ -1,39 +1,39 @@
-# Knowledge Base Folder Management Design
+# 知识库文件夹管理设计规格
 
-## Background
+## 背景
 
-The knowledge-base upload dialog can select a local folder, and the browser exposes each selected file's relative path through `webkitRelativePath`. The current knowledge-base upload request appends only the `File` objects to `FormData`, so each multipart item retains only its basename. The backend then creates every knowledge-base `File` record directly below the knowledge-base folder. Consequently, the knowledge-base document table can only show a flat list, even when the source was a nested folder.
+知识库上传弹窗已经支持选择本地文件夹，浏览器也会通过 `webkitRelativePath` 提供每个文件的相对路径。但当前知识库上传请求只把 `File` 对象加入 `FormData`，因此每个 multipart 文件项最终只保留文件名。后端随后把所有知识库 `File` 记录都直接创建在知识库根文件夹下。即使用户上传的是多级目录，知识库文档表也只能显示扁平文件列表。
 
-RAGFlow already has a hierarchical file model:
+RAGFlow 已经具备一套分层文件模型：
 
-- `File.parent_id` represents folders and their children.
-- `File2Document` links a managed file to its knowledge-base `Document`.
-- The `/files` UI already provides folder navigation, breadcrumbs, creation, rename, move, and recursive deletion.
+- `File.parent_id` 表示文件夹与子项之间的层级关系；
+- `File2Document` 用于关联受管理的文件和知识库 `Document`；
+- `/files` 页面已经实现目录导航、面包屑、新建文件夹、重命名、移动和递归删除。
 
-Knowledge-base-originated files are currently treated as read-only in `/files`, and knowledge-base document APIs remain flat. The new design reuses the existing hierarchy without making generic file-storage behavior authoritative for knowledge-base parsing.
+目前，来源于知识库的文件在 `/files` 中被视为只读对象，知识库文档接口本身也是扁平结构。本设计将复用现有文件层级模型，但不会让通用文件管理的存储逻辑影响知识库解析。
 
-## Goals
+## 目标
 
-1. Preserve the full directory tree when a user uploads a folder to a knowledge base.
-2. Provide file-manager-style folder navigation inside the knowledge-base document page.
-3. Support creating, renaming, moving, and recursively deleting knowledge-base folders.
-4. Keep existing knowledge-base parsing, retrieval, metadata, and enable/disable behavior for document files.
-5. Ensure folder organization changes do not reset, restart, or otherwise affect document parsing.
-6. Preserve existing flat documents and single-file uploads without migration requirements.
+1. 用户向知识库上传文件夹时，完整保留原始目录树。
+2. 在知识库文件列表中提供类似文件管理器的目录浏览体验。
+3. 支持新建、重命名、移动和递归删除知识库文件夹。
+4. 保留知识库文件现有的解析、检索、元数据和启用/禁用能力。
+5. 保证目录组织操作不会重置、重启或以其他方式影响文档解析。
+6. 兼容已有扁平文档和单文件上传，不要求执行数据迁移。
 
-## Non-goals
+## 非目标
 
-- Moving knowledge-base storage objects when a file or folder is reorganized.
-- Treating folders as parseable documents.
-- Adding a bulk action that parses every descendant of a selected folder.
-- Migrating historical flat documents into inferred folders.
-- Replacing the standalone `/files` page or forcing users to upload there before linking content to a knowledge base.
+- 调整文件或文件夹位置时，不移动知识库底层存储对象。
+- 不把文件夹作为可解析的文档。
+- 不为选中的文件夹增加“一键解析全部后代文件”操作。
+- 不根据已有文档名称推断目录，也不迁移历史扁平文档。
+- 不替换独立的 `/files` 页面，也不强制用户先上传到文件管理再关联知识库。
 
-## User Experience
+## 用户体验
 
-### Folder upload
+### 文件夹上传
 
-When the user selects a folder such as:
+当用户选择以下文件夹时：
 
 ```text
 2、二级文件/
@@ -43,212 +43,213 @@ When the user selects a folder such as:
     A.docx
 ```
 
-the knowledge-base root displays one folder row named `2、二级文件`. Opening it displays `制度文件` and `表单`; opening either subfolder displays its documents. Different folders may contain files with the same basename. Names must be unique only among siblings in the same folder.
+知识库根目录首先显示一个名为 `2、二级文件` 的文件夹。进入后显示 `制度文件` 和 `表单`，继续进入子文件夹后才显示其中的文档。不同文件夹可以存在同名文件；名称只要求在同一父文件夹内唯一。
 
-The upload preview should display each file's relative path, not only its basename, so the user can confirm the selected structure before saving.
+上传预览应显示每个文件的相对路径，而不只是文件名，让用户保存前能够确认所选目录结构。
 
-### Navigation
+### 目录导航
 
-- Folder rows appear before document rows.
-- Clicking a folder enters that folder.
-- A breadcrumb shows the path from the knowledge-base root to the current folder.
-- Clearing or following the breadcrumb returns to ancestor folders without losing knowledge-base filters that remain applicable.
-- Historical documents without nested `File` parents appear at the knowledge-base root.
+- 文件夹行排在文档行之前；
+- 点击文件夹进入该目录；
+- 顶部面包屑显示从知识库根目录到当前目录的完整路径；
+- 点击面包屑可以返回任意上级目录；
+- 返回上级目录时，继续保留仍然适用的知识库筛选条件；
+- 没有嵌套 `File` 父目录的历史文档显示在知识库根目录。
 
-### Row behavior
+### 列表行行为
 
-Document rows retain the existing knowledge-base columns and controls, including enabled state, chunk count, metadata, parser, parsing status, and document actions.
+文档行保留现有知识库字段和控制项，包括启用状态、分块数、元数据、解析方式、解析状态及文档操作。
 
-Folder rows show folder-specific information and actions only. They do not show enabled state, chunk count, metadata, parser, or parse controls.
+文件夹行只显示文件夹相关信息和操作，不显示启用状态、分块数、元数据、解析方式或解析按钮。
 
-Folder actions are:
+文件夹支持以下操作：
 
-- create a subfolder;
-- rename;
-- move;
-- recursively delete.
+- 新建子文件夹；
+- 重命名；
+- 移动；
+- 递归删除。
 
-When folders are selected, the bulk toolbar offers only move and delete. It does not offer parse, enable/disable, metadata, or other document-only actions.
+选中文件夹后，批量工具栏只提供移动和删除，不提供解析、启用/禁用、元数据或其他仅适用于文档的操作。
 
-### Search
+### 搜索
 
-Normal browsing lists only the current folder's direct children. Entering a search term switches the table to a knowledge-base-wide document search:
+正常浏览时，列表只显示当前文件夹的直接子项。输入搜索词后，列表临时切换为整个知识库范围内的文档搜索：
 
-- results contain documents, not folder rows;
-- every result displays its full relative folder path;
-- files with identical basenames are distinguishable by path;
-- opening a result navigates to its containing folder and locates the file;
-- clearing the search restores the current folder listing.
+- 搜索结果只包含文档，不包含文件夹；
+- 每条结果显示完整的相对目录路径；
+- 同名文件可以通过路径区分；
+- 打开搜索结果时，进入文件所在目录并定位该文件；
+- 清空搜索词后，恢复搜索前所在目录的正常列表。
 
-## Architecture
+## 架构设计
 
-### Source of truth
+### 数据来源
 
-The existing `File` hierarchy is the source of truth for organization:
+现有 `File` 层级作为目录组织的唯一数据来源：
 
-- the knowledge base has an existing root `File` folder;
-- nested directories are represented by `File` records of type `folder`;
-- document files are represented by non-folder `File` records;
-- each document file remains linked to exactly one `Document` through `File2Document`.
+- 每个知识库已经有对应的根 `File` 文件夹；
+- 嵌套目录使用类型为 `folder` 的 `File` 记录表示；
+- 文档文件使用非文件夹类型的 `File` 记录表示；
+- 每个文档文件继续通过 `File2Document` 关联一个 `Document`。
 
-The `Document` remains the source of truth for parsing and retrieval. No folder record is added to `Document`.
+`Document` 继续作为解析和检索的数据来源，不为文件夹创建 `Document` 记录。
 
-### Parsing and storage isolation
+### 解析与存储隔离
 
-Knowledge-base parsing resolves content through `File2DocumentService.get_storage_address()`. For knowledge-base-originated files, the returned storage address is `Document.kb_id` plus `Document.location`. It does not depend on `File.parent_id`.
+知识库解析通过 `File2DocumentService.get_storage_address()` 获取文件内容。对于来源于知识库的文件，该方法返回 `Document.kb_id` 和 `Document.location`，不依赖 `File.parent_id`。
 
-The following invariants are mandatory:
+必须遵守以下约束：
 
-1. Creating, moving, or renaming a folder never changes any descendant `Document.location`.
-2. Moving a knowledge-base file changes only its organizational `File.parent_id`.
-3. Moving a knowledge-base file does not move its storage object.
-4. Folder operations never change `Document.run`, progress, chunk count, token count, parser configuration, metadata, or indexed chunk content.
-5. Folder operations never enqueue parsing tasks.
-6. Deletion is the only folder operation that removes documents or parsing results.
+1. 新建、移动或重命名文件夹时，不得修改任何后代文档的 `Document.location`；
+2. 移动知识库文件时，只修改其组织层级中的 `File.parent_id`；
+3. 移动知识库文件时，不移动底层存储对象；
+4. 文件夹操作不得修改 `Document.run`、解析进度、分块数、词元数、解析配置、元数据或已建立索引的分块内容；
+5. 文件夹操作不得创建解析任务；
+6. 只有删除操作可以移除文档及其解析结果。
 
-The generic file-manager move implementation moves storage objects between folder-based buckets. Knowledge-base files require a dedicated branch that preserves the knowledge-base storage address and must not use the generic storage-move behavior unchanged.
+通用文件管理的移动逻辑会在基于文件夹的存储桶之间移动对象，因此不能原封不动地用于知识库文件。知识库文件必须走专用分支，确保知识库存储地址始终不变。
 
-### Upload data flow
+### 上传数据流
 
-1. The browser selects files with `webkitdirectory` and provides `webkitRelativePath` for each file.
-2. The frontend submits one relative path for every multipart file, preserving item order and using the basename as the multipart filename.
-3. The backend validates that the number of paths equals the number of files.
-4. Each relative path is normalized and split into directory segments plus a basename.
-5. The first segment, representing the selected top-level folder, is retained.
-6. The backend resolves or creates folder records beneath the knowledge-base root, using sibling-scoped uniqueness.
-7. The backend creates the `Document`, stores its content in the existing knowledge-base bucket, creates the leaf `File` under the resolved folder, and creates the `File2Document` link.
-8. If "parse on creation" is enabled, the existing document IDs are passed to the existing parse action exactly as they are for flat uploads.
+1. 浏览器通过带有 `webkitdirectory` 属性的文件输入框选择文件，并为每个文件提供 `webkitRelativePath`；
+2. 前端为每个 multipart 文件提交一个对应的相对路径，保持文件与路径的顺序一致，multipart 文件名仍使用文件本身的名称；
+3. 后端校验路径数量必须与文件数量一致；
+4. 后端规范化每条相对路径，并拆分为目录片段和文件名；
+5. 保留代表用户所选顶层文件夹的第一个路径片段；
+6. 后端从知识库根目录开始查找或创建文件夹记录，同一父目录下保证名称唯一；
+7. 后端创建 `Document`，将内容写入现有知识库存储桶，在解析出的目标目录下创建叶子 `File`，并创建 `File2Document` 关联；
+8. 如果开启“创建时解析”，继续将创建出的文档 ID 交给现有解析操作，行为与扁平上传保持一致。
 
-Single-file uploads omit or send an empty relative path and continue to create the document at the knowledge-base root.
+单文件上传可以不提交相对路径或提交空路径，并继续把文档创建在知识库根目录。
 
-### Path validation
+### 路径校验
 
-Relative paths are untrusted input. Normalization must:
+相对路径属于不可信输入，规范化过程必须：
 
-- convert backslashes to forward slashes;
-- reject absolute paths, drive-prefixed paths, NUL characters, and `.` or `..` traversal segments;
-- remove empty segments caused by duplicate separators;
-- retain valid Unicode, including Chinese directory and file names;
-- enforce existing database byte-length limits on each segment;
-- enforce a bounded directory depth;
-- verify that the final path basename matches the uploaded file basename;
-- reject a request whose file and path counts differ.
+- 把反斜杠统一转换为正斜杠；
+- 拒绝绝对路径、带盘符路径、NUL 字符以及包含 `.` 或 `..` 的路径穿越片段；
+- 移除重复分隔符产生的空片段；
+- 保留合法 Unicode 字符，包括中文目录名和文件名；
+- 对每个路径片段执行现有数据库字节长度限制；
+- 限制最大目录深度；
+- 校验路径末尾的文件名与上传文件名一致；
+- 文件数量和路径数量不一致时拒绝请求。
 
-The existing `sanitize_path()` behavior is not suitable because it strips characters outside an ASCII allowlist. The new validation must reject unsafe structure without deleting valid Unicode characters or silently changing path identity.
+现有 `sanitize_path()` 使用 ASCII 白名单，会删除中文等有效字符，因此不适用于本功能。新的路径校验应拒绝不安全结构，但不能删除合法 Unicode 字符，也不能静默改变路径含义。
 
-### Listing APIs
+### 列表接口
 
-The knowledge-base page needs a hierarchical listing operation that accepts:
+知识库页面需要一个分层列表接口，接收以下参数：
 
-- knowledge-base ID;
-- current folder ID, defaulting to the knowledge-base root;
-- pagination and sort parameters;
-- existing applicable document filters.
+- 知识库 ID；
+- 当前文件夹 ID，未提供时默认为知识库根目录；
+- 分页和排序参数；
+- 仍适用于当前文档列表的筛选条件。
 
-The response contains direct child folders and direct child documents. Document entries include the current document-list fields plus their file ID and parent folder ID. Folder entries contain a discriminant identifying them as folders and omit document-only state.
+接口返回当前目录的直接子文件夹和直接子文档。文档项包含现有文档列表字段，并增加文件 ID 和父文件夹 ID。文件夹项包含明确的文件夹类型标识，不返回文档专属状态。
 
-The server verifies that the requested folder belongs to the requested knowledge base and that the user has permission for that knowledge base. A folder ID from another knowledge base or another tenant is rejected.
+服务端必须验证请求的文件夹属于指定知识库，并验证用户拥有该知识库权限。来自其他知识库或其他租户的文件夹 ID 必须被拒绝。
 
-The global search operation continues to query documents across the whole knowledge base, joins through `File2Document`, and returns the folder ancestry required to render and navigate the result path.
+全局搜索继续查询整个知识库中的文档，通过 `File2Document` 关联文件，并返回渲染结果路径和定位所属目录所需的祖先文件夹信息。
 
-### Folder operations
+### 文件夹操作
 
-Folder creation, rename, and move use sibling-scoped name validation. Moves reject:
+新建、重命名和移动文件夹时，名称唯一性以同一父目录为范围。移动操作必须拒绝以下情况：
 
-- moving a folder into itself;
-- moving a folder into one of its descendants;
-- moving an entry into a folder from another knowledge base or tenant;
-- creating a sibling name collision at the destination.
+- 把文件夹移动到自身；
+- 把文件夹移动到自己的后代目录；
+- 把文件或文件夹移动到其他知识库或其他租户的目录；
+- 移动后在目标目录产生同名冲突。
 
-Renaming a folder changes only the folder `File.name`.
+重命名文件夹时，只修改文件夹的 `File.name`。
 
-Moving a folder updates its organizational parent without rewriting descendant records or storage locations.
+移动文件夹时，只更新其组织层级中的父目录，不重写后代记录或存储地址。
 
-Renaming a document file uses the existing knowledge-base rename behavior so that:
+重命名文档文件时，复用现有知识库重命名行为，确保：
 
-- `File.name` and `Document.name` remain synchronized;
-- the document-store title fields are updated;
-- the file extension cannot change;
-- no reparse is triggered;
-- `Document.location` remains unchanged.
+- `File.name` 与 `Document.name` 保持同步；
+- 同步更新文档存储索引中的标题字段；
+- 不允许修改文件扩展名；
+- 不触发重新解析；
+- `Document.location` 保持不变。
 
-### Recursive deletion
+### 递归删除
 
-Before deletion, the API calculates the number of descendant documents and the UI presents that count in a destructive confirmation message.
+删除前，接口计算文件夹内的后代文档数量，界面在危险操作确认框中明确展示该数量。
 
-After permission and ownership preflight checks pass, recursive deletion processes descendants through existing knowledge-base document deletion services so that documents, tasks, chunks, thumbnails, storage objects, file links, and file records are removed consistently. Folder records are removed after their children.
+权限和归属预检全部通过后，递归删除通过现有知识库文档删除服务处理所有后代，确保一致清理文档、任务、分块、缩略图、存储对象、文件关联和文件记录。所有子项删除完成后再删除文件夹记录。
 
-Because the database, object storage, and document store cannot share one transaction, deletion returns structured per-entry failures if an external cleanup step fails. The UI refreshes the directory and reports partial failure instead of claiming complete success. A retry must be safe for entries already removed.
+数据库、对象存储和文档存储无法共享同一个事务。如果外部清理步骤失败，删除接口必须返回按条目区分的结构化失败信息。界面刷新当前目录并显示部分失败，不得提示全部成功。对已经删除的条目再次执行清理必须是安全的。
 
-### Existing `/files` integration
+### 与现有 `/files` 的关系
 
-Shared presentation components and generic folder-selection utilities should be reused where their contracts fit. Knowledge-base operations must use knowledge-base-aware APIs or explicit knowledge-base branches because existing `/files` code intentionally hides or skips mutation of `FileSource.KNOWLEDGEBASE` entries.
+适合复用的展示组件和通用文件夹选择工具应继续复用。但知识库操作必须使用知识库专用接口或明确的知识库分支，因为现有 `/files` 代码会有意隐藏或跳过对 `FileSource.KNOWLEDGEBASE` 项的修改。
 
-The standalone `/files` behavior is unchanged by this feature.
+本功能不改变独立 `/files` 页面的现有行为。
 
-## Error Handling
+## 异常处理
 
-- Invalid or mismatched relative paths reject the affected upload before any record is created for that file.
-- Unsupported files retain the current partial-upload response semantics; successfully uploaded siblings keep their folder structure.
-- Concurrent attempts to create the same folder resolve to one sibling folder through database-level or transaction-protected uniqueness handling.
-- A failed file upload must not leave an empty chain of newly created folders unless another successful file uses that chain. Request-created unused folders are cleaned up.
-- Move and rename validate all constraints before mutating state.
-- UI error messages identify the affected path, not only the basename.
-- Parsing jobs already in progress continue through a move or folder rename because storage addresses remain stable.
-- Deleting a running document uses the existing cancellation and cleanup behavior.
+- 相对路径无效或文件与路径不匹配时，在为该文件创建任何记录前拒绝上传；
+- 不支持的文件继续沿用当前部分上传成功的响应语义，成功上传的同批文件仍保留正确目录结构；
+- 并发创建同一文件夹时，通过数据库唯一性约束或事务保护，最终只能生成一个同级文件夹；
+- 单个文件上传失败后，如果请求期间创建的目录链没有被其他成功文件使用，应清理这些空目录；
+- 移动和重命名必须在修改数据前完成全部约束校验；
+- 界面错误信息必须显示出错路径，而不只是文件名；
+- 移动文件或重命名文件夹时，正在执行的解析任务继续运行，因为存储地址没有变化；
+- 删除正在解析的文档时，继续使用现有任务取消和清理逻辑。
 
-## Testing Strategy
+## 测试方案
 
-### Frontend unit and component tests
+### 前端单元测试与组件测试
 
-- Folder selection submits one relative path for every file.
-- Upload preview renders relative paths.
-- Folder rows and document rows render their distinct columns and actions.
-- Navigation and breadcrumbs update the current folder.
-- Folder selection exposes only move and delete bulk actions.
-- Global search displays paths, distinguishes duplicate basenames, and navigates to the containing folder.
-- Clearing search restores the previous folder listing.
+- 选择文件夹后，为每个文件提交一个相对路径；
+- 上传预览正确显示相对路径；
+- 文件夹行和文档行分别显示正确字段和操作；
+- 进入文件夹和点击面包屑会正确更新当前目录；
+- 选中文件夹时，批量工具栏只显示移动和删除；
+- 全局搜索显示路径、区分同名文件，并能进入文件所在目录；
+- 清空搜索后恢复此前所在目录的列表。
 
-### Backend unit tests
+### 后端单元测试
 
-- Unicode paths, including Chinese names, remain unchanged after validation.
-- Slash and backslash inputs normalize consistently.
-- Absolute paths, drive prefixes, NULs, traversal, excessive segment lengths, excessive depth, basename mismatch, and path/file count mismatch are rejected.
-- Folder resolution creates the expected tree and reuses existing sibling folders.
-- During upload, a basename collision within the same folder is resolved with the existing numbered duplicate-name convention. Identical basenames in different folders remain unchanged. Interactive create, rename, and move operations reject sibling collisions instead of silently renaming the entry.
-- Cross-knowledge-base and cross-tenant folder IDs are rejected.
-- Folder cycle moves and destination collisions are rejected.
+- 包含中文名称的 Unicode 路径经过校验后保持不变；
+- 正斜杠和反斜杠输入得到一致的规范化结果；
+- 拒绝绝对路径、盘符、NUL 字符、路径穿越、超长片段、过深目录、文件名不匹配以及文件与路径数量不一致；
+- 文件夹解析能够创建预期目录树，并复用已经存在的同级文件夹；
+- 上传时，如果同一文件夹内发生文件名冲突，使用现有编号重名规则生成新名称；不同文件夹中的相同文件名保持不变；交互式新建、重命名和移动发生同级冲突时直接拒绝，不静默改名；
+- 拒绝其他知识库或其他租户的文件夹 ID；
+- 拒绝产生目录循环的移动和目标目录同名冲突。
 
-### Parsing isolation tests
+### 解析隔离测试
 
-For a parsed document, capture `Document.location`, parsing state, chunk count, token count, parser configuration, metadata, and indexed chunks before each organizational operation. Verify that folder rename, folder move, and file move leave every captured parsing field unchanged and do not enqueue a task.
+针对已经解析完成的文档，在每次组织操作前记录 `Document.location`、解析状态、分块数、词元数、解析配置、元数据和已建立索引的分块。验证重命名文件夹、移动文件夹和移动文件后，上述解析字段全部保持不变，并且没有创建新的解析任务。
 
-Verify that file rename updates the database and indexed title fields without changing the storage address or recreating chunks.
+验证重命名文件时，数据库名称和索引标题字段得到同步更新，但存储地址不变，也不会重新创建分块。
 
-### Deletion tests
+### 删除测试
 
-- Recursive deletion removes nested documents, tasks, chunks, thumbnails, storage objects, `File2Document` links, file records, and folder records.
-- A permission failure during preflight performs no mutation.
-- External cleanup failures return structured partial results and are retry-safe.
-- Deleting a folder containing a running document follows existing task cancellation semantics.
+- 递归删除会清理嵌套文档、任务、分块、缩略图、存储对象、`File2Document` 关联、文件记录和文件夹记录；
+- 权限预检失败时不修改任何数据；
+- 外部清理失败时返回结构化部分失败结果，并且支持安全重试；
+- 删除包含正在解析文档的文件夹时，遵循现有任务取消语义。
 
-### Integration tests
+### 集成测试
 
-- Upload a multi-level folder with duplicate basenames in different branches and valid Chinese names.
-- Verify the resulting folder hierarchy through the listing API and UI.
-- Enable parse-on-creation and verify that all supported documents reach the expected parse status with valid chunks.
-- Move and rename parent folders after parsing, then verify document preview, download, retrieval, and citations still work.
-- Verify historical flat documents and new single-file uploads remain visible at the knowledge-base root.
+- 上传包含不同分支同名文件和合法中文名称的多级文件夹；
+- 通过列表接口和界面验证最终目录树；
+- 开启“创建时解析”，验证所有受支持文档达到预期解析状态并生成有效分块；
+- 解析完成后移动和重命名上级文件夹，验证文档预览、下载、检索和引用仍正常工作；
+- 验证历史扁平文档和新上传的单文件仍显示在知识库根目录。
 
-## Acceptance Criteria
+## 验收标准
 
-1. Uploading a selected folder preserves its top-level folder and all nested directories in the knowledge-base UI.
-2. Users can navigate with folder rows and breadcrumbs and can create, rename, move, and recursively delete folders.
-3. Knowledge-base-wide search returns document paths and can locate a result in its containing folder.
-4. Folder rows never expose document parsing controls.
-5. Moving or renaming files or folders does not reparse documents and does not change knowledge-base storage addresses.
-6. File rename keeps the document database and retrieval index title synchronized without reparse.
-7. Recursive deletion cleans up all descendant knowledge-base resources and reports partial failures honestly.
-8. Unicode folder names are preserved and unsafe paths are rejected.
-9. Existing flat documents and single-file upload behavior remain compatible.
-10. Automated frontend, backend, parsing-isolation, deletion, and integration tests cover the behaviors above.
+1. 上传文件夹后，知识库界面保留顶层文件夹和所有嵌套目录；
+2. 用户可以通过文件夹行和面包屑浏览目录，并可以新建、重命名、移动和递归删除文件夹；
+3. 全知识库搜索结果显示文档路径，并可以定位到文档所属目录；
+4. 文件夹行不会显示任何文档解析控制；
+5. 移动或重命名文件、文件夹时，不会重新解析文档，也不会改变知识库存储地址；
+6. 重命名文件时，文档数据库名称和检索索引标题保持同步，但不重新解析；
+7. 递归删除会清理所有后代知识库资源，并如实报告部分失败；
+8. 中文等 Unicode 文件夹名称得到完整保留，不安全路径会被拒绝；
+9. 历史扁平文档和单文件上传行为保持兼容；
+10. 前端、后端、解析隔离、删除和集成测试覆盖上述行为。
