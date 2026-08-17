@@ -38,9 +38,33 @@ MAX_BLOB_SIZE_THUMBNAIL = 50 * 1024 * 1024  # 50 MiB for thumbnail generation
 MAX_BLOB_SIZE_PDF = 100 * 1024 * 1024  # 100 MiB for PDF repair / read
 GHOSTSCRIPT_TIMEOUT_SEC = 120  # Timeout for Ghostscript subprocess
 
+_WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+
 LOCK_KEY_pdfplumber = "global_shared_lock_pdfplumber"
 if LOCK_KEY_pdfplumber not in sys.modules:
     sys.modules[LOCK_KEY_pdfplumber] = threading.Lock()
+
+
+def normalize_knowledge_upload_path(raw_path: str, expected_filename: str, *, max_depth: int = 32) -> list[str]:
+    """Validate and split an untrusted relative path from a folder upload."""
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return [expected_filename]
+    if "\x00" in raw_path or raw_path.startswith(("/", "\\")) or _WINDOWS_DRIVE_PATH.match(raw_path):
+        raise ValueError("Upload path must be relative.")
+
+    normalized = raw_path.replace("\\", "/")
+    raw_segments = normalized.split("/")
+    if any(segment in {".", ".."} for segment in raw_segments):
+        raise ValueError("Upload path contains traversal segments.")
+
+    segments = [segment for segment in raw_segments if segment]
+    if not segments or segments[-1] != expected_filename:
+        raise ValueError("Upload path basename does not match the uploaded filename.")
+    if len(segments) - 1 > max_depth:
+        raise ValueError("Upload path exceeds the maximum directory depth.")
+    if any(len(segment.encode("utf-8")) > FILE_NAME_LEN_LIMIT for segment in segments):
+        raise ValueError(f"Upload path segment exceeds {FILE_NAME_LEN_LIMIT} bytes.")
+    return segments
 
 
 def _normalize_filename_for_type(filename):
