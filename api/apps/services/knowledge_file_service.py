@@ -13,10 +13,21 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
+from api.constants import FILE_NAME_LEN_LIMIT
 from api.db import FileType
+from api.db.db_models import DB
 from api.db.services.document_service import DocumentService
 from api.db.services.file2document_service import File2DocumentService
 from api.db.services.file_service import FileService
+from common.constants import FileSource
+from common.misc_utils import get_uuid
+
+
+def update_document_name_only(document_id, name):
+    """Import lazily so read-only folder listing does not load indexing dependencies."""
+    from api.apps.services.document_api_service import update_document_name_only as update_name
+
+    return update_name(document_id, name)
 
 
 class KnowledgeFileService:
@@ -66,6 +77,26 @@ class KnowledgeFileService:
             if not found or str(current.tenant_id) != str(tenant_id):
                 break
         raise PermissionError("Folder does not belong to this knowledge base.")
+
+    @classmethod
+    def assert_entry_in_kb(cls, kb, tenant_id, entry_id):
+        root = cls.get_kb_root(kb, tenant_id)
+        found, entry = FileService.get_by_id(entry_id)
+        if not found or str(entry.tenant_id) != str(tenant_id):
+            raise PermissionError("Entry does not belong to this knowledge base.")
+
+        current = entry
+        visited = set()
+        for _ in range(cls.MAX_FOLDER_DEPTH + 1):
+            if current.id == root.id:
+                return entry
+            if current.id in visited or current.parent_id == current.id:
+                break
+            visited.add(current.id)
+            found, current = FileService.get_by_id(current.parent_id)
+            if not found or str(current.tenant_id) != str(tenant_id):
+                break
+        raise PermissionError("Entry does not belong to this knowledge base.")
 
     @classmethod
     def _load_path_records(cls, entries, root_id):
@@ -260,3 +291,181 @@ class KnowledgeFileService:
             if not found:
                 break
         raise PermissionError("Folder does not belong to this knowledge base.")
+
+    @staticmethod
+    def _validate_entry_name(name):
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Entry name cannot be empty.")
+        if name != name.strip():
+            raise ValueError("Entry name cannot start or end with whitespace.")
+        if name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
+            raise ValueError("Entry name contains invalid path characters.")
+        if len(name.encode("utf-8")) > FILE_NAME_LEN_LIMIT:
+            raise ValueError(f"Entry name must be {FILE_NAME_LEN_LIMIT} bytes or less.")
+
+    @classmethod
+    def _validate_sibling_name(cls, parent_id, name, *, exclude_ids=None):
+        cls._validate_entry_name(name)
+        excluded = set(exclude_ids or [])
+        if any(entry.id not in excluded for entry in FileService.query(parent_id=parent_id, name=name)):
+            raise ValueError("An entry with the same name already exists in the destination folder.")
+
+    @classmethod
+    def create_folder(cls, kb, tenant_id, parent_id, name):
+        parent = cls.assert_folder_in_kb(kb, tenant_id, parent_id)
+        cls._validate_sibling_name(parent.id, name)
+        with DB.atomic():
+            cls._validate_sibling_name(parent.id, name)
+            folder = FileService.insert(
+                {
+                    "id": get_uuid(),
+                    "parent_id": parent.id,
+                    "tenant_id": tenant_id,
+                    "created_by": tenant_id,
+                    "name": name,
+                    "location": "",
+                    "size": 0,
+                    "type": FileType.FOLDER.value,
+                    "source_type": FileSource.KNOWLEDGEBASE,
+                }
+            )
+        return cls._to_dict(folder)
+
+    @classmethod
+    def _destination_is_descendant_of(cls, destination, folder_id):
+        current = destination
+        visited = set()
+        for _ in range(cls.MAX_FOLDER_DEPTH + 1):
+            if current.id == folder_id:
+                return True
+            if current.id in visited or current.parent_id == current.id:
+                return False
+            visited.add(current.id)
+            found, current = FileService.get_by_id(current.parent_id)
+            if not found:
+                return False
+        return False
+
+    @classmethod
+    def move_entries(cls, kb, tenant_id, entry_ids, destination_id):
+        if not entry_ids:
+            raise ValueError("At least one entry is required.")
+        destination = cls.assert_folder_in_kb(kb, tenant_id, destination_id)
+        root = cls.get_kb_root(kb, tenant_id)
+        unique_ids = list(dict.fromkeys(entry_ids))
+        entries = [cls.assert_entry_in_kb(kb, tenant_id, entry_id) for entry_id in unique_ids]
+        if any(entry.id == root.id for entry in entries):
+            raise ValueError("The knowledge base root folder cannot be moved.")
+
+        moving_ids = {entry.id for entry in entries}
+        destination_names = {
+            child.name
+            for child in FileService.query(parent_id=destination.id)
+            if child.id not in moving_ids
+        }
+        selected_names = set()
+        for entry in entries:
+            if entry.name in destination_names or entry.name in selected_names:
+                raise ValueError("An entry with the same name already exists in the destination folder.")
+            selected_names.add(entry.name)
+            if entry.id == destination.id:
+                raise ValueError("An entry cannot be moved into itself.")
+            if entry.type == FileType.FOLDER.value and cls._destination_is_descendant_of(destination, entry.id):
+                raise ValueError("A folder cannot be moved into its own descendant.")
+
+        with DB.atomic():
+            for entry in entries:
+                if entry.parent_id != destination.id and not FileService.update_by_id(entry.id, {"parent_id": destination.id}):
+                    raise RuntimeError("Database error (File move)!")
+        return {"moved": len(entries)}
+
+    @classmethod
+    def rename_entry(cls, kb, tenant_id, entry_id, name):
+        entry = cls.assert_entry_in_kb(kb, tenant_id, entry_id)
+        root = cls.get_kb_root(kb, tenant_id)
+        if entry.id == root.id:
+            raise ValueError("The knowledge base root folder cannot be renamed.")
+        cls._validate_sibling_name(entry.parent_id, name, exclude_ids={entry.id})
+        if entry.type == FileType.FOLDER.value:
+            if not FileService.update_by_id(entry.id, {"name": name}):
+                raise RuntimeError("Database error (Folder rename)!")
+        else:
+            links = File2DocumentService.get_by_file_id(entry.id)
+            if not links:
+                raise RuntimeError("Cannot find the document associated with this file.")
+            error = update_document_name_only(links[0].document_id, name)
+            if error:
+                message = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+                raise RuntimeError(message)
+        return {"id": entry.id, "name": name}
+
+    @classmethod
+    def _collect_descendants_postorder(cls, roots, tenant_id):
+        files = []
+        folders = []
+        visited = set()
+
+        def visit(entry):
+            if entry.id in visited:
+                return
+            visited.add(entry.id)
+            if str(entry.tenant_id) != str(tenant_id):
+                raise PermissionError("Entry does not belong to this knowledge base.")
+            if entry.type != FileType.FOLDER.value:
+                files.append(entry)
+                return
+            for child in FileService.list_all_files_by_parent_id(entry.id):
+                visit(child)
+            folders.append(entry)
+
+        for root in roots:
+            visit(root)
+        return files, folders
+
+    @classmethod
+    def count_descendant_documents(cls, kb, tenant_id, entry_ids):
+        root = cls.get_kb_root(kb, tenant_id)
+        roots = [cls.assert_entry_in_kb(kb, tenant_id, entry_id) for entry_id in dict.fromkeys(entry_ids)]
+        if any(entry.id == root.id for entry in roots):
+            raise ValueError("The knowledge base root folder cannot be deleted.")
+        files, _folders = cls._collect_descendants_postorder(roots, tenant_id)
+        links = File2DocumentService.get_by_file_ids([entry.id for entry in files]) if files else []
+        return len({link.document_id for link in links})
+
+    @classmethod
+    def delete_entries(cls, kb, tenant_id, entry_ids):
+        if not entry_ids:
+            raise ValueError("At least one entry is required.")
+        root = cls.get_kb_root(kb, tenant_id)
+        roots = [cls.assert_entry_in_kb(kb, tenant_id, entry_id) for entry_id in dict.fromkeys(entry_ids)]
+        if any(entry.id == root.id for entry in roots):
+            raise ValueError("The knowledge base root folder cannot be deleted.")
+
+        files, folders = cls._collect_descendants_postorder(roots, tenant_id)
+        path_records = cls._load_path_records([*files, *folders], root.id)
+        links = File2DocumentService.get_by_file_ids([entry.id for entry in files]) if files else []
+        link_by_file_id = {link.file_id: link.document_id for link in links}
+        deleted = 0
+        failed = []
+
+        for file_entry in files:
+            document_id = link_by_file_id.get(file_entry.id)
+            error = FileService.delete_docs([document_id], tenant_id) if document_id else ""
+            if error:
+                failed.append(
+                    {
+                        "id": file_entry.id,
+                        "path": cls._build_relative_path(file_entry, root.id, path_records),
+                        "message": error,
+                    }
+                )
+                continue
+            if not document_id:
+                FileService.delete_by_id(file_entry.id)
+            deleted += 1
+
+        for folder in folders:
+            if not FileService.list_all_files_by_parent_id(folder.id):
+                FileService.delete_by_id(folder.id)
+                deleted += 1
+        return {"deleted": deleted, "failed": failed}
