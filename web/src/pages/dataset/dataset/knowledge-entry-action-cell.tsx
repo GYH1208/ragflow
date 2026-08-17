@@ -3,7 +3,6 @@ import { KnowledgeEntry } from '@/interfaces/database/knowledge-file';
 import { downloadDatasetDocument } from '@/services/file-manager-service';
 import { downloadFileFromBlob } from '@/utils/file-util';
 import { Download, FolderInput, PenLine, Trash2 } from 'lucide-react';
-import * as React from 'react';
 
 interface KnowledgeEntryActionCellProps {
   entry: KnowledgeEntry;

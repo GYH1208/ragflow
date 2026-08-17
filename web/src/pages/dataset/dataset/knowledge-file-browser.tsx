@@ -42,7 +42,6 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react';
-import * as React from 'react';
 import { ChangeEvent, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router';

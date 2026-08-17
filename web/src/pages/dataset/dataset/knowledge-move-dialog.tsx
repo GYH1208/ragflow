@@ -8,7 +8,6 @@ import {
 } from '@/components/ui/dialog';
 import { useKnowledgeEntries } from '@/hooks/use-knowledge-file-request';
 import { Folder, FolderOpen, Home } from 'lucide-react';
-import * as React from 'react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 

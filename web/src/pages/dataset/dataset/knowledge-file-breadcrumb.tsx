@@ -1,7 +1,6 @@
 import { Button } from '@/components/ui/button';
 import { KnowledgeFolderAncestor } from '@/interfaces/database/knowledge-file';
 import { ChevronRight, Home } from 'lucide-react';
-import * as React from 'react';
 
 interface KnowledgeFileBreadcrumbProps {
   ancestors: KnowledgeFolderAncestor[];

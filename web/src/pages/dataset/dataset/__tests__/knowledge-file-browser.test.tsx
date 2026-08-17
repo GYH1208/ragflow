@@ -1,6 +1,8 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import * as React from 'react';
 
+Object.assign(globalThis, { React });
+
 import { KnowledgeFileBrowser } from '../knowledge-file-browser';
 
 const mockQueryParams: Array<Record<string, unknown>> = [];
