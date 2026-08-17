@@ -472,10 +472,12 @@ class FileService(CommonService):
                 tenant_id=tenant_id,
                 parent_id=current.id,
                 name=segment,
-                type=FileType.FOLDER.value,
             )
             if matches:
-                current = matches[0]
+                folders = [entry for entry in matches if entry.type == FileType.FOLDER.value]
+                if not folders:
+                    raise RuntimeError(f"Upload folder '{segment}' conflicts with an existing file.")
+                current = folders[0]
                 continue
             current = cls.insert(
                 {
