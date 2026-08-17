@@ -67,6 +67,19 @@ def normalize_knowledge_upload_path(raw_path: str, expected_filename: str, *, ma
     return segments
 
 
+def validate_knowledge_upload_paths(relative_paths: list[str] | None, filenames: list[str]) -> list[str]:
+    """Validate the one-to-one mapping between multipart files and relative paths."""
+    if not relative_paths:
+        return [""] * len(filenames)
+    if len(relative_paths) != len(filenames):
+        raise ValueError("Each uploaded file must have one relative_path value.")
+
+    validated_paths = list(relative_paths)
+    for relative_path, filename in zip(validated_paths, filenames, strict=True):
+        normalize_knowledge_upload_path(relative_path, filename)
+    return validated_paths
+
+
 def _normalize_filename_for_type(filename):
     """Extract a safe basename for type detection. Returns (normalized_str, True) or ("", False)."""
     if filename is None:

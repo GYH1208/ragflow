@@ -16,7 +16,7 @@
 
 import pytest
 
-from api.utils.file_utils import normalize_knowledge_upload_path
+from api.utils.file_utils import normalize_knowledge_upload_path, validate_knowledge_upload_paths
 
 
 def test_preserves_unicode_folder_names():
@@ -64,3 +64,17 @@ def test_rejects_path_segments_over_database_limit():
     segment = "知" * 86
     with pytest.raises(ValueError, match="255 bytes"):
         normalize_knowledge_upload_path(f"{segment}/file.txt", "file.txt")
+
+
+def test_defaults_missing_relative_paths_to_dataset_root():
+    assert validate_knowledge_upload_paths([], ["one.txt", "two.txt"]) == ["", ""]
+
+
+def test_requires_one_relative_path_per_uploaded_file():
+    with pytest.raises(ValueError, match="one relative_path"):
+        validate_knowledge_upload_paths(["folder/one.txt"], ["one.txt", "two.txt"])
+
+
+def test_validates_every_relative_path_against_its_filename():
+    with pytest.raises(ValueError, match="does not match"):
+        validate_knowledge_upload_paths(["folder/other.txt"], ["one.txt"])

@@ -39,6 +39,12 @@ class _StubKBRecord(dict):
             raise AttributeError(item) from exc
 
 
+def _stub_login_required(func=None, **_kwargs):
+    if func is not None:
+        return func
+    return lambda wrapped: wrapped
+
+
 @pytest.fixture(scope="function")
 def add_document_func(request, WebApiAuth, add_dataset, ragflow_tmp_dir):
     def cleanup():
@@ -125,10 +131,20 @@ def document_app_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "deepdoc.parser.paddleocr_parser", deepdoc_paddleocr_module)
     monkeypatch.setitem(sys.modules, "xgboost", ModuleType("xgboost"))
 
+    rag_llm_pkg = ModuleType("rag.llm")
+    rag_llm_pkg.__path__ = []
+    rag_cv_module = ModuleType("rag.llm.cv_model")
+    rag_cv_module.GptV4 = type("_StubGptV4", (), {})
+    monkeypatch.setitem(sys.modules, "rag.llm", rag_llm_pkg)
+    monkeypatch.setitem(sys.modules, "rag.llm.cv_model", rag_cv_module)
+
     stub_apps = ModuleType("api.apps")
     stub_apps.__path__ = [str(repo_root / "api" / "apps")]
     stub_apps.current_user = SimpleNamespace(id="user-1")
-    stub_apps.login_required = lambda func: func
+    stub_apps.AUTH_JWT = "JWT"
+    stub_apps.AUTH_API = "API"
+    stub_apps.AUTH_BETA = "BETA"
+    stub_apps.login_required = _stub_login_required
     monkeypatch.setitem(sys.modules, "api.apps", stub_apps)
 
     stub_apps_services = ModuleType("api.apps.services")
@@ -205,10 +221,20 @@ def document_rest_api_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "deepdoc.parser.paddleocr_parser", deepdoc_paddleocr_module)
     monkeypatch.setitem(sys.modules, "xgboost", ModuleType("xgboost"))
 
+    rag_llm_pkg = ModuleType("rag.llm")
+    rag_llm_pkg.__path__ = []
+    rag_cv_module = ModuleType("rag.llm.cv_model")
+    rag_cv_module.GptV4 = type("_StubGptV4", (), {})
+    monkeypatch.setitem(sys.modules, "rag.llm", rag_llm_pkg)
+    monkeypatch.setitem(sys.modules, "rag.llm.cv_model", rag_cv_module)
+
     stub_apps = ModuleType("api.apps")
     stub_apps.__path__ = [str(repo_root / "api" / "apps")]
     stub_apps.current_user = SimpleNamespace(id="user-1")
-    stub_apps.login_required = lambda func: func
+    stub_apps.AUTH_JWT = "JWT"
+    stub_apps.AUTH_API = "API"
+    stub_apps.AUTH_BETA = "BETA"
+    stub_apps.login_required = _stub_login_required
     monkeypatch.setitem(sys.modules, "api.apps", stub_apps)
 
     stub_apps_services = ModuleType("api.apps.services")

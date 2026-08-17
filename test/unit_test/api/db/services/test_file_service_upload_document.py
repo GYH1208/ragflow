@@ -123,6 +123,202 @@ def test_upload_document_skips_cross_kb_document_id_collision(monkeypatch):
     assert "Existing document id collision with another knowledge base; skipping update." in err[0]
 
 
+class _ReadableUploadFile:
+    def __init__(self, filename: str, payload: bytes):
+        self.filename = filename
+        self._payload = payload
+
+    def read(self):
+        return self._payload
+
+
+@pytest.mark.p2
+def test_upload_document_places_same_name_files_in_relative_folders(monkeypatch):
+    kb = SimpleNamespace(
+        id="kb-1",
+        tenant_id="tenant-1",
+        name="Knowledge Base",
+        parser_id="naive",
+        pipeline_id=None,
+        parser_config={},
+    )
+    files = [
+        _ReadableUploadFile("A.txt", b"first"),
+        _ReadableUploadFile("A.txt", b"second"),
+    ]
+    folders = {
+        "kb-folder": SimpleNamespace(
+            id="kb-folder",
+            parent_id="kb-root",
+            tenant_id="tenant-1",
+            name="Knowledge Base",
+            type="folder",
+        )
+    }
+    leaf_files = []
+    inserted_documents = []
+    generated_ids = iter(["doc-1", "folder-1", "folder-2", "doc-2", "folder-3"])
+
+    class _Storage:
+        def __init__(self):
+            self.objects = {}
+
+        def obj_exist(self, bucket, location):
+            return (bucket, location) in self.objects
+
+        def put(self, bucket, location, blob, *_args):
+            self.objects[(bucket, location)] = blob
+
+    def query_files(**kwargs):
+        parent_id = kwargs.get("parent_id")
+        name = kwargs.get("name")
+        file_type = kwargs.get("type")
+        folder_matches = [
+            folder
+            for folder in folders.values()
+            if folder.parent_id == parent_id and folder.name == name and (file_type is None or folder.type == file_type)
+        ]
+        leaf_matches = [
+            file
+            for file in leaf_files
+            if file["parent_id"] == parent_id and file["name"] == name and file_type is None
+        ]
+        return folder_matches + leaf_matches
+
+    def insert_folder(data):
+        folder = SimpleNamespace(**data)
+        folders[folder.id] = folder
+        return folder
+
+    def add_file_from_kb(doc, parent_id, tenant_id):
+        leaf_files.append({
+            "parent_id": parent_id,
+            "tenant_id": tenant_id,
+            "name": doc["name"],
+            "location": doc["location"],
+        })
+
+    monkeypatch.setattr(FileService, "get_root_folder", classmethod(lambda cls, _uid: {"id": "root"}))
+    monkeypatch.setattr(FileService, "init_knowledgebase_docs", classmethod(lambda cls, _pf_id, _uid: None))
+    monkeypatch.setattr(FileService, "get_kb_folder", classmethod(lambda cls, _uid: {"id": "kb-root"}))
+    monkeypatch.setattr(
+        FileService,
+        "new_a_file_from_kb",
+        classmethod(lambda cls, _tenant_id, _name, _parent_id: {"id": "kb-folder"}),
+    )
+    monkeypatch.setattr(FileService, "get_by_id", classmethod(lambda cls, file_id: (file_id in folders, folders.get(file_id))))
+    monkeypatch.setattr(FileService, "query", classmethod(lambda cls, **kwargs: query_files(**kwargs)))
+    monkeypatch.setattr(FileService, "insert", classmethod(lambda cls, data: insert_folder(data)))
+    monkeypatch.setattr(FileService, "add_file_from_kb", classmethod(lambda cls, doc, parent_id, tenant_id: add_file_from_kb(doc, parent_id, tenant_id)))
+    monkeypatch.setattr(FileService, "get_parser", classmethod(lambda cls, _type, _name, parser_id: parser_id))
+    monkeypatch.setattr(file_service_module, "get_uuid", lambda: next(generated_ids))
+    monkeypatch.setattr(file_service_module.DocumentService, "get_by_id", lambda _doc_id: (False, None))
+    monkeypatch.setattr(file_service_module.DocumentService, "check_doc_health", lambda *_args: True)
+    monkeypatch.setattr(file_service_module.DocumentService, "insert", lambda doc: inserted_documents.append(doc.copy()))
+    monkeypatch.setattr(file_service_module, "thumbnail_img", lambda *_args: None)
+    monkeypatch.setattr(file_service_module.settings, "STORAGE_IMPL", _Storage())
+
+    err, uploaded = _unwrapped_upload_document()(
+        FileService,
+        kb,
+        files,
+        "tenant-1",
+        relative_paths=[
+            "2、二级文件/制度文件/A.txt",
+            "2、二级文件/表单/A.txt",
+        ],
+    )
+
+    assert err == []
+    assert [item[0]["name"] for item in uploaded] == ["A.txt", "A.txt"]
+    assert {item[0]["location"] for item in uploaded} == {
+        "2、二级文件/制度文件/A.txt",
+        "2、二级文件/表单/A.txt",
+    }
+    top_folder = next(folder for folder in folders.values() if folder.name == "2、二级文件")
+    child_folders = {folder.name: folder for folder in folders.values() if folder.parent_id == top_folder.id}
+    assert set(child_folders) == {"制度文件", "表单"}
+    assert {file["parent_id"] for file in leaf_files} == {
+        child_folders["制度文件"].id,
+        child_folders["表单"].id,
+    }
+    assert len(inserted_documents) == 2
+
+
+@pytest.mark.p2
+def test_failed_upload_removes_only_request_created_empty_folders(monkeypatch):
+    kb = SimpleNamespace(
+        id="kb-1",
+        tenant_id="tenant-1",
+        name="Knowledge Base",
+        parser_id="naive",
+        pipeline_id=None,
+        parser_config={},
+    )
+    broken_file = _ReadableUploadFile("A.txt", b"unused")
+    broken_file.read = lambda: (_ for _ in ()).throw(RuntimeError("broken upload"))
+    folders = {
+        "kb-folder": SimpleNamespace(
+            id="kb-folder",
+            parent_id="kb-root",
+            tenant_id="tenant-1",
+            name="Knowledge Base",
+            type="folder",
+        )
+    }
+    generated_ids = iter(["doc-1", "folder-1", "folder-2"])
+
+    class _Storage:
+        @staticmethod
+        def obj_exist(*_args):
+            return False
+
+        @staticmethod
+        def put(*_args):
+            raise AssertionError("storage must not be written after read failure")
+
+    def query_files(**kwargs):
+        return [
+            folder
+            for folder in folders.values()
+            if folder.parent_id == kwargs.get("parent_id")
+            and folder.name == kwargs.get("name")
+            and (kwargs.get("type") is None or folder.type == kwargs.get("type"))
+        ]
+
+    def insert_folder(data):
+        folder = SimpleNamespace(**data)
+        folders[folder.id] = folder
+        return folder
+
+    monkeypatch.setattr(FileService, "get_root_folder", classmethod(lambda cls, _uid: {"id": "root"}))
+    monkeypatch.setattr(FileService, "init_knowledgebase_docs", classmethod(lambda cls, _pf_id, _uid: None))
+    monkeypatch.setattr(FileService, "get_kb_folder", classmethod(lambda cls, _uid: {"id": "kb-root"}))
+    monkeypatch.setattr(FileService, "new_a_file_from_kb", classmethod(lambda cls, *_args: {"id": "kb-folder"}))
+    monkeypatch.setattr(FileService, "get_by_id", classmethod(lambda cls, file_id: (file_id in folders, folders.get(file_id))))
+    monkeypatch.setattr(FileService, "query", classmethod(lambda cls, **kwargs: query_files(**kwargs)))
+    monkeypatch.setattr(FileService, "insert", classmethod(lambda cls, data: insert_folder(data)))
+    monkeypatch.setattr(FileService, "delete", classmethod(lambda cls, folder: folders.pop(folder.id, None)))
+    monkeypatch.setattr(FileService, "get_parser", classmethod(lambda cls, _type, _name, parser_id: parser_id))
+    monkeypatch.setattr(file_service_module, "get_uuid", lambda: next(generated_ids))
+    monkeypatch.setattr(file_service_module.DocumentService, "get_by_id", lambda _doc_id: (False, None))
+    monkeypatch.setattr(file_service_module.DocumentService, "check_doc_health", lambda *_args: True)
+    monkeypatch.setattr(file_service_module, "thumbnail_img", lambda *_args: None)
+    monkeypatch.setattr(file_service_module.settings, "STORAGE_IMPL", _Storage())
+
+    err, uploaded = _unwrapped_upload_document()(
+        FileService,
+        kb,
+        [broken_file],
+        "tenant-1",
+        relative_paths=["顶层/空目录/A.txt"],
+    )
+
+    assert uploaded == []
+    assert err == ["A.txt: broken upload"]
+    assert set(folders) == {"kb-folder"}
+
+
 # ---------------------------------------------------------------------------
 # Helpers shared by TestValidateUrlForCrawl
 # ---------------------------------------------------------------------------

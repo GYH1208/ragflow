@@ -50,7 +50,7 @@ from common import settings
 from common.constants import ParserType, RetCode, TaskStatus, SANDBOX_ARTIFACT_BUCKET
 from common.metadata_utils import convert_conditions, meta_filter, turn2jsonschema
 from common.misc_utils import get_uuid, thread_pool_exec
-from api.utils.file_utils import filename_type, thumbnail
+from api.utils.file_utils import filename_type, thumbnail, validate_knowledge_upload_paths
 from api.utils.web_utils import CONTENT_TYPE_MAP, html2pdf, is_valid_url, apply_safe_file_response_headers
 from common.ssrf_guard import assert_url_is_safe
 from rag.nlp import search
@@ -586,6 +586,14 @@ async def _upload_local_documents(kb, tenant_id):
             logging.error(msg)
             return get_error_data_result(message=msg, code=RetCode.ARGUMENT_ERROR)
 
+    relative_paths = form.getlist("relative_path") if hasattr(form, "getlist") else form.get("relative_path", [])
+    if isinstance(relative_paths, str):
+        relative_paths = [relative_paths]
+    try:
+        relative_paths = validate_knowledge_upload_paths(relative_paths, [file_obj.filename for file_obj in file_objs])
+    except ValueError as exc:
+        return get_error_argument_result(str(exc))
+
     # Parse optional parser_config overrides from form data
     parser_config_override = None
     raw_parser_config = form.get("parser_config")
@@ -605,6 +613,7 @@ async def _upload_local_documents(kb, tenant_id):
         FileService.upload_document, kb, file_objs, tenant_id,
         parent_path=form.get("parent_path"),
         parser_config_override=parser_config_override,
+        relative_paths=relative_paths,
     )
     if err:
         msg = "\n".join(err)

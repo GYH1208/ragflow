@@ -39,7 +39,14 @@ from common.ssrf_guard import assert_url_is_safe
 from common.constants import TaskStatus, FileSource, ParserType, MAXIMUM_PAGE_NUMBER
 from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.task_service import TaskService
-from api.utils.file_utils import filename_type, read_potential_broken_pdf, thumbnail_img, sanitize_path
+from api.utils.file_utils import (
+    filename_type,
+    normalize_knowledge_upload_path,
+    read_potential_broken_pdf,
+    sanitize_path,
+    thumbnail_img,
+    validate_knowledge_upload_paths,
+)
 from rag.llm.cv_model import GptV4
 from common import settings
 
@@ -454,8 +461,61 @@ class FileService(CommonService):
             raise RuntimeError("Database error (File move)!")
 
     @classmethod
+    def ensure_kb_folder_path(cls, kb_folder_id, segments, tenant_id, created_folder_ids=None):
+        """Create or reuse a knowledge-base folder chain below ``kb_folder_id``."""
+        found, current = cls.get_by_id(kb_folder_id)
+        if not found:
+            raise RuntimeError("Cannot find the knowledge base folder.")
+
+        for segment in segments:
+            matches = cls.query(
+                tenant_id=tenant_id,
+                parent_id=current.id,
+                name=segment,
+                type=FileType.FOLDER.value,
+            )
+            if matches:
+                current = matches[0]
+                continue
+            current = cls.insert(
+                {
+                    "id": get_uuid(),
+                    "parent_id": current.id,
+                    "tenant_id": tenant_id,
+                    "created_by": tenant_id,
+                    "name": segment,
+                    "location": "",
+                    "size": 0,
+                    "type": FileType.FOLDER.value,
+                    "source_type": FileSource.KNOWLEDGEBASE,
+                }
+            )
+            if created_folder_ids is not None:
+                created_folder_ids.append(current.id)
+        return current
+
+    @classmethod
+    def remove_created_empty_kb_folders(cls, folder_ids):
+        """Remove request-created folders from leaf to root when they stayed empty."""
+        for folder_id in reversed(folder_ids):
+            if cls.query(parent_id=folder_id):
+                continue
+            found, folder = cls.get_by_id(folder_id)
+            if found and folder.type == FileType.FOLDER.value:
+                cls.delete(folder)
+
+    @classmethod
     @DB.connection_context()
-    def upload_document(self, kb, file_objs, user_id, src="local", parent_path: str | None = None, parser_config_override: dict | None = None):
+    def upload_document(
+        self,
+        kb,
+        file_objs,
+        user_id,
+        src="local",
+        parent_path: str | None = None,
+        parser_config_override: dict | None = None,
+        relative_paths: list[str] | None = None,
+    ):
         root_folder = self.get_root_folder(user_id)
         pf_id = root_folder["id"]
         self.init_knowledgebase_docs(pf_id, user_id)
@@ -471,8 +531,15 @@ class FileService(CommonService):
         else:
             merged_parser_config = base_parser_config
 
+        if relative_paths is not None:
+            try:
+                relative_paths = validate_knowledge_upload_paths(relative_paths, [file.filename for file in file_objs])
+            except ValueError as exc:
+                return [str(exc)], []
+
         err, files = [], []
-        for file in file_objs:
+        for index, file in enumerate(file_objs):
+            created_folder_ids = []
             doc_id = file.id if hasattr(file, "id") else get_uuid()
             e, doc = DocumentService.get_by_id(doc_id)
             if e:
@@ -509,12 +576,30 @@ class FileService(CommonService):
                 continue
             try:
                 DocumentService.check_doc_health(kb.tenant_id, file.filename)
-                filename = duplicate_name(DocumentService.query, name=file.filename, kb_id=kb.id)
+                target_folder_id = kb_folder["id"]
+                relative_segments = None
+                if relative_paths is not None:
+                    relative_segments = normalize_knowledge_upload_path(relative_paths[index], file.filename)
+                    folder_segments = relative_segments[:-1]
+                    if folder_segments:
+                        target_folder = self.ensure_kb_folder_path(
+                            kb_folder["id"],
+                            folder_segments,
+                            kb.tenant_id,
+                            created_folder_ids,
+                        )
+                        target_folder_id = target_folder.id
+                    filename = duplicate_name(self.query, name=file.filename, parent_id=target_folder_id)
+                else:
+                    filename = duplicate_name(DocumentService.query, name=file.filename, kb_id=kb.id)
                 filetype = filename_type(filename)
                 if filetype == FileType.OTHER.value:
                     raise RuntimeError("This type of file has not been supported yet!")
 
-                location = filename if not safe_parent_path else f"{safe_parent_path}/{filename}"
+                if relative_segments is not None:
+                    location = "/".join([*relative_segments[:-1], filename])
+                else:
+                    location = filename if not safe_parent_path else f"{safe_parent_path}/{filename}"
                 while settings.STORAGE_IMPL.obj_exist(kb.id, location):
                     location += "_"
 
@@ -549,9 +634,10 @@ class FileService(CommonService):
                 }
                 DocumentService.insert(doc)
 
-                FileService.add_file_from_kb(doc, kb_folder["id"], kb.tenant_id)
+                FileService.add_file_from_kb(doc, target_folder_id, kb.tenant_id)
                 files.append((doc, blob))
             except Exception as e:
+                self.remove_created_empty_kb_folders(created_folder_ids)
                 err.append(file.filename + ": " + str(e))
 
         return err, files

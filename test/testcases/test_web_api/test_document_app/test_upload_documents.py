@@ -16,6 +16,7 @@
 import string
 
 import pytest
+from werkzeug.datastructures import MultiDict
 from test_common import list_datasets, upload_documents
 from configs import DOCUMENT_NAME_LIMIT, INVALID_API_TOKEN
 from libs.auth import RAGFlowWebApiAuth
@@ -258,6 +259,23 @@ class TestDocumentsUploadUnit:
         res = upload_documents(WebApiAuth, {"kb_id": ""}, [fp])
         assert res["code"] == 100
         assert res["message"] == "<MethodNotAllowed '405: Method Not Allowed'>"
+
+    def test_local_upload_requires_one_relative_path_per_file(self, document_rest_api_module, monkeypatch):
+        module = document_rest_api_module
+        kb = SimpleNamespace(id="kb1", tenant_id="tenant1", name="kb", parser_id="parser", pipeline_id="pipe", parser_config={})
+        monkeypatch.setattr(
+            module,
+            "request",
+            _DummyRequest(
+                form=MultiDict([("relative_path", "folder/one.txt")]),
+                files=_DummyFiles({"file": [_DummyFile("one.txt"), _DummyFile("two.txt")]}),
+            ),
+        )
+
+        res = _run(module._upload_local_documents(kb, "tenant1"))
+
+        assert res["code"] == 101
+        assert "relative_path" in res["message"]
 
     def test_missing_file_part(self, WebApiAuth, add_dataset_func):
         """Test that missing file part returns error"""
