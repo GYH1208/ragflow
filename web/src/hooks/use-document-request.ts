@@ -27,6 +27,7 @@ import kbService, {
 } from '@/services/knowledge-service';
 import { restAPIv1 } from '@/utils/api';
 import { buildChunkHighlights } from '@/utils/document-util';
+import { buildKnowledgeUploadFormData } from '@/utils/knowledge-file-upload';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useDebounce } from 'ahooks';
 import { get } from 'lodash';
@@ -77,13 +78,7 @@ export const useUploadDocument = () => {
       if (!id) {
         return { code: 500, message: 'Dataset ID is required' };
       }
-      const formData = new FormData();
-      fileList.forEach((file: any) => {
-        formData.append('file', file);
-      });
-      if (parserConfig) {
-        formData.append('parser_config', JSON.stringify(parserConfig));
-      }
+      const formData = buildKnowledgeUploadFormData(fileList, parserConfig);
 
       try {
         const ret = await uploadDocument(id, formData);

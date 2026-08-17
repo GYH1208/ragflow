@@ -15,6 +15,7 @@ import { Progress } from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useControllableState } from '@/hooks/use-controllable-state';
 import { cn, formatBytes } from '@/lib/utils';
+import { getUploadDisplayPath } from '@/utils/knowledge-file-upload';
 import { useTranslation } from 'react-i18next';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
@@ -52,6 +53,7 @@ function FilePreview({ file }: FilePreviewProps) {
 }
 
 function FileCard({ file, progress, onRemove }: FileCardProps) {
+  const displayPath = getUploadDisplayPath(file);
   return (
     <div className="relative flex items-center gap-2.5">
       <div className="flex flex-1 gap-2.5 overflow-hidden">
@@ -63,11 +65,11 @@ function FileCard({ file, progress, onRemove }: FileCardProps) {
             <Tooltip>
               <TooltipTrigger asChild>
                 <p className=" w-fit line-clamp-1 text-sm font-medium text-foreground/80 text-ellipsis truncate max-w-[370px]">
-                  {file.name}
+                  {displayPath}
                 </p>
               </TooltipTrigger>
               <TooltipContent className="border border-border-button">
-                {file.name}
+                {displayPath}
               </TooltipContent>
             </Tooltip>
             <p className="text-xs text-text-secondary">
@@ -417,10 +419,10 @@ export function FileUploader(props: FileUploaderProps) {
           <div className="flex max-h-48 flex-col gap-4 overflow-auto scrollbar-auto">
             {files?.map((file, index) => (
               <FileCard
-                key={index}
+                key={`${getUploadDisplayPath(file)}-${file.size}-${file.lastModified}`}
                 file={file}
                 onRemove={() => onRemove(index)}
-                progress={progresses?.[file.name]}
+                progress={progresses?.[getUploadDisplayPath(file)]}
               />
             ))}
           </div>

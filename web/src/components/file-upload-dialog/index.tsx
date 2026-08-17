@@ -45,16 +45,8 @@ export type TableColumnRoles = Record<string, 'indexing' | 'metadata' | 'both'>;
 function buildUploadFormSchema(t: TFunction) {
   const FormSchema = z.object({
     parseOnCreation: z.boolean().optional(),
-    // Update schema to allow files with path property to handle folder uploads
     fileList: z
-      .array(
-        z.instanceof(File).or(
-          z.object({
-            file: z.instanceof(File),
-            path: z.string(), // Store the relative path for files in folders
-          }),
-        ),
-      )
+      .array(z.instanceof(File))
       .min(1, { message: t('fileManager.pleaseUploadAtLeastOneFile') }),
     tableColumnMode: z.enum(['auto', 'manual']).optional(),
     tableColumnRoles: z
@@ -100,7 +92,7 @@ function UploadForm({
   const [columnRoles, setColumnRoles] = useState<TableColumnRoles>({});
 
   const handleFilesChange = useCallback(
-    async (files: any[]) => {
+    async (files: File[]) => {
       if (!isTableParser || !files || files.length === 0) {
         setExtractedColumns([]);
         return;
@@ -108,8 +100,7 @@ function UploadForm({
 
       // Extract columns from the first table file
       const allColumns = new Set<string>();
-      for (const f of files) {
-        const file = f instanceof File ? f : f.file;
+      for (const file of files) {
         if (file && isTableFile(file)) {
           const cols = await extractTableColumns(file);
           cols.forEach((c) => allColumns.add(c));
