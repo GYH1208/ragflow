@@ -31,6 +31,14 @@ test('uses an empty relative path for a normal file', () => {
   ]);
 });
 
+test('uses the relative path basename as the multipart filename', () => {
+  const file = folderFile('caf\u00e9.txt', 'documents/cafe\u0301.txt');
+
+  const uploadedFile = buildKnowledgeUploadFormData([file]).get('file') as File;
+
+  expect(uploadedFile.name).toBe('cafe\u0301.txt');
+});
+
 test('shows the relative path in the upload preview', () => {
   expect(getUploadDisplayPath(folderFile('A.txt', '中文目录/制度/A.txt'))).toBe(
     '中文目录/制度/A.txt',
