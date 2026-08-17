@@ -329,6 +329,40 @@ export const uploadDocument = async (datasetId: string, formData: FormData) => {
   return response.data;
 };
 
+export const listKnowledgeEntries = (
+  datasetId: string,
+  params: Record<string, unknown>,
+) => request.get(api.knowledgeEntries(datasetId), { params });
+
+export const listKnowledgeFolderAncestors = (
+  datasetId: string,
+  folderId: string,
+) => request.get(api.knowledgeFolderAncestors(datasetId, folderId));
+
+export const createKnowledgeFolder = (
+  datasetId: string,
+  data: { parent_id: string; name: string },
+) => request.post(api.knowledgeFolders(datasetId), { data });
+
+export const moveKnowledgeEntries = (
+  datasetId: string,
+  data: { ids: string[]; destination_id: string },
+) => request.post(api.knowledgeEntryMove(datasetId), { data });
+
+export const renameKnowledgeEntry = (
+  datasetId: string,
+  entryId: string,
+  name: string,
+) => request.patch(api.knowledgeEntry(datasetId, entryId), { data: { name } });
+
+export const previewDeleteKnowledgeEntries = (
+  datasetId: string,
+  ids: string[],
+) => request.post(api.knowledgeEntryDeletePreview(datasetId), { data: { ids } });
+
+export const deleteKnowledgeEntries = (datasetId: string, ids: string[]) =>
+  request.delete(api.knowledgeEntries(datasetId), { data: { ids } });
+
 export const createDocument = async (datasetId: string, name: string) => {
   const response = await request.post(api.documentCreate(datasetId), {
     data: { name },

@@ -189,6 +189,18 @@ export default {
   getDocumentFile: `${restAPIv1}/documents`,
   documentUpload: (datasetId: string) =>
     `${restAPIv1}/datasets/${datasetId}/documents`,
+  knowledgeEntries: (datasetId: string) =>
+    `${restAPIv1}/datasets/${datasetId}/entries`,
+  knowledgeEntry: (datasetId: string, entryId: string) =>
+    `${restAPIv1}/datasets/${datasetId}/entries/${entryId}`,
+  knowledgeEntryMove: (datasetId: string) =>
+    `${restAPIv1}/datasets/${datasetId}/entries/move`,
+  knowledgeEntryDeletePreview: (datasetId: string) =>
+    `${restAPIv1}/datasets/${datasetId}/entries/delete-preview`,
+  knowledgeFolders: (datasetId: string) =>
+    `${restAPIv1}/datasets/${datasetId}/folders`,
+  knowledgeFolderAncestors: (datasetId: string, folderId: string) =>
+    `${restAPIv1}/datasets/${datasetId}/folders/${folderId}/ancestors`,
   webCrawl: (datasetId: string) =>
     `${restAPIv1}/datasets/${datasetId}/documents?type=web`,
   documentInfoUpload: `${restAPIv1}/documents/upload`,

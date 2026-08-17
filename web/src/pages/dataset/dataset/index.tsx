@@ -34,8 +34,13 @@ import { useBulkOperateDataset } from './use-bulk-operate-dataset';
 import { useCreateEmptyDocument } from './use-create-empty-document';
 import { useSelectDatasetFilters } from './use-select-filters';
 import { useHandleUploadDocument } from './use-upload-document';
+import { KnowledgeFileBrowser } from './knowledge-file-browser';
 
 export default function Dataset() {
+  return <KnowledgeFileBrowser />;
+}
+
+export function LegacyDataset() {
   const { t } = useTranslation();
   const {
     documentUploadVisible,
@@ -79,7 +84,7 @@ export default function Dataset() {
 
   useEffect(() => {
     checkValue(filters);
-  }, [filters]);
+  }, [checkValue, filters]);
 
   const { rowSelection, rowSelectionIsEmpty, setRowSelection, selectedCount } =
     useRowSelection();

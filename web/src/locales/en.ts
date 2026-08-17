@@ -3269,6 +3269,17 @@ Important structured information may include: names, dates, locations, events, k
       timeout: 'Timeout',
       fail: 'Fail',
     },
+    knowledgeFolder: {
+      newFolder: 'New folder',
+      root: 'Knowledge base root',
+      moveTo: 'Move to',
+      moveHere: 'Move here',
+      deleteConfirmWithCount:
+        'This will delete the selected items and {{count}} document(s). This action cannot be undone.',
+      partialDeleteFailed:
+        'Deleted {{deleted}} item(s); {{failed}} item(s) could not be deleted.',
+      path: 'Path',
+    },
     explore: {
       title: 'Launch',
       canvasList: 'Canvas List',

@@ -2861,6 +2861,16 @@ Tokenizer 会根据所选方式将内容存储为对应的数据结构。`,
       fail: '失败',
     },
 
+    knowledgeFolder: {
+      newFolder: '新建文件夹',
+      root: '知识库根目录',
+      moveTo: '移动到',
+      moveHere: '移动到此处',
+      deleteConfirmWithCount:
+        '将删除所选项目及其中的 {{count}} 个文档，此操作不可撤销。',
+      partialDeleteFailed: '已删除 {{deleted}} 项，{{failed}} 项删除失败。',
+      path: '路径',
+    },
     explore: {
       title: '探索',
       canvasList: '画布列表',
