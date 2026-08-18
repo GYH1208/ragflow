@@ -66,9 +66,7 @@ def latest_user_question(messages: list[dict]) -> str:
     for message in reversed(messages or []):
         if message.get("role") != "user":
             continue
-        content = normalize_message_content(message.get("content"))
-        if content:
-            return content
+        return normalize_message_content(message.get("content"))
     return ""
 
 

@@ -39,6 +39,23 @@ def test_latest_user_question_skips_non_user_and_empty_messages():
     assert latest_user_question(messages) == "当前问题"
 
 
+def test_latest_user_question_does_not_fall_back_when_current_user_has_no_text():
+    messages = [
+        {"role": "user", "content": "旧问题"},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AA=="},
+                }
+            ],
+        },
+    ]
+
+    assert latest_user_question(messages) == ""
+
+
 def test_select_refinement_messages_keeps_current_and_three_prior_turns():
     messages = [{"role": "system", "content": "system"}]
     for index in range(5):

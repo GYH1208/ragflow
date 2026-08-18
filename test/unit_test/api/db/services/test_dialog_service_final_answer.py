@@ -77,6 +77,10 @@ _install_cv2_stub_if_unavailable()
 
 from api.db.services import dialog_service
 from common.constants import LLMType
+from rag.prompts.multiturn import (
+    QuestionRefinementDecision,
+    RefinementAction,
+)
 
 
 def test_get_rerank_model_returns_none_without_rerank_id():
@@ -368,22 +372,13 @@ def test_normalize_faq_question_is_strict_except_formatting():
     )
 
 
-def test_recent_user_messages_normalizes_text_parts_from_current_message():
-    messages = [
-        {"role": "user", "content": "上一问"},
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "当前文字问题"},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
-            ],
-        },
+def test_dialog_service_reuses_multiturn_content_normalization():
+    content = [
+        {"type": "text", "text": "当前文字问题"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
     ]
 
-    assert dialog_service._recent_user_messages(messages) == [
-        {"role": "user", "content": "上一问"},
-        {"role": "user", "content": "当前文字问题"},
-    ]
+    assert dialog_service.normalize_message_content(content) == "当前文字问题"
 
 
 def _make_faq_kbinfos():
@@ -422,7 +417,7 @@ def _run_reference_async_chat(
     inserted_indices=None,
     messages=None,
     refine_multiturn=False,
-    refined_question=None,
+    refinement_decision=None,
     document_code_scope=None,
     stream=False,
     quote=True,
@@ -433,6 +428,7 @@ def _run_reference_async_chat(
 ):
     chat_mdl = _RecordingChatModel(answer)
     chat_mdl.refinement_messages = []
+    chat_mdl.refinement_calls = 0
     chat_mdl.sql_questions = []
     retriever = _ReferenceRetriever(kbinfos, inserted_indices)
 
@@ -488,12 +484,31 @@ def _run_reference_async_chat(
         "kb_prompt",
         lambda _kbinfos, _max_tokens, **_kwargs: ["当前知识块"],
     )
-    if refined_question is not None:
-        async def fake_full_question(_tenant_id, _llm_id, refinement_messages):
+    if refinement_decision is not None:
+        async def fake_refine_multiturn_question(
+            _chat_mdl,
+            refinement_messages,
+            language=None,
+        ):
             chat_mdl.refinement_messages = deepcopy(refinement_messages)
-            return refined_question
+            chat_mdl.refinement_calls += 1
+            return refinement_decision
 
-        monkeypatch.setattr(dialog_service, "full_question", fake_full_question)
+        async def fail_old_full_question(*_args, **_kwargs):
+            raise AssertionError("legacy full_question path was used")
+
+        monkeypatch.setattr(
+            dialog_service,
+            "refine_multiturn_question",
+            fake_refine_multiturn_question,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            dialog_service,
+            "full_question",
+            fail_old_full_question,
+            raising=False,
+        )
     if sql_answer is not None:
         async def fake_use_sql(question, *_args, **_kwargs):
             chat_mdl.sql_questions.append(question)
@@ -1270,7 +1285,11 @@ def test_refined_multiturn_generation_excludes_untrusted_assistant_history(
         kbinfos=_make_reference_kbinfos(),
         messages=messages,
         refine_multiturn=True,
-        refined_question="关键工序验证的方案和报告分别用哪个模板？",
+        refinement_decision=QuestionRefinementDecision(
+            RefinementAction.REWRITE,
+            "关键工序验证的方案和报告分别用哪个模板？",
+            0.92,
+        ),
     )
 
     assert "BDMB-YF-099" in final["answer"]
@@ -1303,10 +1322,11 @@ def test_kb_generation_without_refinement_excludes_all_history(monkeypatch):
     assert chat_mdl.chat_calls[-1][1] == [
         {"role": "user", "content": "EHR、培训、绩效系统找谁？"},
     ]
+    assert chat_mdl.refinement_calls == 0
 
 
 @pytest.mark.p2
-def test_multiturn_refinement_uses_only_two_recent_user_messages(monkeypatch):
+def test_multiturn_refinement_receives_complete_turns(monkeypatch):
     messages = [
         {"role": "user", "content": "更早的问题"},
         {"role": "assistant", "content": "更早的回答"},
@@ -1320,16 +1340,134 @@ def test_multiturn_refinement_uses_only_two_recent_user_messages(monkeypatch):
         kbinfos=_make_reference_kbinfos(),
         messages=messages,
         refine_multiturn=True,
-        refined_question="改写后的独立问题",
+        refinement_decision=QuestionRefinementDecision(
+            RefinementAction.REWRITE,
+            "改写后的独立问题",
+            0.9,
+        ),
     )
 
-    assert chat_mdl.refinement_messages == [
-        {"role": "user", "content": "上一问"},
-        {"role": "user", "content": "再确认一下"},
-    ]
+    assert chat_mdl.refinement_messages == messages
     assert chat_mdl.chat_calls[-1][1] == [
         {"role": "user", "content": "改写后的独立问题"},
     ]
+
+
+@pytest.mark.p2
+@pytest.mark.parametrize(
+    ("messages", "action", "resolved_question"),
+    [
+        (
+            [
+                {"role": "user", "content": "介绍一下关键工序验证。"},
+                {"role": "assistant", "content": "它用于确认关键工序。"},
+                {"role": "user", "content": "它需要哪些模板？"},
+            ],
+            RefinementAction.REWRITE,
+            "关键工序验证需要哪些模板？",
+        ),
+        (
+            [
+                {"role": "user", "content": "云文档问题找谁？"},
+                {"role": "assistant", "content": "历史回答不作为事实依据。"},
+                {"role": "user", "content": "EHR 系统呢？"},
+            ],
+            RefinementAction.REWRITE,
+            "EHR 系统问题找谁咨询？",
+        ),
+        (
+            [
+                {"role": "user", "content": "研发模板有哪些？"},
+                {"role": "assistant", "content": "历史回答可能有误。"},
+                {"role": "user", "content": "不对，我问的是关键工序验证模板。"},
+            ],
+            RefinementAction.REWRITE,
+            "关键工序验证模板有哪些？",
+        ),
+        (
+            [
+                {"role": "user", "content": "关键工序验证模板是什么？"},
+                {"role": "assistant", "content": "历史回答。"},
+                {"role": "user", "content": "EHR、培训、绩效系统找谁？"},
+            ],
+            RefinementAction.USE_ORIGINAL,
+            "EHR、培训、绩效系统找谁？",
+        ),
+        (
+            [
+                {"role": "user", "content": "关键工序验证模板是什么？"},
+                {"role": "assistant", "content": "历史回答。"},
+                {"role": "user", "content": "方案模板呢？"},
+                {"role": "assistant", "content": "另一条历史回答。"},
+                {"role": "user", "content": "报告模板也一样吗？"},
+            ],
+            RefinementAction.REWRITE,
+            "关键工序验证的报告模板是什么？",
+        ),
+    ],
+    ids=["pronoun", "ellipsis", "correction", "topic-switch", "continuous"],
+)
+def test_multiturn_scenarios_use_one_resolved_question_downstream(
+    monkeypatch,
+    messages,
+    action,
+    resolved_question,
+):
+    _, chat_mdl, retriever = _run_reference_async_chat(
+        monkeypatch,
+        answer="基于知识库生成的回答 [ID:0]",
+        kbinfos=_make_reference_kbinfos(),
+        messages=messages,
+        refine_multiturn=True,
+        refinement_decision=QuestionRefinementDecision(
+            action,
+            resolved_question,
+            0.95,
+        ),
+    )
+
+    assert chat_mdl.refinement_messages == messages
+    assert retriever.retrieval_calls[0][0][0] == resolved_question
+    assert chat_mdl.chat_calls[-1][1] == [
+        {"role": "user", "content": resolved_question},
+    ]
+
+
+@pytest.mark.p2
+def test_clarification_decision_returns_final_without_retrieval_or_generation(
+    monkeypatch,
+):
+    messages = [
+        {"role": "user", "content": "有哪些选项？"},
+        {"role": "assistant", "content": "A 和 B"},
+        {"role": "user", "content": "第二个呢？"},
+    ]
+    decision = QuestionRefinementDecision(
+        RefinementAction.CLARIFY,
+        "第二个呢？",
+        0.2,
+        ("第二个",),
+        "你指的是前面对话中的哪一个选项？",
+    )
+
+    final, chat_mdl, retriever = _run_reference_async_chat(
+        monkeypatch,
+        answer="不应生成",
+        kbinfos=_make_reference_kbinfos(),
+        messages=messages,
+        refine_multiturn=True,
+        refinement_decision=decision,
+    )
+
+    assert final["answer"] == "你指的是前面对话中的哪一个选项？"
+    assert final["final"] is True
+    assert final["reference"] == {
+        "total": 0,
+        "chunks": [],
+        "doc_aggs": [],
+    }
+    assert retriever.retrieval_calls == []
+    assert chat_mdl.chat_calls == []
 
 
 @pytest.mark.p2
@@ -1452,16 +1590,17 @@ def test_sql_retrieval_uses_refined_question(monkeypatch):
         kbinfos=_make_reference_kbinfos(),
         messages=messages,
         refine_multiturn=True,
-        refined_question="改写后的独立问题",
+        refinement_decision=QuestionRefinementDecision(
+            RefinementAction.REWRITE,
+            "改写后的独立问题",
+            0.9,
+        ),
         field_map={"department": "keyword"},
         sql_answer=sql_answer,
     )
 
     assert final["answer"] == "结构化查询答案"
-    assert chat_mdl.refinement_messages == [
-        {"role": "user", "content": "上一问"},
-        {"role": "user", "content": "再确认一下"},
-    ]
+    assert chat_mdl.refinement_messages == messages
     assert chat_mdl.sql_questions == ["改写后的独立问题"]
     assert chat_mdl.chat_calls == []
 
