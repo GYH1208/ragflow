@@ -148,7 +148,7 @@ def install_handler_service_stubs(
     monkeypatch.setitem(sys.modules, "common.misc_utils", misc_module)
 
 
-def test_select_channel_history_keeps_only_two_recent_user_messages():
+def test_select_channel_history_without_refinement_keeps_only_current_user():
     messages = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "旧问题"},
@@ -158,8 +158,35 @@ def test_select_channel_history_keeps_only_two_recent_user_messages():
         {"role": "user", "content": "当前问题", "id": "current"},
     ]
 
-    assert bootstrap._select_channel_history(messages) == [
-        {"role": "user", "content": "上一问"},
+    assert bootstrap._select_channel_history(
+        messages,
+        refine_multiturn=False,
+    ) == [
+        {"role": "user", "content": "当前问题", "id": "current"},
+    ]
+
+
+def test_select_channel_history_with_refinement_keeps_four_complete_turns():
+    messages = [{"role": "system", "content": "system"}]
+    for index in range(5):
+        messages.extend(
+            [
+                {"role": "user", "content": f"问题{index}"},
+                {"role": "assistant", "content": f"回答{index}"},
+            ]
+        )
+    messages.append({"role": "user", "content": "当前问题", "id": "current"})
+
+    assert bootstrap._select_channel_history(
+        messages,
+        refine_multiturn=True,
+    ) == [
+        {"role": "user", "content": "问题2"},
+        {"role": "assistant", "content": "回答2"},
+        {"role": "user", "content": "问题3"},
+        {"role": "assistant", "content": "回答3"},
+        {"role": "user", "content": "问题4"},
+        {"role": "assistant", "content": "回答4"},
         {"role": "user", "content": "当前问题", "id": "current"},
     ]
 
@@ -172,13 +199,50 @@ def test_select_channel_history_ignores_empty_and_invalid_messages():
         {"role": "tool", "content": "工具结果"},
     ]
 
-    assert bootstrap._select_channel_history(messages) == [
+    assert bootstrap._select_channel_history(
+        messages,
+        refine_multiturn=False,
+    ) == [
         {"role": "user", "content": "当前问题"},
     ]
 
 
 @pytest.mark.asyncio
-async def test_handler_passes_only_recent_user_messages_to_kb_chat(monkeypatch):
+@pytest.mark.parametrize(
+    ("refine_multiturn", "expected_history"),
+    [
+        (
+            False,
+            [
+                {
+                    "role": "user",
+                    "content": "当前问题",
+                    "id": "generated-id",
+                }
+            ],
+        ),
+        (
+            True,
+            [
+                {"role": "user", "content": "旧问题"},
+                {"role": "assistant", "content": "错误联系人：IT-陶正浩"},
+                {"role": "user", "content": "上一问"},
+                {"role": "assistant", "content": "错误联系人：IT-刘尧"},
+                {
+                    "role": "user",
+                    "content": "当前问题",
+                    "id": "generated-id",
+                },
+            ],
+        ),
+    ],
+    ids=["disabled", "enabled"],
+)
+async def test_handler_history_follows_multiturn_switch(
+    monkeypatch,
+    refine_multiturn,
+    expected_history,
+):
     channel = RecordingStreamingChannel()
     conversation = FakeConversation()
     conversation.message = [
@@ -190,7 +254,7 @@ async def test_handler_passes_only_recent_user_messages_to_kb_chat(monkeypatch):
     dialog = SimpleNamespace(
         id="dialog-1",
         kb_ids=["kb-1"],
-        prompt_config={"quote": True},
+        prompt_config={"quote": True, "refine_multiturn": refine_multiturn},
     )
     captured_histories = []
 
@@ -223,12 +287,7 @@ async def test_handler_passes_only_recent_user_messages_to_kb_chat(monkeypatch):
         )
     )
 
-    assert captured_histories == [
-        [
-            {"role": "user", "content": "上一问"},
-            {"role": "user", "content": "当前问题", "id": "generated-id"},
-        ]
-    ]
+    assert captured_histories == [expected_history]
 
 
 def test_prepares_clean_text_and_cited_images_in_first_citation_order():

@@ -199,19 +199,36 @@ def _build_one(account_id: str, channel: str, credential: dict):
 
 def _select_channel_history(
     messages: list[dict],
-    max_user_messages: int = 2,
+    *,
+    refine_multiturn: bool,
+    max_user_messages: int = 4,
 ) -> list[dict]:
-    selected = []
-    for message in reversed(messages or []):
-        if message.get("role") != "user":
+    valid_messages = []
+    for message in messages or []:
+        if message.get("role") not in {"user", "assistant"}:
             continue
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
             continue
-        selected.append(message)
-        if len(selected) >= max_user_messages:
-            break
-    return list(reversed(selected))
+        valid_messages.append(message)
+
+    user_indexes = [
+        index
+        for index, message in enumerate(valid_messages)
+        if message["role"] == "user"
+    ]
+    if not user_indexes:
+        return []
+    if not refine_multiturn:
+        return [valid_messages[user_indexes[-1]]]
+
+    selected_user_count = min(
+        len(user_indexes),
+        max(1, max_user_messages),
+    )
+    first_user_index = user_indexes[-selected_user_count]
+    current_user_index = user_indexes[-1]
+    return valid_messages[first_user_index : current_user_index + 1]
 
 
 def _make_chat_handler(ch):
@@ -265,7 +282,12 @@ def _make_chat_handler(ch):
         conv.reference = [r for r in conv.reference if r]
         conv.reference.append({"chunks": [], "doc_aggs": []})
 
-        history = _select_channel_history(conv.message)
+        history = _select_channel_history(
+            conv.message,
+            refine_multiturn=bool(
+                (dia.prompt_config or {}).get("refine_multiturn")
+            ),
+        )
 
         answer_text = ""
         answer_files = []

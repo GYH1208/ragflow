@@ -48,7 +48,14 @@ from rag.graphrag.general.mind_map_extractor import MindMapExtractor
 from rag.advanced_rag import DeepResearcher
 from rag.app.tag import label_question
 from rag.nlp.search import index_name
-from rag.prompts.generator import chunks_format, citation_prompt, cross_languages, full_question, kb_prompt, keyword_extraction, message_fit_in, PROMPT_JINJA_ENV, ASK_SUMMARY
+from rag.prompts.generator import chunks_format, citation_prompt, cross_languages, kb_prompt, keyword_extraction, message_fit_in, PROMPT_JINJA_ENV, ASK_SUMMARY
+from rag.prompts.multiturn import (
+    REFINEMENT_CONFIDENCE_THRESHOLD,
+    RefinementAction,
+    latest_user_question,
+    normalize_message_content,
+    refine_multiturn_question,
+)
 from common.token_utils import num_tokens_from_string
 from rag.utils.tavily_conn import Tavily
 from rag.utils.tts_cache import synthesize_with_cache
@@ -447,25 +454,6 @@ def _parse_data_uri_or_b64(s: str, default_mime: str = "image/png") -> tuple[str
     return default_mime, s
 
 
-def _normalize_text_from_content(content) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        texts = []
-        for blk in content:
-            if isinstance(blk, dict):
-                if blk.get("type") in {"text", "input_text"}:
-                    txt = blk.get("text")
-                    if txt:
-                        texts.append(str(txt))
-                elif "text" in blk and isinstance(blk.get("text"), (str, int, float)):
-                    texts.append(str(blk["text"]))
-        return "\n".join(texts).strip()
-    return str(content)
-
-
 def convert_last_user_msg_to_multimodal(msg: list[dict], image_data_uris: list[str], factory: str) -> None:
     if not msg or not image_data_uris:
         return
@@ -477,7 +465,7 @@ def convert_last_user_msg_to_multimodal(msg: list[dict], image_data_uris: list[s
             continue
 
         original_content = msg[idx].get("content", "")
-        text = _normalize_text_from_content(original_content)
+        text = normalize_message_content(original_content)
 
         if factory_norm == "gemini":
             parts = []
@@ -749,28 +737,6 @@ def repair_bad_citation_formats(answer: str, kbinfos: dict, idx: set):
     return answer, idx
 
 
-def _recent_user_messages(
-    messages: list[dict],
-    limit: int = 2,
-) -> list[dict]:
-    if limit <= 0:
-        return []
-    user_contents = [
-        _normalize_text_from_content(message.get("content"))
-        for message in messages
-        if message.get("role") == "user"
-    ]
-    if not user_contents:
-        return []
-    prior_users = [
-        {"role": "user", "content": content}
-        for content in user_contents[:-1]
-        if content
-    ]
-    current_user = {"role": "user", "content": user_contents[-1]}
-    return (prior_users + [current_user])[-limit:]
-
-
 async def async_chat(dialog, messages, stream=True, **kwargs):
     logging.debug("Begin async_chat")
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
@@ -829,10 +795,39 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     bind_models_ts = timer()
 
     retriever = settings.retriever
-    recent_user_messages = _recent_user_messages(messages)
-    if not recent_user_messages or not recent_user_messages[-1]["content"]:
+    current_question = latest_user_question(messages)
+    if not current_question:
         raise ValueError("The current user message has no textual content.")
-    questions = [message["content"] for message in recent_user_messages]
+
+    prompt_config = dialog.prompt_config
+    generation_question = current_question
+    if prompt_config.get("refine_multiturn"):
+        decision = await refine_multiturn_question(chat_mdl, messages)
+        logger.info(
+            "Multiturn refinement action=%s confidence_bucket=%s "
+            "unresolved_count=%d fallback=%s",
+            decision.action.value,
+            (
+                "high"
+                if decision.confidence >= REFINEMENT_CONFIDENCE_THRESHOLD
+                else "low"
+            ),
+            len(decision.unresolved_references),
+            decision.used_fallback,
+        )
+        if decision.action is RefinementAction.CLARIFY:
+            clarification = decision.clarification_question
+            yield {
+                "answer": clarification,
+                "reference": {"total": 0, "chunks": [], "doc_aggs": []},
+                "prompt": "\n\n### Query:\n%s" % current_question,
+                "audio_binary": tts(tts_mdl, clarification),
+                "final": True,
+            }
+            return
+        generation_question = decision.question
+
+    questions = [generation_question]
     attachments = None
     if "doc_ids" in kwargs:
         attachments = [doc_id for doc_id in kwargs["doc_ids"].split(",") if doc_id]
@@ -847,21 +842,6 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         else:
             text_attachments, image_files = split_file_attachments(messages[-1]["files"], raw=True)
         attachments_ = "\n\n".join(text_attachments)
-
-    prompt_config = dialog.prompt_config
-    used_multiturn_refinement = bool(
-        len(questions) > 1 and prompt_config.get("refine_multiturn")
-    )
-    if used_multiturn_refinement:
-        questions = [
-            await full_question(
-                dialog.tenant_id,
-                dialog.llm_id,
-                recent_user_messages,
-            )
-        ]
-    else:
-        questions = questions[-1:]
 
     if prompt_config.get("cross_languages"):
         questions = [await cross_languages(dialog.tenant_id, dialog.llm_id, questions[0], prompt_config["cross_languages"])]
