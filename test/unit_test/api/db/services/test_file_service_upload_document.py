@@ -17,8 +17,11 @@ import importlib.util
 import inspect
 import socket
 import sys
+import threading
+import time
 import types
 import warnings
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -81,6 +84,17 @@ class _DummyUploadFile:
 
 def _unwrapped_upload_document():
     return FileService.upload_document.__func__.__wrapped__
+
+
+def _mock_folder_parent_lock(monkeypatch, folders):
+    @contextmanager
+    def locked_parent(cls, parent_id):
+        parent = folders.get(parent_id)
+        if parent is None:
+            raise RuntimeError("Cannot find the knowledge base folder.")
+        yield parent
+
+    monkeypatch.setattr(FileService, "_locked_kb_folder_parent", classmethod(locked_parent))
 
 
 @pytest.mark.p2
@@ -215,8 +229,14 @@ def test_upload_document_places_relative_folders_under_explicit_parent(monkeypat
         classmethod(lambda cls, _tenant_id, _name, _parent_id: {"id": "kb-folder"}),
     )
     monkeypatch.setattr(FileService, "get_by_id", classmethod(lambda cls, file_id: (file_id in folders, folders.get(file_id))))
+    _mock_folder_parent_lock(monkeypatch, folders)
     monkeypatch.setattr(FileService, "query", classmethod(lambda cls, **kwargs: query_files(**kwargs)))
-    monkeypatch.setattr(FileService, "insert", classmethod(lambda cls, data: insert_folder(data)))
+    monkeypatch.setattr(
+        FileService,
+        "_query_kb_folder_entries_locked",
+        classmethod(lambda cls, tenant_id, parent_id, name: query_files(tenant_id=tenant_id, parent_id=parent_id, name=name)),
+    )
+    monkeypatch.setattr(FileService, "_insert_kb_folder_locked", classmethod(lambda cls, data: insert_folder(data)))
     monkeypatch.setattr(FileService, "add_file_from_kb", classmethod(lambda cls, doc, parent_id, tenant_id: add_file_from_kb(doc, parent_id, tenant_id)))
     monkeypatch.setattr(FileService, "get_parser", classmethod(lambda cls, _type, _name, parser_id: parser_id))
     monkeypatch.setattr(file_service_module, "get_uuid", lambda: next(generated_ids))
@@ -314,8 +334,14 @@ def test_failed_upload_removes_only_request_created_empty_folders(monkeypatch):
     monkeypatch.setattr(FileService, "get_kb_folder", classmethod(lambda cls, _uid: {"id": "kb-root"}))
     monkeypatch.setattr(FileService, "new_a_file_from_kb", classmethod(lambda cls, *_args: {"id": "kb-folder"}))
     monkeypatch.setattr(FileService, "get_by_id", classmethod(lambda cls, file_id: (file_id in folders, folders.get(file_id))))
+    _mock_folder_parent_lock(monkeypatch, folders)
     monkeypatch.setattr(FileService, "query", classmethod(lambda cls, **kwargs: query_files(**kwargs)))
-    monkeypatch.setattr(FileService, "insert", classmethod(lambda cls, data: insert_folder(data)))
+    monkeypatch.setattr(
+        FileService,
+        "_query_kb_folder_entries_locked",
+        classmethod(lambda cls, tenant_id, parent_id, name: query_files(tenant_id=tenant_id, parent_id=parent_id, name=name)),
+    )
+    monkeypatch.setattr(FileService, "_insert_kb_folder_locked", classmethod(lambda cls, data: insert_folder(data)))
     monkeypatch.setattr(FileService, "delete", classmethod(lambda cls, folder: folders.pop(folder.id, None)))
     monkeypatch.setattr(FileService, "get_parser", classmethod(lambda cls, _type, _name, parser_id: parser_id))
     monkeypatch.setattr(file_service_module, "get_uuid", lambda: next(generated_ids))
@@ -335,6 +361,74 @@ def test_failed_upload_removes_only_request_created_empty_folders(monkeypatch):
     assert uploaded == []
     assert err == ["A.txt: broken upload"]
     assert set(folders) == {"kb-folder"}
+
+
+@pytest.mark.p2
+def test_ensure_kb_folder_path_serializes_concurrent_creation(monkeypatch):
+    parent = SimpleNamespace(
+        id="parent-folder",
+        parent_id="kb-folder",
+        tenant_id="tenant-1",
+        name="Current Folder",
+        type="folder",
+    )
+    folders = []
+    records_lock = threading.Lock()
+    next_id = iter(["folder-1", "folder-2"])
+
+    monkeypatch.setattr(
+        FileService,
+        "get_by_id",
+        classmethod(lambda cls, file_id: (file_id == parent.id, parent if file_id == parent.id else None)),
+    )
+    _mock_folder_parent_lock(monkeypatch, {parent.id: parent})
+
+    def query_files(**kwargs):
+        with records_lock:
+            matches = [
+                folder
+                for folder in folders
+                if folder.tenant_id == kwargs.get("tenant_id")
+                and folder.parent_id == kwargs.get("parent_id")
+                and folder.name == kwargs.get("name")
+            ]
+        if not matches:
+            # Open a deterministic race window for the second request.
+            time.sleep(0.05)
+        return matches
+
+    def insert_folder(data):
+        folder = SimpleNamespace(**{**data, "id": next(next_id)})
+        with records_lock:
+            folders.append(folder)
+        return folder
+
+    monkeypatch.setattr(
+        FileService,
+        "_query_kb_folder_entries_locked",
+        classmethod(lambda cls, tenant_id, parent_id, name: query_files(tenant_id=tenant_id, parent_id=parent_id, name=name)),
+    )
+    monkeypatch.setattr(FileService, "_insert_kb_folder_locked", classmethod(lambda cls, data: insert_folder(data)))
+
+    results = []
+
+    def create_path():
+        results.append(
+            FileService.ensure_kb_folder_path(
+                parent.id,
+                ["重复目录"],
+                "tenant-1",
+            )
+        )
+
+    threads = [threading.Thread(target=create_path) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(folders) == 1
+    assert len({folder.id for folder in results}) == 1
 
 
 # ---------------------------------------------------------------------------

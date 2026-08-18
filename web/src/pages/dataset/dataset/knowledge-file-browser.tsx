@@ -78,7 +78,7 @@ export function KnowledgeFileBrowser() {
     () => query.data?.entries || [],
     [query.data?.entries],
   );
-  const currentFolderId = query.data?.parent_folder.id || '';
+  const currentFolderId = folderId || query.data?.parent_folder.id || '';
 
   const createFolder = useCreateKnowledgeFolder(datasetId);
   const rename = useRenameKnowledgeEntry(datasetId);
@@ -94,7 +94,7 @@ export function KnowledgeFileBrowser() {
     hideDocumentUploadModal,
     onDocumentUploadOk,
     documentUploadLoading,
-  } = useHandleUploadDocument(currentFolderId);
+  } = useHandleUploadDocument(currentFolderId, query.refetch);
 
   const selectedEntries = useMemo(
     () => entries.filter((entry) => selectedIds.includes(entry.file_id)),

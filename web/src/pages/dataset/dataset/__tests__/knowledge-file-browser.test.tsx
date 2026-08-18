@@ -44,7 +44,9 @@ jest.mock('@/hooks/use-knowledge-file-request', () => ({
       data: {
         entries: mockEntries,
         parent_folder: {
-          id: (params.folderId as string) || 'root',
+          // Keep returning the previous folder to reproduce the window where
+          // navigation state has changed but the new query has not completed.
+          id: 'root',
           name: '知识库',
         },
         total: 2,
@@ -52,7 +54,16 @@ jest.mock('@/hooks/use-knowledge-file-request', () => ({
       refetch: jest.fn(),
     };
   },
-  useKnowledgeFolderAncestors: () => ({ data: [] }),
+  useKnowledgeFolderAncestors: (_datasetId: string, folderId?: string) => ({
+    data: folderId
+      ? folderId === 'root'
+        ? [{ id: 'root', name: '知识库根目录' }]
+        : [
+            { id: 'root', name: '知识库根目录' },
+            { id: folderId, name: '制度文件' },
+          ]
+      : [],
+  }),
   useCreateKnowledgeFolder: () => ({
     mutateAsync: jest.fn(),
     isPending: false,
@@ -140,6 +151,12 @@ test('opens folders and only exposes move/delete when a folder is selected', () 
     expect.objectContaining({ datasetId: 'kb-1', folderId: 'folder-1' }),
   );
   expect(mockUploadFolderIds.at(-1)).toBe('folder-1');
+
+  fireEvent.click(screen.getByRole('button', { name: '知识库根目录' }));
+  expect(mockQueryParams.at(-1)).toEqual(
+    expect.objectContaining({ datasetId: 'kb-1', folderId: 'root' }),
+  );
+  expect(mockUploadFolderIds.at(-1)).toBe('root');
 
   fireEvent.click(screen.getAllByLabelText('Select row')[0]);
   const actions = screen.getByTestId('bulk-actions');

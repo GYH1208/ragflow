@@ -18,8 +18,10 @@ import base64
 import logging
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Union
 
@@ -54,6 +56,7 @@ from common import settings
 class FileService(CommonService):
     # Service class for managing file operations and storage
     model = File
+    _kb_folder_creation_locks = tuple(threading.Lock() for _ in range(64))
 
     @classmethod
     @DB.connection_context()
@@ -461,6 +464,37 @@ class FileService(CommonService):
             raise RuntimeError("Database error (File move)!")
 
     @classmethod
+    @contextmanager
+    def _locked_kb_folder_parent(cls, parent_id):
+        """Lock a parent row until its child lookup/create operation commits."""
+        with DB.atomic():
+            parent = (
+                cls.model.select()
+                .where(cls.model.id == parent_id)
+                .for_update()
+                .get_or_none()
+            )
+            if parent is None:
+                raise RuntimeError("Cannot find the knowledge base folder.")
+            yield parent
+
+    @classmethod
+    def _query_kb_folder_entries_locked(cls, tenant_id, parent_id, name):
+        """Query sibling entries without opening or closing another connection."""
+        return list(
+            cls.model.select().where(
+                (cls.model.tenant_id == tenant_id)
+                & (cls.model.parent_id == parent_id)
+                & (cls.model.name == name)
+            )
+        )
+
+    @classmethod
+    def _insert_kb_folder_locked(cls, data):
+        """Insert a folder on the transaction's existing connection."""
+        return cls.model.create(**data)
+
+    @classmethod
     def ensure_kb_folder_path(cls, kb_folder_id, segments, tenant_id, created_folder_ids=None):
         """Create or reuse a knowledge-base folder chain below ``kb_folder_id``."""
         found, current = cls.get_by_id(kb_folder_id)
@@ -468,32 +502,30 @@ class FileService(CommonService):
             raise RuntimeError("Cannot find the knowledge base folder.")
 
         for segment in segments:
-            matches = cls.query(
-                tenant_id=tenant_id,
-                parent_id=current.id,
-                name=segment,
-            )
-            if matches:
-                folders = [entry for entry in matches if entry.type == FileType.FOLDER.value]
-                if not folders:
-                    raise RuntimeError(f"Upload folder '{segment}' conflicts with an existing file.")
-                current = folders[0]
-                continue
-            current = cls.insert(
-                {
-                    "id": get_uuid(),
-                    "parent_id": current.id,
-                    "tenant_id": tenant_id,
-                    "created_by": tenant_id,
-                    "name": segment,
-                    "location": "",
-                    "size": 0,
-                    "type": FileType.FOLDER.value,
-                    "source_type": FileSource.KNOWLEDGEBASE,
-                }
-            )
-            if created_folder_ids is not None:
-                created_folder_ids.append(current.id)
+            lock_index = xxhash.xxh64_intdigest(f"{tenant_id}:{current.id}") % len(cls._kb_folder_creation_locks)
+            with cls._kb_folder_creation_locks[lock_index], cls._locked_kb_folder_parent(current.id) as parent:
+                matches = cls._query_kb_folder_entries_locked(tenant_id, parent.id, segment)
+                if matches:
+                    folders = [entry for entry in matches if entry.type == FileType.FOLDER.value]
+                    if not folders:
+                        raise RuntimeError(f"Upload folder '{segment}' conflicts with an existing file.")
+                    current = folders[0]
+                    continue
+                current = cls._insert_kb_folder_locked(
+                    {
+                        "id": get_uuid(),
+                        "parent_id": parent.id,
+                        "tenant_id": tenant_id,
+                        "created_by": tenant_id,
+                        "name": segment,
+                        "location": "",
+                        "size": 0,
+                        "type": FileType.FOLDER.value,
+                        "source_type": FileSource.KNOWLEDGEBASE,
+                    }
+                )
+                if created_folder_ids is not None:
+                    created_folder_ids.append(current.id)
         return current
 
     @classmethod

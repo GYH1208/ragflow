@@ -5,9 +5,14 @@ import {
   useUploadDocument,
 } from '@/hooks/use-document-request';
 import { getUnSupportedFilesCount } from '@/utils/document-util';
-import { useCallback } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
-export const useHandleUploadDocument = (parentFolderId?: string) => {
+const ParseSubmissionBatchSize = 50;
+
+export const useHandleUploadDocument = (
+  parentFolderId?: string,
+  onUploadComplete?: () => Promise<unknown> | unknown,
+) => {
   const {
     visible: documentUploadVisible,
     hideModal: hideDocumentUploadModal,
@@ -15,6 +20,8 @@ export const useHandleUploadDocument = (parentFolderId?: string) => {
   } = useSetModalState();
   const { uploadDocument, loading } = useUploadDocument();
   const { runDocumentByIds } = useRunDocument();
+  const submittingRef = useRef(false);
+  const [submitting, setSubmitting] = useState(false);
 
   const onDocumentUploadOk = useCallback(
     async ({
@@ -23,7 +30,11 @@ export const useHandleUploadDocument = (parentFolderId?: string) => {
       tableColumnMode,
       tableColumnRoles,
     }: UploadFormSchemaType) => {
-      if (fileList.length > 0) {
+      if (submittingRef.current || fileList.length === 0) return;
+
+      submittingRef.current = true;
+      setSubmitting(true);
+      try {
         // Build parser_config if column roles are configured
         let parserConfig: Record<string, any> | undefined;
         if (
@@ -52,13 +63,28 @@ export const useHandleUploadDocument = (parentFolderId?: string) => {
         }
 
         if (isSuccess && parseOnCreation) {
-          runDocumentByIds({
-            documentIds: ret.data.map((x: any) => x.id),
-            run: 1,
-          });
+          const documentIds = ret.data.map((x: any) => x.id);
+          let parseCode = 0;
+          for (
+            let offset = 0;
+            offset < documentIds.length;
+            offset += ParseSubmissionBatchSize
+          ) {
+            parseCode = await runDocumentByIds({
+              documentIds: documentIds.slice(
+                offset,
+                offset + ParseSubmissionBatchSize,
+              ),
+              run: 1,
+            });
+            if (parseCode !== 0) break;
+          }
+          await onUploadComplete?.();
+          if (parseCode !== 0) return parseCode;
         }
 
         if (isSuccess) {
+          if (!parseOnCreation) await onUploadComplete?.();
           hideDocumentUploadModal();
           return 0;
         }
@@ -66,18 +92,28 @@ export const useHandleUploadDocument = (parentFolderId?: string) => {
         // For partial success (code 500), check if any files were uploaded
         const count = getUnSupportedFilesCount(ret?.message);
         if (count !== fileList.length) {
+          await onUploadComplete?.();
           hideDocumentUploadModal();
           return 0;
         }
 
         return ret?.code;
+      } finally {
+        submittingRef.current = false;
+        setSubmitting(false);
       }
     },
-    [uploadDocument, runDocumentByIds, hideDocumentUploadModal, parentFolderId],
+    [
+      uploadDocument,
+      runDocumentByIds,
+      onUploadComplete,
+      hideDocumentUploadModal,
+      parentFolderId,
+    ],
   );
 
   return {
-    documentUploadLoading: loading,
+    documentUploadLoading: loading || submitting,
     onDocumentUploadOk,
     documentUploadVisible,
     hideDocumentUploadModal,

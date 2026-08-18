@@ -23,7 +23,10 @@ export function KnowledgeFileBreadcrumb({
   }
 
   return (
-    <nav aria-label="Knowledge folder breadcrumb" className="flex items-center gap-1">
+    <nav
+      aria-label="Knowledge folder breadcrumb"
+      className="flex items-center gap-1"
+    >
       {ancestors.map((ancestor, index) => (
         <div key={ancestor.id} className="flex items-center gap-1">
           {index > 0 && <ChevronRight className="size-4 text-text-disabled" />}
@@ -32,7 +35,7 @@ export function KnowledgeFileBreadcrumb({
             variant="ghost"
             size="sm"
             className="h-7 px-2"
-            onClick={() => onNavigate(index === 0 ? '' : ancestor.id)}
+            onClick={() => onNavigate(ancestor.id)}
           >
             {index === 0 && <Home className="size-4" />}
             {ancestor.name}
