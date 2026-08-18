@@ -29,6 +29,7 @@ from api.constants import FILE_NAME_LEN_LIMIT, IMG_BASE64_PREFIX
 from api.apps.services.document_api_service import validate_document_update_fields, map_doc_keys, \
     map_doc_keys_with_run_status, update_document_name_only, update_chunk_method, update_document_status_only, \
     reset_document_for_reparse
+from api.apps.services.knowledge_file_service import KnowledgeFileService
 from api.db import VALID_FILE_TYPES, FileType
 from api.db.services import duplicate_name
 from api.db.services.doc_metadata_service import DocMetadataService
@@ -594,6 +595,14 @@ async def _upload_local_documents(kb, tenant_id):
     except ValueError as exc:
         return get_error_argument_result(str(exc))
 
+    parent_folder_id = form.get("parent_id")
+    if parent_folder_id:
+        try:
+            parent_folder = KnowledgeFileService.assert_folder_in_kb(kb, tenant_id, parent_folder_id)
+            parent_folder_id = parent_folder.id
+        except (LookupError, PermissionError, ValueError) as exc:
+            return get_error_argument_result(str(exc))
+
     # Parse optional parser_config overrides from form data
     parser_config_override = None
     raw_parser_config = form.get("parser_config")
@@ -612,6 +621,7 @@ async def _upload_local_documents(kb, tenant_id):
     err, files = await thread_pool_exec(
         FileService.upload_document, kb, file_objs, tenant_id,
         parent_path=form.get("parent_path"),
+        parent_folder_id=parent_folder_id,
         parser_config_override=parser_config_override,
         relative_paths=relative_paths,
     )

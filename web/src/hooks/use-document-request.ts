@@ -71,14 +71,22 @@ export const useUploadDocument = () => {
   } = useMutation<
     ResponseType<IDocumentInfo[]>,
     Error,
-    { fileList: File[]; parserConfig?: Record<string, any> }
+    {
+      fileList: File[];
+      parserConfig?: Record<string, any>;
+      parentFolderId?: string;
+    }
   >({
     mutationKey: [DocumentApiAction.UploadDocument],
-    mutationFn: async ({ fileList, parserConfig }) => {
+    mutationFn: async ({ fileList, parserConfig, parentFolderId }) => {
       if (!id) {
         return { code: 500, message: 'Dataset ID is required' };
       }
-      const formData = buildKnowledgeUploadFormData(fileList, parserConfig);
+      const formData = buildKnowledgeUploadFormData(
+        fileList,
+        parserConfig,
+        parentFolderId,
+      );
 
       try {
         const ret = await uploadDocument(id, formData);
@@ -101,8 +109,11 @@ export const useUploadDocument = () => {
   });
 
   const upload = useCallback(
-    (fileList: File[], parserConfig?: Record<string, any>) =>
-      mutateAsync({ fileList, parserConfig }),
+    (
+      fileList: File[],
+      parserConfig?: Record<string, any>,
+      parentFolderId?: string,
+    ) => mutateAsync({ fileList, parserConfig, parentFolderId }),
     [mutateAsync],
   );
 

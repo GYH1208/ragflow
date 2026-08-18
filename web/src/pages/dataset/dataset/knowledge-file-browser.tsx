@@ -18,6 +18,11 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { useNavigatePage } from '@/hooks/logic-hooks/navigate-hooks';
+import {
+  useRunDocument,
+  useSetDocumentStatus,
+} from '@/hooks/use-document-request';
 import {
   useCreateKnowledgeFolder,
   useDeleteKnowledgeEntries,
@@ -27,11 +32,6 @@ import {
   usePreviewDeleteKnowledgeEntries,
   useRenameKnowledgeEntry,
 } from '@/hooks/use-knowledge-file-request';
-import {
-  useRunDocument,
-  useSetDocumentStatus,
-} from '@/hooks/use-document-request';
-import { useNavigatePage } from '@/hooks/logic-hooks/navigate-hooks';
 import { KnowledgeEntry } from '@/interfaces/database/knowledge-file';
 import { formatDate } from '@/utils/date';
 import {
@@ -94,7 +94,7 @@ export function KnowledgeFileBrowser() {
     hideDocumentUploadModal,
     onDocumentUploadOk,
     documentUploadLoading,
-  } = useHandleUploadDocument();
+  } = useHandleUploadDocument(currentFolderId);
 
   const selectedEntries = useMemo(
     () => entries.filter((entry) => selectedIds.includes(entry.file_id)),
@@ -176,7 +176,10 @@ export function KnowledgeFileBrowser() {
   ];
 
   return (
-    <Card as="article" className="mb-5 mr-5 min-w-[880px] bg-transparent shadow-none">
+    <Card
+      as="article"
+      className="mb-5 mr-5 min-w-[880px] bg-transparent shadow-none"
+    >
       <CardHeader className="p-5 space-y-4">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -214,10 +217,7 @@ export function KnowledgeFileBrowser() {
           </div>
         </div>
         {selectedIds.length > 0 && (
-          <BulkOperateBar
-            list={bulkActions}
-            count={selectedIds.length}
-          />
+          <BulkOperateBar list={bulkActions} count={selectedIds.length} />
         )}
       </CardHeader>
 
@@ -228,9 +228,13 @@ export function KnowledgeFileBrowser() {
               <TableHead className="w-10">
                 <Checkbox
                   aria-label="Select all"
-                  checked={entries.length > 0 && selectedIds.length === entries.length}
+                  checked={
+                    entries.length > 0 && selectedIds.length === entries.length
+                  }
                   onCheckedChange={(checked) =>
-                    setSelectedIds(checked ? entries.map((entry) => entry.file_id) : [])
+                    setSelectedIds(
+                      checked ? entries.map((entry) => entry.file_id) : [],
+                    )
                   }
                 />
               </TableHead>
@@ -262,7 +266,10 @@ export function KnowledgeFileBrowser() {
                       onClick={
                         entry.entry_type === 'folder'
                           ? () => navigateFolder(entry.id)
-                          : navigateToChunkParsedResult(entry.id, entry.dataset_id)
+                          : navigateToChunkParsedResult(
+                              entry.id,
+                              entry.dataset_id,
+                            )
                       }
                     >
                       {entry.entry_type === 'folder' ? (
@@ -312,7 +319,10 @@ export function KnowledgeFileBrowser() {
                         size="sm"
                         variant="ghost"
                         onClick={async () => {
-                          await runDocumentByIds({ documentIds: [entry.id], run: 1 });
+                          await runDocumentByIds({
+                            documentIds: [entry.id],
+                            run: 1,
+                          });
                           query.refetch();
                         }}
                       >
@@ -359,7 +369,10 @@ export function KnowledgeFileBrowser() {
           loading={createFolder.isPending}
           title={t('knowledgeFolder.newFolder')}
           onOk={async (name: string) => {
-            await createFolder.mutateAsync({ parent_id: currentFolderId, name });
+            await createFolder.mutateAsync({
+              parent_id: currentFolderId,
+              name,
+            });
             setCreatingFolder(false);
             return true;
           }}

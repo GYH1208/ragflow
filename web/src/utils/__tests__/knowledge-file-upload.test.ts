@@ -31,6 +31,20 @@ test('uses an empty relative path for a normal file', () => {
   ]);
 });
 
+test('includes the current knowledge folder as the upload parent', () => {
+  const file = folderFile('A.txt', '待上传目录/A.txt');
+
+  const formData = (
+    buildKnowledgeUploadFormData as (
+      files: File[],
+      parserConfig?: Record<string, unknown>,
+      parentFolderId?: string,
+    ) => FormData
+  )([file], undefined, 'current-folder');
+
+  expect(formData.get('parent_id')).toBe('current-folder');
+});
+
 test('uses the relative path basename as the multipart filename', () => {
   const file = folderFile('caf\u00e9.txt', 'documents/cafe\u0301.txt');
 

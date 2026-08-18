@@ -7,7 +7,7 @@ import {
 import { getUnSupportedFilesCount } from '@/utils/document-util';
 import { useCallback } from 'react';
 
-export const useHandleUploadDocument = () => {
+export const useHandleUploadDocument = (parentFolderId?: string) => {
   const {
     visible: documentUploadVisible,
     hideModal: hideDocumentUploadModal,
@@ -37,7 +37,11 @@ export const useHandleUploadDocument = () => {
           };
         }
 
-        const ret = await uploadDocument(fileList as File[], parserConfig);
+        const ret = await uploadDocument(
+          fileList as File[],
+          parserConfig,
+          parentFolderId,
+        );
 
         // Check for success (code === 0) or partial success (code === 500 with some files)
         const isSuccess = ret?.code === 0;
@@ -69,7 +73,7 @@ export const useHandleUploadDocument = () => {
         return ret?.code;
       }
     },
-    [uploadDocument, runDocumentByIds, hideDocumentUploadModal],
+    [uploadDocument, runDocumentByIds, hideDocumentUploadModal, parentFolderId],
   );
 
   return {

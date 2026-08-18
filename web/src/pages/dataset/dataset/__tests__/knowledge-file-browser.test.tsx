@@ -6,6 +6,7 @@ Object.assign(globalThis, { React });
 import { KnowledgeFileBrowser } from '../knowledge-file-browser';
 
 const mockQueryParams: Array<Record<string, unknown>> = [];
+const mockUploadFolderIds: Array<string | undefined> = [];
 const mockEntries = [
   {
     entry_type: 'folder' as const,
@@ -42,14 +43,20 @@ jest.mock('@/hooks/use-knowledge-file-request', () => ({
     return {
       data: {
         entries: mockEntries,
-        parent_folder: { id: 'root', name: '知识库' },
+        parent_folder: {
+          id: (params.folderId as string) || 'root',
+          name: '知识库',
+        },
         total: 2,
       },
       refetch: jest.fn(),
     };
   },
   useKnowledgeFolderAncestors: () => ({ data: [] }),
-  useCreateKnowledgeFolder: () => ({ mutateAsync: jest.fn(), isPending: false }),
+  useCreateKnowledgeFolder: () => ({
+    mutateAsync: jest.fn(),
+    isPending: false,
+  }),
   useRenameKnowledgeEntry: () => ({ mutateAsync: jest.fn(), isPending: false }),
   useMoveKnowledgeEntries: () => ({ mutateAsync: jest.fn(), isPending: false }),
   usePreviewDeleteKnowledgeEntries: () => ({ mutateAsync: jest.fn() }),
@@ -70,13 +77,16 @@ jest.mock('../../contexts/knowledge-base-context', () => ({
 }));
 
 jest.mock('../use-upload-document', () => ({
-  useHandleUploadDocument: () => ({
-    documentUploadVisible: false,
-    showDocumentUploadModal: jest.fn(),
-    hideDocumentUploadModal: jest.fn(),
-    onDocumentUploadOk: jest.fn(),
-    documentUploadLoading: false,
-  }),
+  useHandleUploadDocument: (folderId?: string) => {
+    mockUploadFolderIds.push(folderId);
+    return {
+      documentUploadVisible: false,
+      showDocumentUploadModal: jest.fn(),
+      hideDocumentUploadModal: jest.fn(),
+      onDocumentUploadOk: jest.fn(),
+      documentUploadLoading: false,
+    };
+  },
 }));
 
 jest.mock('react-router', () => ({
@@ -129,6 +139,7 @@ test('opens folders and only exposes move/delete when a folder is selected', () 
   expect(mockQueryParams.at(-1)).toEqual(
     expect.objectContaining({ datasetId: 'kb-1', folderId: 'folder-1' }),
   );
+  expect(mockUploadFolderIds.at(-1)).toBe('folder-1');
 
   fireEvent.click(screen.getAllByLabelText('Select row')[0]);
   const actions = screen.getByTestId('bulk-actions');

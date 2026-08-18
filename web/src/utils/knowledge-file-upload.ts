@@ -7,6 +7,7 @@ export function getUploadDisplayPath(file: File): string {
 export function buildKnowledgeUploadFormData(
   files: File[],
   parserConfig?: Record<string, unknown>,
+  parentFolderId?: string,
 ): FormData {
   const formData = new FormData();
   files.forEach((file) => {
@@ -19,6 +20,9 @@ export function buildKnowledgeUploadFormData(
   });
   if (parserConfig) {
     formData.append('parser_config', JSON.stringify(parserConfig));
+  }
+  if (parentFolderId) {
+    formData.append('parent_id', parentFolderId);
   }
   return formData;
 }

@@ -14,6 +14,7 @@
 #  limitations under the License.
 #
 import importlib.util
+import inspect
 import socket
 import sys
 import types
@@ -133,7 +134,7 @@ class _ReadableUploadFile:
 
 
 @pytest.mark.p2
-def test_upload_document_places_same_name_files_in_relative_folders(monkeypatch):
+def test_upload_document_places_relative_folders_under_explicit_parent(monkeypatch):
     kb = SimpleNamespace(
         id="kb-1",
         tenant_id="tenant-1",
@@ -153,7 +154,14 @@ def test_upload_document_places_same_name_files_in_relative_folders(monkeypatch)
             tenant_id="tenant-1",
             name="Knowledge Base",
             type="folder",
-        )
+        ),
+        "current-folder": SimpleNamespace(
+            id="current-folder",
+            parent_id="kb-folder",
+            tenant_id="tenant-1",
+            name="Current Folder",
+            type="folder",
+        ),
     }
     leaf_files = []
     inserted_documents = []
@@ -218,15 +226,24 @@ def test_upload_document_places_same_name_files_in_relative_folders(monkeypatch)
     monkeypatch.setattr(file_service_module, "thumbnail_img", lambda *_args: None)
     monkeypatch.setattr(file_service_module.settings, "STORAGE_IMPL", _Storage())
 
+    upload_kwargs = {
+        "relative_paths": [
+            "2、二级文件/制度文件/A.txt",
+            "2、二级文件/表单/A.txt",
+        ],
+        "parent_folder_id": "current-folder",
+    }
+    supported_kwargs = {
+        key: value
+        for key, value in upload_kwargs.items()
+        if key in inspect.signature(_unwrapped_upload_document()).parameters
+    }
     err, uploaded = _unwrapped_upload_document()(
         FileService,
         kb,
         files,
         "tenant-1",
-        relative_paths=[
-            "2、二级文件/制度文件/A.txt",
-            "2、二级文件/表单/A.txt",
-        ],
+        **supported_kwargs,
     )
 
     assert err == []
@@ -236,6 +253,7 @@ def test_upload_document_places_same_name_files_in_relative_folders(monkeypatch)
         "2、二级文件/表单/A.txt",
     }
     top_folder = next(folder for folder in folders.values() if folder.name == "2、二级文件")
+    assert top_folder.parent_id == "current-folder"
     child_folders = {folder.name: folder for folder in folders.values() if folder.parent_id == top_folder.id}
     assert set(child_folders) == {"制度文件", "表单"}
     assert {file["parent_id"] for file in leaf_files} == {

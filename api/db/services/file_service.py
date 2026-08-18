@@ -515,6 +515,7 @@ class FileService(CommonService):
         user_id,
         src="local",
         parent_path: str | None = None,
+        parent_folder_id: str | None = None,
         parser_config_override: dict | None = None,
         relative_paths: list[str] | None = None,
     ):
@@ -523,6 +524,7 @@ class FileService(CommonService):
         self.init_knowledgebase_docs(pf_id, user_id)
         kb_root_folder = self.get_kb_folder(user_id)
         kb_folder = self.new_a_file_from_kb(kb.tenant_id, kb.name, kb_root_folder["id"])
+        upload_root_folder_id = parent_folder_id or kb_folder["id"]
 
         safe_parent_path = sanitize_path(parent_path)
 
@@ -578,14 +580,14 @@ class FileService(CommonService):
                 continue
             try:
                 DocumentService.check_doc_health(kb.tenant_id, file.filename)
-                target_folder_id = kb_folder["id"]
+                target_folder_id = upload_root_folder_id
                 relative_segments = None
                 if relative_paths is not None:
                     relative_segments = normalize_knowledge_upload_path(relative_paths[index], file.filename)
                     folder_segments = relative_segments[:-1]
                     if folder_segments:
                         target_folder = self.ensure_kb_folder_path(
-                            kb_folder["id"],
+                            upload_root_folder_id,
                             folder_segments,
                             kb.tenant_id,
                             created_folder_ids,
