@@ -313,21 +313,19 @@ class KnowledgeFileService:
     def create_folder(cls, kb, tenant_id, parent_id, name):
         parent = cls.assert_folder_in_kb(kb, tenant_id, parent_id)
         cls._validate_sibling_name(parent.id, name)
-        with DB.atomic():
-            cls._validate_sibling_name(parent.id, name)
-            folder = FileService.insert(
-                {
-                    "id": get_uuid(),
-                    "parent_id": parent.id,
-                    "tenant_id": kb.tenant_id,
-                    "created_by": tenant_id,
-                    "name": name,
-                    "location": "",
-                    "size": 0,
-                    "type": FileType.FOLDER.value,
-                    "source_type": FileSource.KNOWLEDGEBASE,
-                }
-            )
+        folder = FileService.insert(
+            {
+                "id": get_uuid(),
+                "parent_id": parent.id,
+                "tenant_id": kb.tenant_id,
+                "created_by": tenant_id,
+                "name": name,
+                "location": "",
+                "size": 0,
+                "type": FileType.FOLDER.value,
+                "source_type": FileSource.KNOWLEDGEBASE,
+            }
+        )
         return cls._to_dict(folder)
 
     @classmethod

@@ -14,7 +14,7 @@
 #  limitations under the License.
 #
 from types import SimpleNamespace
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
 import pytest
 
@@ -237,6 +237,41 @@ def test_create_folder_adds_knowledge_base_folder(service_fixture, monkeypatch):
     assert result["parent_id"] == root.id
     assert result["name"] == "新建目录"
     assert kb._entries["new-folder"].source_type == "knowledgebase"
+
+
+def test_create_folder_does_not_close_connection_inside_transaction(service_fixture, monkeypatch):
+    kb, tenant_id, root, *_ = service_fixture
+    transaction_state = {"open": False}
+    original_query = FileService.query
+    original_insert = FileService.insert
+
+    @contextmanager
+    def guarded_atomic():
+        transaction_state["open"] = True
+        try:
+            yield
+        finally:
+            transaction_state["open"] = False
+
+    def guarded_query(cls, **kwargs):
+        if transaction_state["open"]:
+            raise RuntimeError("Attempting to close database while transaction is open.")
+        return original_query(**kwargs)
+
+    def guarded_insert(cls, data):
+        if transaction_state["open"]:
+            raise RuntimeError("Attempting to close database while transaction is open.")
+        return original_insert(data)
+
+    monkeypatch.setattr(knowledge_file_service_module.DB, "atomic", guarded_atomic)
+    monkeypatch.setattr(FileService, "query", classmethod(guarded_query))
+    monkeypatch.setattr(FileService, "insert", classmethod(guarded_insert))
+    monkeypatch.setattr(knowledge_file_service_module, "get_uuid", lambda: "transaction-safe-folder")
+
+    result = KnowledgeFileService.create_folder(kb, tenant_id, root.id, "事务安全目录")
+
+    assert result["id"] == "transaction-safe-folder"
+    assert result["parent_id"] == root.id
 
 
 def test_move_document_changes_only_file_parent(service_fixture, monkeypatch):
