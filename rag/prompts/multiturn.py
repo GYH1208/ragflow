@@ -198,7 +198,14 @@ def parse_refinement_response(
             clarification.strip() or _generic_clarification(original_question),
         )
     if action is RefinementAction.CLARIFY:
-        return _fallback_decision(original_question)
+        if not clarification.strip():
+            return _fallback_decision(original_question)
+        return QuestionRefinementDecision(
+            action,
+            original_question,
+            float(confidence),
+            clarification_question=clarification.strip(),
+        )
     if action is RefinementAction.USE_ORIGINAL:
         return QuestionRefinementDecision(
             action,
@@ -233,6 +240,23 @@ async def refine_multiturn_question(
             1.0,
         )
 
+    history_token_count = sum(
+        num_tokens_from_string(item["content"])
+        for item in history
+    )
+    logging.info(
+        "Multiturn refinement context user_count=%d assistant_count=%d "
+        "token_count=%d",
+        sum(item["role"] == "user" for item in history),
+        sum(item["role"] == "assistant" for item in history),
+        history_token_count,
+    )
+    conversation_json = json.dumps(history, ensure_ascii=False)
+    conversation_json = (
+        conversation_json.replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
     today = datetime.date.today()
     system_prompt = PROMPT_ENV.from_string(
         MULTITURN_REFINEMENT_PROMPT
@@ -241,7 +265,7 @@ async def refine_multiturn_question(
         yesterday=(today - datetime.timedelta(days=1)).isoformat(),
         tomorrow=(today + datetime.timedelta(days=1)).isoformat(),
         language=language,
-        conversation_json=json.dumps(history, ensure_ascii=False),
+        conversation_json=conversation_json,
     )
     try:
         raw = await chat_mdl.async_chat(
@@ -255,6 +279,9 @@ async def refine_multiturn_question(
             return _fallback_decision(original_question)
         cleaned = re.sub(r"^.*</think>", "", raw, flags=re.DOTALL)
         return parse_refinement_response(cleaned, original_question)
-    except Exception:
-        logging.exception("Multiturn question refinement failed")
+    except Exception as exc:
+        logging.warning(
+            "Multiturn question refinement failed error_type=%s",
+            type(exc).__name__,
+        )
         return _fallback_decision(original_question)
