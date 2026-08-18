@@ -178,9 +178,9 @@ export function KnowledgeFileBrowser() {
   return (
     <Card
       as="article"
-      className="mb-5 mr-5 min-w-[880px] bg-transparent shadow-none"
+      className="mb-5 mr-5 flex min-h-0 min-w-[880px] flex-col overflow-hidden bg-transparent shadow-none"
     >
-      <CardHeader className="p-5 space-y-4">
+      <CardHeader className="shrink-0 space-y-4 p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="font-medium">{t('knowledgeDetails.subbarFiles')}</h1>
@@ -221,8 +221,8 @@ export function KnowledgeFileBrowser() {
         )}
       </CardHeader>
 
-      <CardContent className="px-5 py-0">
-        <Table rootClassName="max-h-[calc(100vh-250px)]">
+      <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden px-5 py-0">
+        <Table rootClassName="min-h-0 flex-1 overflow-auto">
           <TableHeader>
             <TableRow>
               <TableHead className="w-10">
@@ -350,7 +350,7 @@ export function KnowledgeFileBrowser() {
             )}
           </TableBody>
         </Table>
-        <div className="flex justify-end py-4">
+        <div className="flex shrink-0 justify-end py-4">
           <RAGFlowPagination
             current={page}
             pageSize={pageSize}

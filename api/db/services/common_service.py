@@ -265,6 +265,11 @@ class CommonService:
     @DB.connection_context()
     @retry_db_operation
     def update_by_id(cls, pid, data):
+        return cls.update_by_id_in_transaction(pid, data)
+
+    @classmethod
+    def update_by_id_in_transaction(cls, pid, data):
+        """Update one record while reusing an already-open transaction."""
         # Update a single record by ID
         # Args:
         #     pid: Record ID

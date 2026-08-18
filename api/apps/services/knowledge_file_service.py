@@ -372,7 +372,9 @@ class KnowledgeFileService:
 
         with DB.atomic():
             for entry in entries:
-                if entry.parent_id != destination.id and not FileService.update_by_id(entry.id, {"parent_id": destination.id}):
+                if entry.parent_id != destination.id and not FileService.update_by_id_in_transaction(
+                    entry.id, {"parent_id": destination.id}
+                ):
                     raise RuntimeError("Database error (File move)!")
         return {"moved": len(entries)}
 

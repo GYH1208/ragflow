@@ -164,3 +164,27 @@ test('opens folders and only exposes move/delete when a folder is selected', () 
   expect(actions).toHaveTextContent('common.delete');
   expect(actions).not.toHaveTextContent('knowledgeDetails.run');
 });
+
+test('keeps pagination visible while the file table owns the scroll area', () => {
+  render(React.createElement(KnowledgeFileBrowser));
+
+  expect(screen.getByRole('article')).toHaveClass(
+    'flex',
+    'min-h-0',
+    'flex-col',
+    'overflow-hidden',
+  );
+  expect(screen.getByRole('table').parentElement?.parentElement).toHaveClass(
+    'flex',
+    'min-h-0',
+    'flex-1',
+    'flex-col',
+    'overflow-hidden',
+  );
+  expect(screen.getByRole('table').parentElement).toHaveClass(
+    'min-h-0',
+    'flex-1',
+    'overflow-auto',
+  );
+  expect(screen.getByText('pagination').parentElement).toHaveClass('shrink-0');
+});

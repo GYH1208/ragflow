@@ -117,11 +117,13 @@ def service_fixture(monkeypatch):
         "get_by_ids",
         classmethod(lambda cls, ids, cols=None: [SimpleNamespace(**documents[item_id]) for item_id in ids if item_id in documents]),
     )
-    monkeypatch.setattr(
-        FileService,
-        "update_by_id",
-        classmethod(lambda cls, entry_id, values: [setattr(entries[entry_id], key, value) for key, value in values.items()] or True),
-    )
+    def update_entry(_cls, entry_id, values):
+        for key, value in values.items():
+            setattr(entries[entry_id], key, value)
+        return True
+
+    monkeypatch.setattr(FileService, "update_by_id", classmethod(update_entry))
+    monkeypatch.setattr(FileService, "update_by_id_in_transaction", classmethod(update_entry))
     monkeypatch.setattr(
         FileService,
         "insert",
@@ -284,6 +286,44 @@ def test_move_document_changes_only_file_parent(service_fixture, monkeypatch):
     assert result == {"moved": 1}
     assert nested_file.parent_id == root.id
     assert nested_file.location == original_location
+
+
+def test_move_entry_reuses_the_open_database_transaction(service_fixture, monkeypatch):
+    kb, tenant_id, root, _top_folder, _nested_folder, nested_file, _root_file = service_fixture
+    transaction_state = {"open": False}
+
+    @contextmanager
+    def guarded_atomic():
+        transaction_state["open"] = True
+        try:
+            yield
+        finally:
+            transaction_state["open"] = False
+
+    def connection_scoped_update(_cls, _entry_id, _values):
+        if transaction_state["open"]:
+            raise RuntimeError("Attempting to close database while transaction is open.")
+        return True
+
+    def transaction_scoped_update(_cls, entry_id, values):
+        assert transaction_state["open"]
+        for key, value in values.items():
+            setattr(kb._entries[entry_id], key, value)
+        return True
+
+    monkeypatch.setattr(knowledge_file_service_module.DB, "atomic", guarded_atomic)
+    monkeypatch.setattr(FileService, "update_by_id", classmethod(connection_scoped_update))
+    monkeypatch.setattr(
+        FileService,
+        "update_by_id_in_transaction",
+        classmethod(transaction_scoped_update),
+        raising=False,
+    )
+
+    result = KnowledgeFileService.move_entries(kb, tenant_id, [nested_file.id], root.id)
+
+    assert result == {"moved": 1}
+    assert nested_file.parent_id == root.id
 
 
 def test_move_folder_rejects_descendant_destination(service_fixture):
