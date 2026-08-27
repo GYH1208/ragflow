@@ -16,7 +16,10 @@ export function PermissionFormField() {
   const isSuperuser = Boolean(userInfo?.is_superuser);
   const permissionOptions = useMemo(() => {
     return Object.values(PermissionRole).map((x) => ({
-      label: t('knowledgeConfiguration.' + x),
+      label:
+        x === PermissionRole.Team
+          ? t('setting.specifiedTeam')
+          : t('knowledgeConfiguration.' + x),
       value: x,
     }));
   }, [t]);

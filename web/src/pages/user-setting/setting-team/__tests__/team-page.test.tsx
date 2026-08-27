@@ -95,6 +95,7 @@ const translations: Record<string, string> = {
   'setting.role': '状态',
   'setting.selectTeam': '请选择团队',
   'setting.teamMembers': '团队成员',
+  'setting.teamManagement': '团队管理',
   'setting.teamName': '团队名称',
   'setting.teamOperationFailed': '团队操作失败',
   'setting.workspace': '工作区',
@@ -267,6 +268,12 @@ beforeEach(() => {
     loading: leavingTeam,
     leaveTeam: mockLeaveTeam as never,
   }));
+});
+
+test('renders the localized team management page title', () => {
+  render(<UserSettingTeam />);
+
+  expect(screen.getByRole('heading', { name: '团队管理' })).toBeInTheDocument();
 });
 
 test('shows creation and governance controls only to a superuser managing an owned team', () => {

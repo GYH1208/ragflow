@@ -520,8 +520,8 @@ class DocumentService(CommonService):
         chunk_index_name = search.index_name(tenant_id)
         try:
             chunk_index_exists = settings.docStoreConn.index_exist(chunk_index_name, doc.kb_id)
-        except Exception as e:
-            logging.warning(f"Failed to inspect chunk index for document {doc.id}: {e}")
+        except Exception as e:  # noqa: BLE001 -- cleanup must remain best-effort after the DB commit
+            logging.getLogger(__name__).warning("Failed to inspect chunk index for document %s: %s", doc.id, e)
             chunk_index_exists = False
 
         # Cancel all running tasks first using preset function in task_service.py --- set cancel flag in Redis

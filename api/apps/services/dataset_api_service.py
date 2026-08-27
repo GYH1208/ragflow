@@ -113,10 +113,10 @@ def _attach_team_names(datasets: list[dict]) -> list[dict]:
     team_map = {}
     if team_ids:
         teams = TeamService.query(id=team_ids, status=StatusEnum.VALID.value)
-        team_map = {team.id: team.name for team in teams}
+        team_map = {(team.tenant_id, team.id): team.name for team in teams}
     for dataset in datasets:
         dataset.setdefault("team_id", None)
-        dataset["team_name"] = team_map.get(dataset["team_id"])
+        dataset["team_name"] = team_map.get((dataset.get("tenant_id"), dataset["team_id"]))
     return datasets
 
 

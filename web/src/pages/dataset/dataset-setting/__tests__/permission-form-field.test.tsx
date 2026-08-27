@@ -66,6 +66,7 @@ jest.mock('react-i18next', () => ({
         'knowledgeConfiguration.me': '只有我',
         'knowledgeConfiguration.team': '团队',
         'knowledgeConfiguration.teamPlaceholder': '请选择团队',
+        'setting.specifiedTeam': '指定团队',
       })[key] ?? key,
   }),
 }));
@@ -198,6 +199,14 @@ describe('PermissionFormField', () => {
         ]),
       );
     }
+  });
+
+  it('renders the team permission option as specified team', () => {
+    render(<PermissionFormHarness />);
+
+    expect(
+      screen.getByRole('option', { name: '指定团队' }),
+    ).toBeInTheDocument();
   });
 
   it('clears team_id when switching to me', async () => {

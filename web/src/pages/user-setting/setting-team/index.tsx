@@ -88,7 +88,7 @@ const UserSettingTeam = () => {
       header={
         <header className="flex items-center justify-between gap-4">
           <h2 className="text-2xl font-medium text-text-primary">
-            {userInfo?.nickname} {t('setting.workspace')}
+            {t('setting.teamManagement')}
           </h2>
           {userInfo?.is_superuser && (
             <Button onClick={() => setTeamDialog({ mode: 'create' })}>

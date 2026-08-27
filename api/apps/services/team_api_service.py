@@ -30,11 +30,11 @@ def _team_name_exists(admin_id: str, name: str, *, exclude_id: str | None = None
     return any(team.id != exclude_id for team in teams)
 
 
-def _team_counts(team_id: str) -> tuple[int, int]:
+def _team_counts(team: Team) -> tuple[int, int]:
     member_count = (
         TeamMember.select()
         .where(
-            TeamMember.team_id == team_id,
+            TeamMember.team_id == team.id,
             TeamMember.state == TeamMemberState.ACTIVE.value,
             TeamMember.status == StatusEnum.VALID.value,
         )
@@ -43,7 +43,9 @@ def _team_counts(team_id: str) -> tuple[int, int]:
     dataset_count = (
         Knowledgebase.select()
         .where(
-            Knowledgebase.team_id == team_id,
+            Knowledgebase.team_id == team.id,
+            Knowledgebase.tenant_id == team.tenant_id,
+            Knowledgebase.permission == TenantPermission.TEAM.value,
             Knowledgebase.status == StatusEnum.VALID.value,
         )
         .count()
@@ -52,7 +54,7 @@ def _team_counts(team_id: str) -> tuple[int, int]:
 
 
 def _serialize_team(team: Team, membership_state: str, *, can_manage: bool) -> dict:
-    member_count, dataset_count = _team_counts(team.id)
+    member_count, dataset_count = _team_counts(team)
     return {
         **team.to_dict(),
         "membership_state": membership_state,

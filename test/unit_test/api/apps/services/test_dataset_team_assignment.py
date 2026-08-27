@@ -69,7 +69,11 @@ def _stub_team_queries(monkeypatch, names=None):
 
     def query_teams(**kwargs):
         calls.append(list(kwargs.get("id", [])))
-        return [SimpleNamespace(id=team_id, name=name) for team_id, name in names.items() if team_id in kwargs.get("id", [])]
+        return [
+            SimpleNamespace(id=team_id, tenant_id="owner-1", name=name)
+            for team_id, name in names.items()
+            if team_id in kwargs.get("id", [])
+        ]
 
     monkeypatch.setattr(TeamService, "query", query_teams)
     return calls
@@ -418,6 +422,22 @@ def test_list_datasets_uses_active_team_ids_and_batches_team_names(monkeypatch):
     assert captured["team_ids"] == ["team-1"]
     assert [item["team_name"] for item in result["data"]] == ["Finance", None]
     assert team_calls == [["team-1"]]
+
+
+def test_team_name_attachment_requires_matching_dataset_and_team_owner(monkeypatch):
+    monkeypatch.setattr(
+        TeamService,
+        "query",
+        lambda **_kwargs: [SimpleNamespace(id="team-shared", tenant_id="owner-2", name="Owner 2 team")],
+    )
+    datasets = [
+        {"id": "kb-corrupt", "tenant_id": "owner-1", "team_id": "team-shared", "permission": "team"},
+        {"id": "kb-valid", "tenant_id": "owner-2", "team_id": "team-shared", "permission": "team"},
+    ]
+
+    result = dataset_api_service._attach_team_names(datasets)
+
+    assert [dataset["team_name"] for dataset in result] == [None, "Owner 2 team"]
 
 
 def test_list_owner_filter_does_not_replace_active_team_visibility(monkeypatch):

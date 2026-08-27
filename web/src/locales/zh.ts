@@ -1492,6 +1492,7 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取实体和关系
       invite: '邀请成员',
       agree: '同意',
       refuse: '拒绝',
+      teamManagement: '团队管理',
       teamMembers: '团队成员',
       joinedTeams: '加入的团队',
       createTeam: '创建团队',

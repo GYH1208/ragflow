@@ -462,6 +462,10 @@ def test_list_teams_returns_owned_active_and_invited_entries_with_counts(team_da
     _member("other-member", "owned", "user-2")
     _kb("kb-1", "admin-1", team_id="owned")
     _kb("kb-2", "admin-1", team_id="owned")
+    _kb("kb-wrong-owner", "admin-2", team_id="owned")
+    corrupt_private = _kb("kb-private", "admin-1", team_id="owned")
+    corrupt_private.permission = TenantPermission.ME.value
+    corrupt_private.save()
 
     ok, teams = list_teams("admin-1")
 
