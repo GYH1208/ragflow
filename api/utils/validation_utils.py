@@ -17,14 +17,14 @@ import logging
 import math
 import pathlib
 import re
-from collections import Counter
 import string
+from collections import Counter
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from quart import Request
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, field_validator, model_validator, ValidationInfo
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_core import PydanticCustomError
+from quart import Request
 from werkzeug.exceptions import BadRequest, UnsupportedMediaType
 
 from api.constants import DATASET_NAME_LIMIT, FILE_NAME_LEN_LIMIT
@@ -542,6 +542,7 @@ class CreateDatasetReq(Base):
     category_id: Annotated[str | None, Field(default=None)]
     embedding_model: Annotated[str | None, Field(default=None, max_length=255, serialization_alias="embd_id")]
     permission: Annotated[Literal["me", "team"], Field(default="me", min_length=1, max_length=16)]
+    team_id: Annotated[str | None, Field(default=None)]
     parse_type: Annotated[int | None, Field(default=None, ge=0, le=64)]
     pipeline_id: Annotated[str | None, Field(default=None, min_length=32, max_length=32, serialization_alias="pipeline_id")]
     chunk_method: Annotated[str | None, Field(default=None, serialization_alias="parser_id")]
@@ -552,6 +553,13 @@ class CreateDatasetReq(Base):
     @field_validator("category_id", mode="before")
     @classmethod
     def validate_category_id(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        return validate_uuid1_hex(value)
+
+    @field_validator("team_id", mode="before")
+    @classmethod
+    def validate_team_id(cls, value: Any) -> str | None:
         if value is None:
             return None
         return validate_uuid1_hex(value)

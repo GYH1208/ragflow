@@ -62,9 +62,12 @@ def _install_cv2_stub_if_unavailable():
 
 _install_cv2_stub_if_unavailable()
 
+from api.common.check_team_permission import check_kb_team_permission
 from api.db import TenantPermission
+from api.db.db_models import Knowledgebase
 from api.db.services.document_service import DocumentService
 from api.db.services.knowledgebase_service import KnowledgebaseService
+from api.db.services.team_service import TeamMemberService
 from common.constants import StatusEnum
 
 
@@ -81,33 +84,129 @@ def test_private_dataset_is_not_accessible_to_other_tenant_member(monkeypatch):
         id="kb-private",
         tenant_id="owner-1",
         permission=TenantPermission.ME.value,
+        team_id=None,
         status=StatusEnum.VALID.value,
     )
 
     monkeypatch.setattr(KnowledgebaseService, "get_by_id", classmethod(lambda cls, kb_id: (True, kb)))
-    monkeypatch.setattr(
-        "api.db.services.knowledgebase_service.TenantService.get_joined_tenants_by_user_id",
-        lambda _user_id: [{"tenant_id": "owner-1"}],
-    )
+    monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda _user_id: ["team-1"])
 
     assert _unwrapped_kb_accessible()(KnowledgebaseService, "kb-private", "member-2") is False
 
 
-def test_team_dataset_is_accessible_to_joined_tenant_member(monkeypatch):
+def test_dataset_owner_can_access_every_valid_dataset(monkeypatch):
     kb = SimpleNamespace(
         id="kb-team",
         tenant_id="owner-1",
         permission=TenantPermission.TEAM.value,
+        team_id="team-1",
         status=StatusEnum.VALID.value,
     )
 
-    monkeypatch.setattr(KnowledgebaseService, "get_by_id", classmethod(lambda cls, kb_id: (True, kb)))
+    monkeypatch.setattr(KnowledgebaseService, "get_by_id", classmethod(lambda cls, _kb_id: (True, kb)))
+
+    assert _unwrapped_kb_accessible()(KnowledgebaseService, "kb-team", "owner-1") is True
+
+
+def test_team_dataset_is_accessible_to_active_team_member(monkeypatch):
+    kb = SimpleNamespace(
+        id="kb-team",
+        tenant_id="owner-1",
+        permission=TenantPermission.TEAM.value,
+        team_id="team-1",
+        status=StatusEnum.VALID.value,
+    )
+
+    monkeypatch.setattr(KnowledgebaseService, "get_by_id", classmethod(lambda cls, _kb_id: (True, kb)))
+    monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda _user_id: ["team-1"])
+    monkeypatch.setattr(
+        "api.db.services.knowledgebase_service.TenantService.get_joined_tenants_by_user_id",
+        lambda _user_id: [],
+    )
+
+    assert _unwrapped_kb_accessible()(KnowledgebaseService, "kb-team", "member-2") is True
+
+
+def test_team_dataset_rejects_member_of_different_team(monkeypatch):
+    kb = SimpleNamespace(
+        id="kb-team",
+        tenant_id="owner-1",
+        permission=TenantPermission.TEAM.value,
+        team_id="team-1",
+        status=StatusEnum.VALID.value,
+    )
+
+    monkeypatch.setattr(KnowledgebaseService, "get_by_id", classmethod(lambda cls, _kb_id: (True, kb)))
+    monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda _user_id: ["team-2"])
     monkeypatch.setattr(
         "api.db.services.knowledgebase_service.TenantService.get_joined_tenants_by_user_id",
         lambda _user_id: [{"tenant_id": "owner-1"}],
     )
 
-    assert _unwrapped_kb_accessible()(KnowledgebaseService, "kb-team", "member-2") is True
+    assert _unwrapped_kb_accessible()(KnowledgebaseService, "kb-team", "member-2") is False
+
+
+def test_team_dataset_rejects_invited_or_invalid_team_member(monkeypatch):
+    kb = SimpleNamespace(
+        id="kb-team",
+        tenant_id="owner-1",
+        permission=TenantPermission.TEAM.value,
+        team_id="team-1",
+        status=StatusEnum.VALID.value,
+    )
+
+    monkeypatch.setattr(KnowledgebaseService, "get_by_id", classmethod(lambda cls, _kb_id: (True, kb)))
+    monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda _user_id: [])
+    monkeypatch.setattr(
+        "api.db.services.knowledgebase_service.TenantService.get_joined_tenants_by_user_id",
+        lambda _user_id: [{"tenant_id": "owner-1"}],
+    )
+
+    assert _unwrapped_kb_accessible()(KnowledgebaseService, "kb-team", "member-2") is False
+
+
+def test_legacy_user_tenant_membership_does_not_grant_dataset_access(monkeypatch):
+    kb = SimpleNamespace(
+        id="kb-team",
+        tenant_id="owner-1",
+        permission=TenantPermission.TEAM.value,
+        team_id="team-1",
+        status=StatusEnum.VALID.value,
+    )
+
+    monkeypatch.setattr(KnowledgebaseService, "get_by_id", classmethod(lambda cls, _kb_id: (True, kb)))
+    monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda _user_id: [])
+    monkeypatch.setattr(
+        "api.db.services.knowledgebase_service.TenantService.get_joined_tenants_by_user_id",
+        lambda _user_id: [{"tenant_id": "owner-1"}],
+    )
+
+    assert _unwrapped_kb_accessible()(KnowledgebaseService, "kb-team", "legacy-member") is False
+
+
+def test_compatibility_helper_uses_team_authorization_for_dict_and_model(monkeypatch):
+    kb_dict = {
+        "id": "kb-team-dict",
+        "tenant_id": "owner-1",
+        "permission": TenantPermission.TEAM.value,
+        "team_id": "team-1",
+        "status": StatusEnum.VALID.value,
+    }
+    kb_model = Knowledgebase(
+        id="kb-team-model",
+        tenant_id="owner-1",
+        permission=TenantPermission.TEAM.value,
+        team_id="team-1",
+        status=StatusEnum.VALID.value,
+    )
+    monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda _user_id: ["team-1"])
+    monkeypatch.setattr(
+        "api.db.services.user_service.TenantService.get_joined_tenants_by_user_id",
+        lambda _user_id: [],
+    )
+
+    assert check_kb_team_permission(kb_dict, "member-2") is True
+    assert check_kb_team_permission(kb_model, "member-2") is True
 
 
 def test_document_access_respects_dataset_permission(monkeypatch):

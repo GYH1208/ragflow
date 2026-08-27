@@ -12,6 +12,7 @@ from api.apps.services.dataset_api_service import (
 from api.db.services.connector_service import Connector2KbService
 from api.db.services.knowledgebase_category_service import KnowledgebaseCategoryService
 from api.db.services.knowledgebase_service import KnowledgebaseService
+from api.db.services.team_service import TeamMemberService
 from api.db.services.user_service import TenantService, UserService
 
 
@@ -75,10 +76,10 @@ def test_validate_category_assignment_accepts_none():
 
 def test_list_datasets_forwards_real_category_filter(monkeypatch):
     captured = {}
-    monkeypatch.setattr(TenantService, "get_joined_tenants_by_user_id", lambda _user_id: [])
+    monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda _user_id: [])
     monkeypatch.setattr(UserService, "get_by_ids", lambda _ids: [])
 
-    def fake_get_list(*args):
+    def fake_get_list(*args, **_kwargs):
         captured["args"] = args
         return [], 0
 
@@ -96,10 +97,10 @@ def test_list_datasets_forwards_real_category_filter(monkeypatch):
 
 def test_list_datasets_maps_uncategorized_filter(monkeypatch):
     captured = {}
-    monkeypatch.setattr(TenantService, "get_joined_tenants_by_user_id", lambda _user_id: [])
+    monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda _user_id: [])
     monkeypatch.setattr(UserService, "get_by_ids", lambda _ids: [])
 
-    def fake_get_list(*args):
+    def fake_get_list(*args, **_kwargs):
         captured["args"] = args
         return [], 0
 

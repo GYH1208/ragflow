@@ -14,27 +14,24 @@
 #  limitations under the License.
 #
 
+from types import SimpleNamespace
 
-from api.db import TenantPermission
 from api.db.db_models import File, Knowledgebase
 from api.db.services.file_service import FileService
 from api.db.services.knowledgebase_service import KnowledgebaseService
-from api.db.services.user_service import TenantService
+from api.db.services.team_service import TeamAuthorizationService
+from common.constants import StatusEnum
 
 
 def check_kb_team_permission(kb: dict | Knowledgebase, other: str) -> bool:
-    kb = kb.to_dict() if isinstance(kb, Knowledgebase) else kb
-
-    kb_tenant_id = kb["tenant_id"]
-
-    if kb_tenant_id == other:
-        return True
-
-    if kb["permission"] != TenantPermission.TEAM:
-        return False
-
-    joined_tenants = TenantService.get_joined_tenants_by_user_id(other)
-    return any(tenant["tenant_id"] == kb_tenant_id for tenant in joined_tenants)
+    if isinstance(kb, dict):
+        kb = SimpleNamespace(
+            tenant_id=kb["tenant_id"],
+            permission=kb["permission"],
+            team_id=kb.get("team_id"),
+            status=kb.get("status", StatusEnum.VALID.value),
+        )
+    return TeamAuthorizationService.can_access_kb(other, kb)
 
 
 def check_file_team_permission(file: dict | File, other: str) -> bool:

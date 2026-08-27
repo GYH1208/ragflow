@@ -53,6 +53,15 @@ def test_dataset_category_id_accepts_none_or_uuid1_hex():
         CreateDatasetReq(name="kb", category_id="not-a-uuid")
 
 
+def test_dataset_team_id_accepts_none_and_normalizes_uuid1():
+    team_uuid = uuid.uuid1()
+
+    assert CreateDatasetReq(name="kb", team_id=None).team_id is None
+    assert CreateDatasetReq(name="kb", team_id=str(team_uuid)).team_id == team_uuid.hex
+    with pytest.raises(ValidationError):
+        CreateDatasetReq(name="kb", team_id="not-a-uuid")
+
+
 def test_update_category_requires_valid_uuid1_path_id():
     category_id = uuid.uuid1().hex
     request = UpdateDatasetCategoryReq(name="财务", category_id=category_id)
