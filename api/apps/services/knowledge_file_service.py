@@ -176,6 +176,34 @@ class KnowledgeFileService:
                 return False
         return True
 
+    @classmethod
+    def _resolve_kb_documents_by_file(cls, kb, links):
+        document_ids = list(dict.fromkeys(link.document_id for link in links))
+        documents = list(DocumentService.get_by_ids(document_ids)) if document_ids else []
+        document_by_id = {
+            document["id"] if isinstance(document, dict) else document.id: document
+            for document in documents
+        }
+        documents_by_file = {}
+        invalid_file_ids = set()
+        for link in links:
+            document = document_by_id.get(link.document_id)
+            document_kb_id = None
+            if document is not None:
+                document_kb_id = document.get("kb_id") if isinstance(document, dict) else document.kb_id
+            if document is None or str(document_kb_id) != str(kb.id):
+                invalid_file_ids.add(link.file_id)
+                continue
+            documents_by_file.setdefault(link.file_id, []).append(document)
+        return documents_by_file, invalid_file_ids
+
+    @staticmethod
+    def _require_single_kb_document(file_id, documents_by_file, invalid_file_ids):
+        documents = documents_by_file.get(file_id, [])
+        if file_id in invalid_file_ids or len(documents) != 1:
+            raise RuntimeError("File/document association crosses the knowledge base boundary.")
+        return documents[0]
+
     @staticmethod
     def _sort_entries(entries, orderby, desc):
         allowed_order_fields = {"name", "create_time", "update_time", "size"}
@@ -195,16 +223,14 @@ class KnowledgeFileService:
         folders = [entry for entry in children if entry.type == FileType.FOLDER.value]
         files = [entry for entry in children if entry.type != FileType.FOLDER.value]
         links = File2DocumentService.get_by_file_ids([entry.id for entry in files]) if files else []
-        link_by_file_id = {link.file_id: link.document_id for link in links}
-        documents = list(DocumentService.get_by_ids(list(link_by_file_id.values()))) if link_by_file_id else []
-        document_by_id = {document.id: document for document in documents}
+        documents_by_file, _invalid_file_ids = cls._resolve_kb_documents_by_file(kb, links)
         path_records = cls._load_path_records(children, root.id)
 
         folder_entries = [cls._serialize_folder(folder, root.id, path_records) for folder in folders]
         document_entries = []
         for file_entry in files:
-            document_id = link_by_file_id.get(file_entry.id)
-            document = document_by_id.get(document_id)
+            linked_documents = documents_by_file.get(file_entry.id, [])
+            document = linked_documents[0] if len(linked_documents) == 1 else None
             if document is not None and cls._document_matches_filters(document, filters):
                 document_entries.append(cls._serialize_document(document, file_entry, root.id, path_records))
 
@@ -399,7 +425,9 @@ class KnowledgeFileService:
             links = File2DocumentService.get_by_file_id(entry.id)
             if not links:
                 raise RuntimeError("Cannot find the document associated with this file.")
-            error = update_document_name_only(links[0].document_id, name)
+            documents_by_file, invalid_file_ids = cls._resolve_kb_documents_by_file(kb, links)
+            document = cls._require_single_kb_document(entry.id, documents_by_file, invalid_file_ids)
+            error = update_document_name_only(document.id, name)
             if error:
                 message = error.get("message", str(error)) if isinstance(error, dict) else str(error)
                 raise RuntimeError(message)
@@ -436,7 +464,14 @@ class KnowledgeFileService:
             raise ValueError("The knowledge base root folder cannot be deleted.")
         files, _folders = cls._collect_descendants_postorder(roots, owner_tenant_id)
         links = File2DocumentService.get_by_file_ids([entry.id for entry in files]) if files else []
-        return len({link.document_id for link in links})
+        documents_by_file, _invalid_file_ids = cls._resolve_kb_documents_by_file(kb, links)
+        return len(
+            {
+                document["id"] if isinstance(document, dict) else document.id
+                for documents in documents_by_file.values()
+                for document in documents
+            }
+        )
 
     @classmethod
     def delete_entries(cls, kb, owner_tenant_id, entry_ids):
@@ -450,12 +485,22 @@ class KnowledgeFileService:
         files, folders = cls._collect_descendants_postorder(roots, owner_tenant_id)
         path_records = cls._load_path_records([*files, *folders], root.id)
         links = File2DocumentService.get_by_file_ids([entry.id for entry in files]) if files else []
-        link_by_file_id = {link.file_id: link.document_id for link in links}
+        documents_by_file, invalid_file_ids = cls._resolve_kb_documents_by_file(kb, links)
+        document_by_file_id = {}
+        for file_entry in files:
+            if file_entry.id not in documents_by_file and file_entry.id not in invalid_file_ids:
+                continue
+            document_by_file_id[file_entry.id] = cls._require_single_kb_document(
+                file_entry.id,
+                documents_by_file,
+                invalid_file_ids,
+            )
         deleted = 0
         failed = []
 
         for file_entry in files:
-            document_id = link_by_file_id.get(file_entry.id)
+            document = document_by_file_id.get(file_entry.id)
+            document_id = document.id if document is not None else None
             error = FileService.delete_docs([document_id], owner_tenant_id) if document_id else ""
             if error:
                 failed.append(

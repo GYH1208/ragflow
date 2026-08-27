@@ -102,7 +102,7 @@ class RAGFlowAzureSpnBlob:
                 time.sleep(1)
         return None
 
-    def obj_exist(self, bucket, fnm):
+    def obj_exist(self, bucket, fnm, tenant_id=None):
         blob = f"{bucket}/{fnm}"
         try:
             client = self.conn.get_blob_client(f"{blob}")

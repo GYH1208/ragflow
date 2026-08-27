@@ -16,6 +16,7 @@
 
 import asyncio
 import importlib.util
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -331,10 +332,211 @@ def test_file_conversion_keeps_target_owner_context_and_actor_audit(monkeypatch)
     monkeypatch.setattr(module.FileService, "get_parser", lambda *_args: "naive")
     monkeypatch.setattr(module.DocumentService, "insert", lambda payload: inserted.append(payload) or SimpleNamespace(id=payload["id"]))
 
-    module._convert_files([source_file.id], [kb], "member-active")
+    module._convert_files([source_file.id], {source_file.id: []}, [kb], "member-active")
 
     assert inserted[0]["kb_id"] == kb.id
     assert inserted[0]["created_by"] == "member-active"
+
+
+def _prepare_file_conversion_route(monkeypatch, *, authorized_kb_ids):
+    module = _load_route_module(monkeypatch, "file2document_api")
+    module.current_user = SimpleNamespace(id="member-active")
+    source_file = SimpleNamespace(id="file-1", type="doc", name="A.txt", location="A.txt", size=3)
+    old_documents = {
+        "doc-team-a": SimpleNamespace(id="doc-team-a", kb_id="kb-team-a"),
+        "doc-private-b": SimpleNamespace(id="doc-private-b", kb_id="kb-private-b"),
+    }
+    knowledge_bases = {
+        "kb-target": SimpleNamespace(
+            id="kb-target",
+            tenant_id="owner-target",
+            parser_id="naive",
+            pipeline_id=None,
+            parser_config={},
+        ),
+        "kb-team-a": SimpleNamespace(id="kb-team-a", tenant_id="owner-a"),
+        "kb-private-b": SimpleNamespace(id="kb-private-b", tenant_id="owner-b"),
+    }
+    old_links = [
+        SimpleNamespace(file_id=source_file.id, document_id="doc-team-a"),
+        SimpleNamespace(file_id=source_file.id, document_id="doc-private-b"),
+    ]
+    scheduled = []
+    removed = []
+
+    class _Future:
+        @staticmethod
+        def add_done_callback(_callback):
+            return None
+
+    class _Loop:
+        @staticmethod
+        def run_in_executor(_executor, function, *args):
+            scheduled.append((function, args))
+            return _Future()
+
+    module.asyncio = SimpleNamespace(get_running_loop=lambda: _Loop())
+    monkeypatch.setattr(
+        module,
+        "get_request_json",
+        lambda: _AwaitableValue({"file_ids": [source_file.id], "kb_ids": ["kb-target"]}),
+    )
+    monkeypatch.setattr(module.FileService, "get_by_ids", lambda _file_ids: [source_file])
+    monkeypatch.setattr(module.FileService, "get_by_id", lambda _file_id: (True, source_file))
+    monkeypatch.setattr(module.File2DocumentService, "get_by_file_id", lambda _file_id: list(old_links))
+    monkeypatch.setattr(
+        module.DocumentService,
+        "get_by_id",
+        lambda document_id: (document_id in old_documents, old_documents.get(document_id)),
+    )
+    monkeypatch.setattr(
+        module.DocumentService,
+        "remove_document",
+        lambda document, owner_tenant_id: removed.append((document.id, owner_tenant_id)),
+    )
+    monkeypatch.setattr(
+        module.KnowledgebaseService,
+        "get_by_id",
+        lambda kb_id: (kb_id in knowledge_bases, knowledge_bases.get(kb_id)),
+    )
+    monkeypatch.setattr(module, "check_file_team_permission", lambda _file, _user_id: True)
+    monkeypatch.setattr(module, "check_kb_team_permission", lambda kb, _user_id: kb.id in authorized_kb_ids)
+    return module, scheduled, removed
+
+
+def test_file_conversion_rejects_when_any_existing_linked_kb_is_unauthorized(monkeypatch):
+    module, scheduled, removed = _prepare_file_conversion_route(
+        monkeypatch,
+        authorized_kb_ids={"kb-target", "kb-team-a"},
+    )
+
+    result = _run(inspect.unwrap(module.convert)())
+
+    assert result["code"] != 0
+    assert scheduled == []
+    assert removed == []
+
+
+def test_file_conversion_schedules_only_preauthorized_existing_documents(monkeypatch):
+    module, scheduled, _removed = _prepare_file_conversion_route(
+        monkeypatch,
+        authorized_kb_ids={"kb-target", "kb-team-a", "kb-private-b"},
+    )
+
+    result = _run(inspect.unwrap(module.convert)())
+
+    assert result["code"] == 0
+    assert len(scheduled) == 1
+    function, args = scheduled[0]
+    assert function is module._convert_files
+    assert args[0] == ["file-1"]
+    assert [(doc.id, owner_id) for doc, owner_id in args[1]["file-1"]] == [
+        ("doc-team-a", "owner-a"),
+        ("doc-private-b", "owner-b"),
+    ]
+    assert [kb.id for kb in args[2]] == ["kb-target"]
+    assert args[3] == "member-active"
+
+
+def test_file_conversion_worker_never_expands_deletion_from_bare_file_id(monkeypatch):
+    module = _load_route_module(monkeypatch, "file2document_api")
+    old_document = SimpleNamespace(id="doc-team-a", kb_id="kb-team-a")
+    target_kb = _team_kb()
+    source_file = SimpleNamespace(id="file-1", type="doc", name="A.txt", location="A.txt", size=3)
+    removed = []
+    deleted_links = []
+
+    monkeypatch.setattr(
+        module.File2DocumentService,
+        "get_by_file_id",
+        lambda _file_id: pytest.fail("worker must not rediscover links from a bare file id"),
+    )
+    monkeypatch.setattr(
+        module.File2DocumentService,
+        "delete_by_file_id",
+        lambda _file_id: pytest.fail("worker must not delete links by a bare file id"),
+    )
+    monkeypatch.setattr(module.File2DocumentService, "delete_by_document_id", lambda doc_id: deleted_links.append(doc_id))
+    monkeypatch.setattr(module.File2DocumentService, "insert", lambda payload: payload)
+    monkeypatch.setattr(module.FileService, "get_by_id", lambda _file_id: (True, source_file))
+    monkeypatch.setattr(module.FileService, "get_parser", lambda *_args: "naive")
+    monkeypatch.setattr(
+        module.DocumentService,
+        "remove_document",
+        lambda doc, owner_id: removed.append((doc.id, owner_id)),
+    )
+    monkeypatch.setattr(module.DocumentService, "insert", lambda payload: SimpleNamespace(id=payload["id"]))
+
+    module._convert_files(
+        [source_file.id],
+        {source_file.id: [(old_document, "owner-a")]},
+        [target_kb],
+        "member-active",
+    )
+
+    assert removed == [(old_document.id, "owner-a")]
+    assert deleted_links == [old_document.id]
+
+
+def test_web_upload_storage_calls_use_kb_owner_context(monkeypatch):
+    module = _load_route_module(monkeypatch, "document_api")
+    kb = _team_kb()
+    storage_calls = []
+
+    class _Storage:
+        @staticmethod
+        def obj_exist(bucket, location, owner_tenant_id):
+            storage_calls.append(("exists", bucket, location, owner_tenant_id))
+            return False
+
+        @staticmethod
+        def put(bucket, location, blob, owner_tenant_id):
+            storage_calls.append(("put", bucket, location, blob, owner_tenant_id))
+
+    module.request = SimpleNamespace(form=_AwaitableValue({"name": "Policy", "url": "https://example.com"}))
+    monkeypatch.setattr(module, "is_valid_url", lambda _url: True)
+    monkeypatch.setattr(module, "html2pdf", lambda _url: b"pdf")
+    monkeypatch.setattr(module, "duplicate_name", lambda *_args, **_kwargs: "Policy.pdf")
+    monkeypatch.setattr(module, "filename_type", lambda _name: "pdf")
+    monkeypatch.setattr(module, "thumbnail", lambda *_args: "")
+    monkeypatch.setattr(module, "get_uuid", lambda: "doc-1")
+    monkeypatch.setattr(module.FileService, "get_root_folder", lambda _owner_id: {"id": "root"})
+    monkeypatch.setattr(module.FileService, "init_knowledgebase_docs", lambda *_args: None)
+    monkeypatch.setattr(module.FileService, "get_kb_folder", lambda _owner_id: {"id": "kb-root"})
+    monkeypatch.setattr(module.FileService, "new_a_file_from_kb", lambda *_args: {"id": "kb-folder"})
+    monkeypatch.setattr(module.FileService, "add_file_from_kb", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module.DocumentService, "insert", lambda _doc: None)
+    monkeypatch.setattr(module.settings, "STORAGE_IMPL", _Storage())
+
+    result = _run(module._upload_web_document(kb.id, kb, "member-active"))
+
+    assert result["code"] == 0
+    assert storage_calls == [
+        ("exists", kb.id, "Policy.pdf", kb.tenant_id),
+        ("put", kb.id, "Policy.pdf", b"pdf", kb.tenant_id),
+    ]
+
+
+def test_chunk_authorization_uses_the_first_fetched_kb_object(monkeypatch):
+    module = _load_route_module(monkeypatch, "chunk_api")
+    first_kb = _team_kb()
+    second_kb = SimpleNamespace(**{**vars(first_kb), "team_id": "team-other"})
+    fetched = iter([(True, first_kb), (True, second_kb)])
+    checked = []
+
+    monkeypatch.setattr(module.KnowledgebaseService, "get_by_id", lambda _kb_id: next(fetched))
+    monkeypatch.setattr(module.KnowledgebaseService, "accessible", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        module,
+        "check_kb_team_permission",
+        lambda kb, user_id: checked.append((kb, user_id)) or True,
+        raising=False,
+    )
+
+    result = module._get_authorized_kb(first_kb.id, "member-active")
+
+    assert result is first_kb
+    assert checked == [(first_kb, "member-active")]
 
 
 @pytest.mark.asyncio

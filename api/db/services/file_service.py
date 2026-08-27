@@ -553,6 +553,8 @@ class FileService(CommonService):
         parser_config_override: dict | None = None,
         relative_paths: list[str] | None = None,
     ):
+        if str(owner_tenant_id) != str(kb.tenant_id):
+            raise PermissionError("Knowledge base owner context does not match the requested tenant.")
         root_folder = self.get_root_folder(owner_tenant_id)
         pf_id = root_folder["id"]
         self.init_knowledgebase_docs(pf_id, owner_tenant_id)
@@ -639,20 +641,20 @@ class FileService(CommonService):
                     location = "/".join([*relative_segments[:-1], filename])
                 else:
                     location = filename if not safe_parent_path else f"{safe_parent_path}/{filename}"
-                while settings.STORAGE_IMPL.obj_exist(kb.id, location):
+                while settings.STORAGE_IMPL.obj_exist(kb.id, location, owner_tenant_id):
                     location += "_"
 
                 blob = file.read()
                 if filetype == FileType.PDF.value:
                     blob = read_potential_broken_pdf(blob)
-                settings.STORAGE_IMPL.put(kb.id, location, blob)
+                settings.STORAGE_IMPL.put(kb.id, location, blob, owner_tenant_id)
 
 
                 img = thumbnail_img(filename, blob)
                 thumbnail_location = ""
                 if img is not None:
                     thumbnail_location = f"thumbnail_{doc_id}.png"
-                    settings.STORAGE_IMPL.put(kb.id, thumbnail_location, img)
+                    settings.STORAGE_IMPL.put(kb.id, thumbnail_location, img, owner_tenant_id)
 
                 incoming_fp = getattr(file, "fingerprint", None)
                 doc = {

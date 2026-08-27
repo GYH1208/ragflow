@@ -100,14 +100,19 @@ def _mock_folder_parent_lock(monkeypatch, folders):
 def test_connector_upload_call_uses_owner_context_and_audit_keyword(monkeypatch):
     from api.db.services.connector_service import SyncLogsService
 
-    kb = SimpleNamespace(id="kb-1")
+    kb = SimpleNamespace(id="kb-1", tenant_id="kb-owner")
     seen = []
+    run_tenants = []
 
     def upload_document(_kb, files, owner_tenant_id, *, created_by, src):
         seen.append((owner_tenant_id, created_by, src, files[0].filename))
-        return [], []
+        return [], [({"id": "doc-1", "name": files[0].filename}, b"policy")]
 
     monkeypatch.setattr(FileService, "upload_document", upload_document)
+    monkeypatch.setattr(
+        "api.db.services.connector_service.DocumentService.run",
+        lambda owner_tenant_id, _doc, _kb_table_num_map: run_tenants.append(owner_tenant_id),
+    )
 
     errors, document_ids = SyncLogsService.duplicate_and_parse(
         kb,
@@ -119,14 +124,118 @@ def test_connector_upload_call_uses_owner_context_and_audit_keyword(monkeypatch)
                 "blob": b"policy",
             }
         ],
-        "owner-1",
+        "connector-owner",
         "connector/source-1",
-        auto_parse=False,
+        auto_parse=True,
     )
 
     assert errors == []
-    assert document_ids == []
-    assert seen == [("owner-1", "owner-1", "connector/source-1", "Policy.txt")]
+    assert document_ids == ["doc-1"]
+    assert seen == [("kb-owner", "connector-owner", "connector/source-1", "Policy.txt")]
+    assert run_tenants == ["kb-owner"]
+
+
+def test_connector_link_rejects_owner_mismatch_before_persisting(monkeypatch):
+    from api.db.services.connector_service import Connector2KbService, ConnectorService, SyncLogsService
+    from api.db.services.knowledgebase_service import KnowledgebaseService
+
+    kb = SimpleNamespace(id="kb-1", tenant_id="kb-owner")
+    connector = SimpleNamespace(id="connector-1", tenant_id="connector-owner", config={})
+    saved = []
+    scheduled = []
+    monkeypatch.setattr(KnowledgebaseService, "get_by_id", lambda _kb_id: (True, kb))
+    monkeypatch.setattr(ConnectorService, "get_by_id", lambda _connector_id: (True, connector))
+    monkeypatch.setattr(Connector2KbService, "query", classmethod(lambda cls, **_kwargs: []))
+    monkeypatch.setattr(Connector2KbService, "save", classmethod(lambda cls, **payload: saved.append(payload) or True))
+    monkeypatch.setattr(SyncLogsService, "schedule", lambda *args, **kwargs: scheduled.append((args, kwargs)))
+
+    errors = Connector2KbService.link_connectors(
+        kb.id,
+        [{"id": connector.id, "auto_parse": "1"}],
+        kb.tenant_id,
+    )
+
+    assert "owner" in errors.lower()
+    assert saved == []
+    assert scheduled == []
+
+
+def test_connector_rebuild_deletes_documents_with_kb_owner_context(monkeypatch):
+    from api.db.services.connector_service import ConnectorService, SyncLogsService
+    from api.db.services.knowledgebase_service import KnowledgebaseService
+
+    kb = SimpleNamespace(id="kb-1", tenant_id="kb-owner")
+    connector = SimpleNamespace(id="connector-1", tenant_id="kb-owner", source="s3", config={})
+    document = SimpleNamespace(id="doc-1")
+    deleted = []
+    monkeypatch.setattr(KnowledgebaseService, "get_by_id", lambda _kb_id: (True, kb))
+    monkeypatch.setattr(ConnectorService, "get_by_id", lambda _connector_id: (True, connector))
+    monkeypatch.setattr(
+        "api.db.services.connector_service.DocumentService.query",
+        lambda **_kwargs: [document],
+    )
+    monkeypatch.setattr(FileService, "delete_docs", lambda doc_ids, owner_id: deleted.append((doc_ids, owner_id)) or "")
+    monkeypatch.setattr(SyncLogsService, "schedule", lambda *_args, **_kwargs: None)
+
+    error = ConnectorService.rebuild(kb.id, connector.id, "member-actor")
+
+    assert error == ""
+    assert deleted == [([document.id], kb.tenant_id)]
+
+
+def test_connector_cleanup_rejects_legacy_cross_owner_link_before_delete(monkeypatch):
+    from api.db.services.connector_service import Connector2KbService, ConnectorService, SyncLogsService
+    from api.db.services.knowledgebase_service import KnowledgebaseService
+
+    kb = SimpleNamespace(id="kb-1", tenant_id="kb-owner")
+    connector = SimpleNamespace(id="connector-1", tenant_id="connector-owner", source="s3")
+    deleted = []
+    monkeypatch.setattr(Connector2KbService, "query", classmethod(lambda cls, **_kwargs: [SimpleNamespace()]))
+    monkeypatch.setattr(ConnectorService, "get_by_id", lambda _connector_id: (True, connector))
+    monkeypatch.setattr(KnowledgebaseService, "get_by_id", lambda _kb_id: (True, kb))
+    monkeypatch.setattr(FileService, "delete_docs", lambda *_args: deleted.append(True) or "")
+    monkeypatch.setattr(
+        "api.db.services.connector_service.DocumentService.list_doc_headers_by_kb_and_source_type",
+        lambda *_args: [{"id": "doc-stale"}],
+    )
+    monkeypatch.setattr(SyncLogsService, "increase_removed_docs", lambda *_args: None)
+
+    removed_count, errors = ConnectorService.cleanup_stale_documents_for_task(
+        "task-1",
+        connector.id,
+        kb.id,
+        connector.tenant_id,
+        [],
+    )
+
+    assert removed_count == 0
+    assert len(errors) == 1
+    assert "owner" in errors[0].lower()
+    assert deleted == []
+
+
+def test_upload_document_rejects_mismatched_owner_context_before_resource_lookup(monkeypatch):
+    kb = SimpleNamespace(id="kb-1", tenant_id="kb-owner", name="KB", parser_config={})
+    resource_lookups = []
+    monkeypatch.setattr(
+        FileService,
+        "get_root_folder",
+        classmethod(lambda cls, owner_id: resource_lookups.append(owner_id) or {"id": "root"}),
+    )
+    monkeypatch.setattr(FileService, "init_knowledgebase_docs", classmethod(lambda cls, *_args: None))
+    monkeypatch.setattr(FileService, "get_kb_folder", classmethod(lambda cls, *_args: {"id": "kb-root"}))
+    monkeypatch.setattr(FileService, "new_a_file_from_kb", classmethod(lambda cls, *_args: {"id": "kb-folder"}))
+
+    with pytest.raises(PermissionError, match="owner"):
+        _unwrapped_upload_document()(
+            FileService,
+            kb,
+            [],
+            "wrong-owner",
+            created_by="member-1",
+        )
+
+    assert resource_lookups == []
 
 
 @pytest.mark.p2
@@ -217,11 +326,14 @@ def test_upload_document_places_relative_folders_under_explicit_parent(monkeypat
     class _Storage:
         def __init__(self):
             self.objects = {}
+            self.calls = []
 
-        def obj_exist(self, bucket, location):
+        def obj_exist(self, bucket, location, owner_tenant_id):
+            self.calls.append(("exists", bucket, location, owner_tenant_id))
             return (bucket, location) in self.objects
 
-        def put(self, bucket, location, blob, *_args):
+        def put(self, bucket, location, blob, owner_tenant_id):
+            self.calls.append(("put", bucket, location, owner_tenant_id))
             self.objects[(bucket, location)] = blob
 
     def query_files(**kwargs):
@@ -288,8 +400,9 @@ def test_upload_document_places_relative_folders_under_explicit_parent(monkeypat
     monkeypatch.setattr(file_service_module.DocumentService, "get_by_id", lambda _doc_id: (False, None))
     monkeypatch.setattr(file_service_module.DocumentService, "check_doc_health", lambda *_args: True)
     monkeypatch.setattr(file_service_module.DocumentService, "insert", lambda doc: inserted_documents.append(doc.copy()))
-    monkeypatch.setattr(file_service_module, "thumbnail_img", lambda *_args: None)
-    monkeypatch.setattr(file_service_module.settings, "STORAGE_IMPL", _Storage())
+    monkeypatch.setattr(file_service_module, "thumbnail_img", lambda *_args: b"thumbnail")
+    storage = _Storage()
+    monkeypatch.setattr(file_service_module.settings, "STORAGE_IMPL", storage)
 
     upload_kwargs = {
         "relative_paths": [
@@ -330,6 +443,9 @@ def test_upload_document_places_relative_folders_under_explicit_parent(monkeypat
     assert {file["created_by"] for file in leaf_files} == {"member-1"}
     assert len(inserted_documents) == 2
     assert {document["created_by"] for document in inserted_documents} == {"member-1"}
+    assert storage.calls
+    assert {call[-1] for call in storage.calls} == {"tenant-1"}
+    assert len([call for call in storage.calls if call[0] == "put"]) == 4
 
 
 @pytest.mark.p2

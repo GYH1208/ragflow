@@ -243,6 +243,23 @@ def test_convert_branch_matrix_unit(monkeypatch):
     req_state = {"kb_ids": ["kb-1"], "file_ids": ["f1"]}
     _set_request_json(monkeypatch, module, req_state)
 
+    class _CompletedFuture:
+        @staticmethod
+        def exception():
+            return None
+
+        @staticmethod
+        def add_done_callback(callback):
+            callback(_CompletedFuture())
+
+    class _InlineLoop:
+        @staticmethod
+        def run_in_executor(_executor, function, *args):
+            function(*args)
+            return _CompletedFuture()
+
+    module.asyncio = SimpleNamespace(get_running_loop=lambda: _InlineLoop())
+
     # Falsy file returns "File not found!" during synchronous validation.
     monkeypatch.setattr(module.FileService, "get_by_ids", lambda _ids: [_FalsyFile("f1", module.FileType.DOC.value)])
     res = _run(module.convert())
@@ -253,7 +270,13 @@ def test_convert_branch_matrix_unit(monkeypatch):
     res = _run(module.convert())
     assert res["message"] == "Can't find this dataset!"
 
-    kb = SimpleNamespace(id="kb-1", parser_id="naive", pipeline_id="p1", parser_config={})
+    kb = SimpleNamespace(
+        id="kb-1",
+        tenant_id="tenant-1",
+        parser_id="naive",
+        pipeline_id="p1",
+        parser_config={},
+    )
     monkeypatch.setattr(module.KnowledgebaseService, "get_by_id", lambda _kb_id: (True, kb))
 
     # Unauthorized file access is rejected before scheduling background work.

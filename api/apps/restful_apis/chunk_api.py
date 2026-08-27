@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field, validator
 from quart import request
 
 from api.apps import login_required
+from api.common.check_team_permission import check_kb_team_permission
 from api.db.db_models import Task
 from api.db.joint_services.tenant_model_service import (
     get_model_config_from_provider_instance,
@@ -157,7 +158,7 @@ def _strip_chunk_runtime_fields(chunk):
 
 def _get_authorized_kb(dataset_id, user_id):
     ok, kb = KnowledgebaseService.get_by_id(dataset_id)
-    if not ok or not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=user_id):
+    if not ok or not check_kb_team_permission(kb, user_id):
         return None
     return kb
 

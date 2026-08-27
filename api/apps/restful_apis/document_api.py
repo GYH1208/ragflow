@@ -513,9 +513,9 @@ async def _upload_web_document(dataset_id, kb, actor_id):
             raise RuntimeError("This type of file has not been supported yet!")
 
         location = filename
-        while settings.STORAGE_IMPL.obj_exist(dataset_id, location):
+        while settings.STORAGE_IMPL.obj_exist(dataset_id, location, owner_tenant_id):
             location += "_"
-        settings.STORAGE_IMPL.put(dataset_id, location, blob)
+        settings.STORAGE_IMPL.put(dataset_id, location, blob, owner_tenant_id)
 
         doc = {
             "id": get_uuid(),

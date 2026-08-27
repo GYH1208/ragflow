@@ -31,21 +31,33 @@ from common.misc_utils import get_uuid
 logger = logging.getLogger(__name__)
 
 
-def _convert_files(file_ids, target_kbs, actor_id):
+def _authorize_existing_documents(file_ids, actor_id):
+    authorized_documents = {}
+    knowledge_bases = {}
+    for file_id in file_ids:
+        authorized_documents[file_id] = []
+        for link in File2DocumentService.get_by_file_id(file_id):
+            found, document = DocumentService.get_by_id(link.document_id)
+            if not found:
+                raise LookupError("Cannot find a document associated with this file.")
+            kb = knowledge_bases.get(document.kb_id)
+            if kb is None:
+                found, kb = KnowledgebaseService.get_by_id(document.kb_id)
+                if not found:
+                    raise LookupError("Cannot find a dataset associated with this file.")
+                knowledge_bases[document.kb_id] = kb
+            if not check_kb_team_permission(kb, actor_id):
+                raise PermissionError("No authorization.")
+            authorized_documents[file_id].append((document, kb.tenant_id))
+    return authorized_documents
+
+
+def _convert_files(file_ids, existing_documents_by_file, target_kbs, actor_id):
     """Synchronous worker: delete old docs and insert new ones for the given file/kb pairs."""
     for id in file_ids:
-        informs = File2DocumentService.get_by_file_id(id)
-        for inform in informs:
-            doc_id = inform.document_id
-            e, doc = DocumentService.get_by_id(doc_id)
-            if not e:
-                continue
-            tenant_id = DocumentService.get_tenant_id(doc_id)
-            if not tenant_id:
-                logging.warning("tenant_id not found for doc_id=%s, skipping remove_document", doc_id)
-                continue
-            DocumentService.remove_document(doc, tenant_id)
-        File2DocumentService.delete_by_file_id(id)
+        for document, owner_tenant_id in existing_documents_by_file.get(id, []):
+            DocumentService.remove_document(document, owner_tenant_id)
+            File2DocumentService.delete_by_document_id(document.id)
 
         e, file = FileService.get_by_id(id)
         if not e:
@@ -157,11 +169,37 @@ async def convert():
                 )
                 return get_data_error_result(message="No authorization.")
 
+        try:
+            existing_documents_by_file = _authorize_existing_documents(all_file_ids, user_id)
+        except PermissionError:
+            logger.warning(
+                "user_id=%s resource_type=file action=authorize_existing_documents result=denied file_ids=%s kb_ids=%s",
+                user_id,
+                all_file_ids,
+                kb_ids,
+            )
+            return get_data_error_result(message="No authorization.")
+        except LookupError as exc:
+            logger.warning(
+                "user_id=%s resource_type=file action=validate_existing_documents result=invalid file_ids=%s error=%s",
+                user_id,
+                all_file_ids,
+                exc,
+            )
+            return get_data_error_result(message=str(exc))
+
         # Run the blocking DB work in a thread so the event loop is not blocked.
         # For large folders this prevents 504 Gateway Timeout by returning as
         # soon as the background task is scheduled.
         loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(None, _convert_files, all_file_ids, list(kb_map.values()), user_id)
+        future = loop.run_in_executor(
+            None,
+            _convert_files,
+            all_file_ids,
+            existing_documents_by_file,
+            list(kb_map.values()),
+            user_id,
+        )
         future.add_done_callback(
             lambda f: logging.error("_convert_files failed: %s", f.exception()) if f.exception() else None
         )
