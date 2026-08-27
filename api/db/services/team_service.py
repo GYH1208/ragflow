@@ -119,7 +119,7 @@ class TeamAuthorizationService:
         if kb.tenant_id != user_id:
             return False, "No authorization to assign this dataset."
         if permission == TenantPermission.ME.value:
-            if team_id:
+            if team_id is not None:
                 return False, "team_id must be empty when permission is me."
             return True, None
         if permission == TenantPermission.TEAM.value:

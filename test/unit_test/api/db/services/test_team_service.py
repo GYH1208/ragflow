@@ -167,6 +167,16 @@ def test_validate_assignment_rejects_a_team_id_for_private_permission(monkeypatc
     )
 
 
+def test_validate_assignment_rejects_empty_team_id_for_private_permission(monkeypatch):
+    kb = SimpleNamespace(tenant_id="owner-1")
+    monkeypatch.setattr("api.db.services.team_service.UserService.is_admin", lambda _user_id: True)
+
+    assert TeamAuthorizationService.validate_assignment("owner-1", kb, "me", "") == (
+        False,
+        "team_id must be empty when permission is me.",
+    )
+
+
 def test_validate_assignment_requires_team_for_team_permission(monkeypatch):
     kb = SimpleNamespace(tenant_id="owner-1")
     monkeypatch.setattr("api.db.services.team_service.UserService.is_admin", lambda _user_id: True)
