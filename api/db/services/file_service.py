@@ -36,9 +36,6 @@ from api.db.services import duplicate_name
 from api.db.services.common_service import CommonService
 from api.db.services.document_service import DocumentService
 from api.db.services.file2document_service import File2DocumentService
-from common.misc_utils import get_uuid
-from common.ssrf_guard import assert_url_is_safe
-from common.constants import TaskStatus, FileSource, ParserType, MAXIMUM_PAGE_NUMBER
 from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.task_service import TaskService
 from api.utils.file_utils import (
@@ -49,8 +46,11 @@ from api.utils.file_utils import (
     thumbnail_img,
     validate_knowledge_upload_paths,
 )
-from rag.llm.cv_model import GptV4
 from common import settings
+from common.constants import MAXIMUM_PAGE_NUMBER, FileSource, ParserType, TaskStatus
+from common.misc_utils import get_uuid
+from common.ssrf_guard import assert_url_is_safe
+from rag.llm.cv_model import GptV4
 
 
 class FileService(CommonService):
@@ -437,14 +437,14 @@ class FileService(CommonService):
 
     @classmethod
     @DB.connection_context()
-    def add_file_from_kb(cls, doc, kb_folder_id, tenant_id):
+    def add_file_from_kb(cls, doc, kb_folder_id, tenant_id, *, created_by=None):
         for _ in File2DocumentService.get_by_document_id(doc["id"]):
             return
         file = {
             "id": get_uuid(),
             "parent_id": kb_folder_id,
             "tenant_id": tenant_id,
-            "created_by": tenant_id,
+            "created_by": tenant_id if created_by is None else created_by,
             "name": doc["name"],
             "type": doc["type"],
             "size": doc["size"],
@@ -495,7 +495,7 @@ class FileService(CommonService):
         return cls.model.create(**data)
 
     @classmethod
-    def ensure_kb_folder_path(cls, kb_folder_id, segments, tenant_id, created_folder_ids=None):
+    def ensure_kb_folder_path(cls, kb_folder_id, segments, tenant_id, created_folder_ids=None, *, created_by=None):
         """Create or reuse a knowledge-base folder chain below ``kb_folder_id``."""
         found, current = cls.get_by_id(kb_folder_id)
         if not found:
@@ -516,7 +516,7 @@ class FileService(CommonService):
                         "id": get_uuid(),
                         "parent_id": parent.id,
                         "tenant_id": tenant_id,
-                        "created_by": tenant_id,
+                        "created_by": tenant_id if created_by is None else created_by,
                         "name": segment,
                         "location": "",
                         "size": 0,
@@ -544,18 +544,20 @@ class FileService(CommonService):
         self,
         kb,
         file_objs,
-        user_id,
+        owner_tenant_id,
+        *,
+        created_by,
         src="local",
         parent_path: str | None = None,
         parent_folder_id: str | None = None,
         parser_config_override: dict | None = None,
         relative_paths: list[str] | None = None,
     ):
-        root_folder = self.get_root_folder(user_id)
+        root_folder = self.get_root_folder(owner_tenant_id)
         pf_id = root_folder["id"]
-        self.init_knowledgebase_docs(pf_id, user_id)
-        kb_root_folder = self.get_kb_folder(user_id)
-        kb_folder = self.new_a_file_from_kb(kb.tenant_id, kb.name, kb_root_folder["id"])
+        self.init_knowledgebase_docs(pf_id, owner_tenant_id)
+        kb_root_folder = self.get_kb_folder(owner_tenant_id)
+        kb_folder = self.new_a_file_from_kb(owner_tenant_id, kb.name, kb_root_folder["id"])
         upload_root_folder_id = parent_folder_id or kb_folder["id"]
 
         safe_parent_path = sanitize_path(parent_path)
@@ -599,7 +601,7 @@ class FileService(CommonService):
                     incoming_fp = getattr(file, "fingerprint", None)
                     new_hash = incoming_fp or xxhash.xxh128(blob).hexdigest()
                     old_hash = doc.content_hash or ""
-                    settings.STORAGE_IMPL.put(kb.id, doc.location, blob, kb.tenant_id)
+                    settings.STORAGE_IMPL.put(kb.id, doc.location, blob, owner_tenant_id)
                     doc.size = len(blob)
                     doc.content_hash = new_hash
                     doc = doc.to_dict()
@@ -611,7 +613,7 @@ class FileService(CommonService):
                     err.append(file.filename + ": " + str(exc))
                 continue
             try:
-                DocumentService.check_doc_health(kb.tenant_id, file.filename)
+                DocumentService.check_doc_health(owner_tenant_id, file.filename)
                 target_folder_id = upload_root_folder_id
                 relative_segments = None
                 if relative_paths is not None:
@@ -621,8 +623,9 @@ class FileService(CommonService):
                         target_folder = self.ensure_kb_folder_path(
                             upload_root_folder_id,
                             folder_segments,
-                            kb.tenant_id,
+                            owner_tenant_id,
                             created_folder_ids,
+                            created_by=created_by,
                         )
                         target_folder_id = target_folder.id
                     filename = duplicate_name(self.query, name=file.filename, parent_id=target_folder_id)
@@ -658,7 +661,7 @@ class FileService(CommonService):
                     "parser_id": self.get_parser(filetype, filename, kb.parser_id),
                     "pipeline_id": kb.pipeline_id,
                     "parser_config": merged_parser_config,
-                    "created_by": user_id,
+                    "created_by": created_by,
                     "type": filetype,
                     "name": filename,
                     "source_type": src,
@@ -670,7 +673,12 @@ class FileService(CommonService):
                 }
                 DocumentService.insert(doc)
 
-                FileService.add_file_from_kb(doc, target_folder_id, kb.tenant_id)
+                FileService.add_file_from_kb(
+                    doc,
+                    target_folder_id,
+                    owner_tenant_id,
+                    created_by=created_by,
+                )
                 files.append((doc, blob))
             except Exception as e:
                 self.remove_created_empty_kb_folders(created_folder_ids)
@@ -703,8 +711,8 @@ class FileService(CommonService):
 
     @staticmethod
     def parse(filename, blob, img_base64=True, tenant_id=None, layout_recognize=None):
-        from rag.app import audio, email, naive, picture, presentation
         from api.apps import current_user
+        from rag.app import audio, email, naive, picture, presentation
 
         def dummy(prog=None, msg=""):
             pass
@@ -827,8 +835,9 @@ class FileService(CommonService):
             }
 
         if url:
-            import requests as _requests
             from urllib.parse import urljoin as _urljoin
+
+            import requests as _requests
 
             _MAX_CRAWL_REDIRECTS = 10
 
@@ -874,14 +883,7 @@ class FileService(CommonService):
             # skipping DNS entirely and eliminating the rebinding window.
             _map_rules = ",".join(f"MAP {h} {ip}" for h, ip in host_pins.items())
 
-            from crawl4ai import (
-                AsyncWebCrawler,
-                BrowserConfig,
-                CrawlerRunConfig,
-                DefaultMarkdownGenerator,
-                PruningContentFilter,
-                CrawlResult
-            )
+            from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CrawlResult, DefaultMarkdownGenerator, PruningContentFilter
             filename = re.sub(r"\?.*", "", url.split("/")[-1])
             async def adownload():
                 browser_config = BrowserConfig(

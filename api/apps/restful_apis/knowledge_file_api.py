@@ -86,7 +86,7 @@ async def list_entries(dataset_id, tenant_id):
         desc = str(request.args.get("desc", "true")).lower() not in {"false", "0", "no"}
         result = KnowledgeFileService.list_entries(
             kb,
-            tenant_id,
+            kb.tenant_id,
             parent_id=request.args.get("parent_id", ""),
             page=page,
             page_size=page_size,
@@ -110,7 +110,7 @@ async def list_entries(dataset_id, tenant_id):
 async def get_ancestors(dataset_id, folder_id, tenant_id):
     try:
         kb = _get_authorized_kb(dataset_id, tenant_id)
-        return get_result(data=KnowledgeFileService.get_ancestors(kb, tenant_id, folder_id))
+        return get_result(data=KnowledgeFileService.get_ancestors(kb, kb.tenant_id, folder_id))
     except Exception as exc:
         return _error_response(exc)
 
@@ -126,7 +126,15 @@ async def create_folder(dataset_id, tenant_id):
         name = payload.get("name")
         if not parent_id or name is None:
             raise ValueError("parent_id and name are required.")
-        return get_result(data=KnowledgeFileService.create_folder(kb, tenant_id, parent_id, name))
+        return get_result(
+            data=KnowledgeFileService.create_folder(
+                kb,
+                kb.tenant_id,
+                parent_id,
+                name,
+                created_by=tenant_id,
+            )
+        )
     except Exception as exc:
         return _error_response(exc)
 
@@ -140,7 +148,7 @@ async def rename_entry(dataset_id, entry_id, tenant_id):
         payload = await get_request_json()
         if "name" not in payload:
             raise ValueError("name is required.")
-        return get_result(data=KnowledgeFileService.rename_entry(kb, tenant_id, entry_id, payload["name"]))
+        return get_result(data=KnowledgeFileService.rename_entry(kb, kb.tenant_id, entry_id, payload["name"]))
     except Exception as exc:
         return _error_response(exc)
 
@@ -156,7 +164,7 @@ async def move_entries(dataset_id, tenant_id):
         destination_id = payload.get("destination_id")
         if not isinstance(ids, list) or not destination_id:
             raise ValueError("ids must be a list and destination_id is required.")
-        return get_result(data=KnowledgeFileService.move_entries(kb, tenant_id, ids, destination_id))
+        return get_result(data=KnowledgeFileService.move_entries(kb, kb.tenant_id, ids, destination_id))
     except Exception as exc:
         return _error_response(exc)
 
@@ -171,7 +179,7 @@ async def preview_delete_entries(dataset_id, tenant_id):
         ids = payload.get("ids")
         if not isinstance(ids, list):
             raise ValueError("ids must be a list.")
-        count = KnowledgeFileService.count_descendant_documents(kb, tenant_id, ids)
+        count = KnowledgeFileService.count_descendant_documents(kb, kb.tenant_id, ids)
         return get_result(data={"document_count": count})
     except Exception as exc:
         return _error_response(exc)
@@ -187,7 +195,7 @@ async def delete_entries(dataset_id, tenant_id):
         ids = payload.get("ids")
         if not isinstance(ids, list):
             raise ValueError("ids must be a list.")
-        result = KnowledgeFileService.delete_entries(kb, tenant_id, ids)
+        result = KnowledgeFileService.delete_entries(kb, kb.tenant_id, ids)
         if result["failed"]:
             return get_json_result(
                 code=RetCode.SERVER_ERROR,

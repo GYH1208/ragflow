@@ -97,6 +97,38 @@ def _mock_folder_parent_lock(monkeypatch, folders):
     monkeypatch.setattr(FileService, "_locked_kb_folder_parent", classmethod(locked_parent))
 
 
+def test_connector_upload_call_uses_owner_context_and_audit_keyword(monkeypatch):
+    from api.db.services.connector_service import SyncLogsService
+
+    kb = SimpleNamespace(id="kb-1")
+    seen = []
+
+    def upload_document(_kb, files, owner_tenant_id, *, created_by, src):
+        seen.append((owner_tenant_id, created_by, src, files[0].filename))
+        return [], []
+
+    monkeypatch.setattr(FileService, "upload_document", upload_document)
+
+    errors, document_ids = SyncLogsService.duplicate_and_parse(
+        kb,
+        [
+            {
+                "id": "doc-1",
+                "semantic_identifier": "Policy",
+                "extension": ".txt",
+                "blob": b"policy",
+            }
+        ],
+        "owner-1",
+        "connector/source-1",
+        auto_parse=False,
+    )
+
+    assert errors == []
+    assert document_ids == []
+    assert seen == [("owner-1", "owner-1", "connector/source-1", "Policy.txt")]
+
+
 @pytest.mark.p2
 def test_upload_document_skips_cross_kb_document_id_collision(monkeypatch):
     kb = SimpleNamespace(
@@ -129,7 +161,8 @@ def test_upload_document_skips_cross_kb_document_id_collision(monkeypatch):
         FileService,
         kb,
         [_DummyUploadFile(filename="collision.txt", doc_id="doc-1")],
-        "user-1",
+        "tenant-1",
+        created_by="user-1",
     )
 
     assert files == []
@@ -212,10 +245,11 @@ def test_upload_document_places_relative_folders_under_explicit_parent(monkeypat
         folders[folder.id] = folder
         return folder
 
-    def add_file_from_kb(doc, parent_id, tenant_id):
+    def add_file_from_kb(doc, parent_id, tenant_id, *, created_by=None):
         leaf_files.append({
             "parent_id": parent_id,
             "tenant_id": tenant_id,
+            "created_by": created_by,
             "name": doc["name"],
             "location": doc["location"],
         })
@@ -237,7 +271,18 @@ def test_upload_document_places_relative_folders_under_explicit_parent(monkeypat
         classmethod(lambda cls, tenant_id, parent_id, name: query_files(tenant_id=tenant_id, parent_id=parent_id, name=name)),
     )
     monkeypatch.setattr(FileService, "_insert_kb_folder_locked", classmethod(lambda cls, data: insert_folder(data)))
-    monkeypatch.setattr(FileService, "add_file_from_kb", classmethod(lambda cls, doc, parent_id, tenant_id: add_file_from_kb(doc, parent_id, tenant_id)))
+    monkeypatch.setattr(
+        FileService,
+        "add_file_from_kb",
+        classmethod(
+            lambda cls, doc, parent_id, tenant_id, *, created_by=None: add_file_from_kb(
+                doc,
+                parent_id,
+                tenant_id,
+                created_by=created_by,
+            )
+        ),
+    )
     monkeypatch.setattr(FileService, "get_parser", classmethod(lambda cls, _type, _name, parser_id: parser_id))
     monkeypatch.setattr(file_service_module, "get_uuid", lambda: next(generated_ids))
     monkeypatch.setattr(file_service_module.DocumentService, "get_by_id", lambda _doc_id: (False, None))
@@ -263,6 +308,7 @@ def test_upload_document_places_relative_folders_under_explicit_parent(monkeypat
         kb,
         files,
         "tenant-1",
+        created_by="member-1",
         **supported_kwargs,
     )
 
@@ -280,7 +326,10 @@ def test_upload_document_places_relative_folders_under_explicit_parent(monkeypat
         child_folders["制度文件"].id,
         child_folders["表单"].id,
     }
+    assert {file["tenant_id"] for file in leaf_files} == {"tenant-1"}
+    assert {file["created_by"] for file in leaf_files} == {"member-1"}
     assert len(inserted_documents) == 2
+    assert {document["created_by"] for document in inserted_documents} == {"member-1"}
 
 
 @pytest.mark.p2
@@ -355,6 +404,7 @@ def test_failed_upload_removes_only_request_created_empty_folders(monkeypatch):
         kb,
         [broken_file],
         "tenant-1",
+        created_by="member-1",
         relative_paths=["顶层/空目录/A.txt"],
     )
 

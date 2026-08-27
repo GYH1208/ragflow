@@ -14,21 +14,20 @@
 #  limitations under the License.
 #
 import logging
-from datetime import datetime
 import os
-from typing import Optional, Tuple, List
+from datetime import datetime
+from typing import List, Optional, Tuple
 
 from anthropic import BaseModel
 from peewee import SQL, fn
 
 from api.db import InputType
-from api.db.db_models import DB, Connector, SyncLogs, Connector2Kb, Knowledgebase
+from api.db.db_models import DB, Connector, Connector2Kb, Knowledgebase, SyncLogs
 from api.db.services.common_service import CommonService
-from api.db.services.document_service import DocumentService
-from api.db.services.document_service import DocMetadataService
+from api.db.services.document_service import DocMetadataService, DocumentService
 from api.utils.common import hash128
-from common.misc_utils import get_uuid
 from common.constants import ConnectorTaskType, TaskStatus
+from common.misc_utils import get_uuid
 from common.settings import TIMEZONE
 from common.time_utils import current_timestamp, timestamp_to_date
 
@@ -444,7 +443,13 @@ class SyncLogsService(CommonService):
         errs = []
         files = [FileObj(id=d["id"], filename=d["semantic_identifier"]+(f"{d['extension']}" if d["semantic_identifier"][::-1].find(d['extension'][::-1])<0 else ""), blob=d["blob"], fingerprint=d.get("fingerprint")) for d in docs]
         doc_ids = []
-        err, doc_blob_pairs = FileService.upload_document(kb, files, tenant_id, src)
+        err, doc_blob_pairs = FileService.upload_document(
+            kb,
+            files,
+            tenant_id,
+            created_by=tenant_id,
+            src=src,
+        )
         errs.extend(err)
 
         # Create a mapping from filename to metadata for later use

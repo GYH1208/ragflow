@@ -18,21 +18,20 @@ import asyncio
 import logging
 from pathlib import Path
 
+from api.apps import current_user, login_required
 from api.common.check_team_permission import check_file_team_permission, check_kb_team_permission
+from api.db import FileType
+from api.db.services.document_service import DocumentService
 from api.db.services.file2document_service import File2DocumentService
 from api.db.services.file_service import FileService
-
-from api.apps import login_required, current_user
 from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.utils.api_utils import get_data_error_result, get_json_result, get_request_json, server_error_response, validate_request
 from common.misc_utils import get_uuid
-from api.db import FileType
-from api.db.services.document_service import DocumentService
 
 logger = logging.getLogger(__name__)
 
 
-def _convert_files(file_ids, kb_ids, user_id):
+def _convert_files(file_ids, target_kbs, actor_id):
     """Synchronous worker: delete old docs and insert new ones for the given file/kb pairs."""
     for id in file_ids:
         informs = File2DocumentService.get_by_file_id(id)
@@ -52,9 +51,10 @@ def _convert_files(file_ids, kb_ids, user_id):
         if not e:
             continue
 
-        for kb_id in kb_ids:
-            e, kb = KnowledgebaseService.get_by_id(kb_id)
-            if not e:
+        for kb in target_kbs:
+            owner_tenant_id = kb.tenant_id
+            if not owner_tenant_id:
+                logging.warning("owner tenant not found for kb_id=%s, skipping document conversion", kb.id)
                 continue
             doc = DocumentService.insert({
                 "id": get_uuid(),
@@ -62,7 +62,7 @@ def _convert_files(file_ids, kb_ids, user_id):
                 "parser_id": FileService.get_parser(file.type, file.name, kb.parser_id),
                 "pipeline_id": kb.pipeline_id,
                 "parser_config": kb.parser_config,
-                "created_by": user_id,
+                "created_by": actor_id,
                 "type": file.type,
                 "name": file.name,
                 "suffix": Path(file.name).suffix.lstrip("."),
@@ -161,7 +161,7 @@ async def convert():
         # For large folders this prevents 504 Gateway Timeout by returning as
         # soon as the background task is scheduled.
         loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(None, _convert_files, all_file_ids, kb_ids, user_id)
+        future = loop.run_in_executor(None, _convert_files, all_file_ids, list(kb_map.values()), user_id)
         future.add_done_callback(
             lambda f: logging.error("_convert_files failed: %s", f.exception()) if f.exception() else None
         )

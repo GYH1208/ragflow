@@ -23,6 +23,10 @@ import pytest
 
 import api.apps
 import api.utils.api_utils
+from api.common.check_team_permission import check_kb_team_permission
+from api.db import TenantPermission
+from api.db.services.team_service import TeamMemberService, TeamService
+from common.constants import StatusEnum
 
 
 class _DummyManager:
@@ -86,11 +90,30 @@ async def _run_inline(function, *args, **kwargs):
 
 
 def _allow_team_member(monkeypatch, module, *, owner_id="owner-1"):
-    monkeypatch.setattr(module.KnowledgebaseService, "accessible", lambda **_kwargs: True)
+    kb = SimpleNamespace(
+        id="kb-1",
+        tenant_id=owner_id,
+        permission=TenantPermission.TEAM.value,
+        team_id="team-hr",
+        status=StatusEnum.VALID.value,
+    )
+    monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda user_id: ["team-hr"] if user_id == "member-2" else [])
+    monkeypatch.setattr(
+        TeamService,
+        "get_owned_team",
+        lambda team_id, tenant_id: SimpleNamespace(id=team_id)
+        if (team_id, tenant_id) == ("team-hr", owner_id)
+        else None,
+    )
+    monkeypatch.setattr(
+        module.KnowledgebaseService,
+        "accessible",
+        lambda kb_id, user_id: check_kb_team_permission(kb, user_id),
+    )
     monkeypatch.setattr(
         module.KnowledgebaseService,
         "get_by_id",
-        lambda _dataset_id: (True, SimpleNamespace(id="kb-1", tenant_id=owner_id)),
+        lambda _dataset_id: (True, kb),
     )
     monkeypatch.setattr(module, "get_request_json", lambda: _AwaitableValue({"document_ids": ["doc-1"]}))
     monkeypatch.setattr(module, "check_duplicate_ids", lambda ids, _kind: (ids, []))

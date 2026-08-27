@@ -13,46 +13,64 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
-from io import BytesIO
-import logging
 import json
+import logging
 import os
 import re
+from io import BytesIO
 from pathlib import Path
 
-from quart import request, make_response,send_file
 from peewee import OperationalError
 from pydantic import ValidationError
+from quart import make_response, request, send_file
 
-from api.apps import AUTH_JWT, AUTH_API, AUTH_BETA, current_user, login_required
-from api.constants import FILE_NAME_LEN_LIMIT, IMG_BASE64_PREFIX
-from api.apps.services.document_api_service import validate_document_update_fields, map_doc_keys, \
-    map_doc_keys_with_run_status, update_document_name_only, update_chunk_method, update_document_status_only, \
-    reset_document_for_reparse
+from api.apps import AUTH_API, AUTH_BETA, AUTH_JWT, current_user, login_required
+from api.apps.services.document_api_service import (
+    map_doc_keys,
+    map_doc_keys_with_run_status,
+    reset_document_for_reparse,
+    update_chunk_method,
+    update_document_name_only,
+    update_document_status_only,
+    validate_document_update_fields,
+)
 from api.apps.services.knowledge_file_service import KnowledgeFileService
+from api.common.check_team_permission import check_kb_team_permission
+from api.constants import FILE_NAME_LEN_LIMIT, IMG_BASE64_PREFIX
 from api.db import VALID_FILE_TYPES, FileType
+from api.db.db_models import Task
 from api.db.services import duplicate_name
 from api.db.services.doc_metadata_service import DocMetadataService
-from api.db.db_models import Task
 from api.db.services.document_service import DocumentService
 from api.db.services.file2document_service import File2DocumentService
 from api.db.services.file_service import FileService
 from api.db.services.knowledgebase_service import KnowledgebaseService
-from api.common.check_team_permission import check_kb_team_permission
 from api.db.services.task_service import TaskService, cancel_all_task_of
-from api.utils.api_utils import construct_json_result, get_data_error_result, get_error_data_result, get_result, get_json_result, \
-    server_error_response, add_tenant_id_to_kwargs, get_request_json, get_error_argument_result, check_duplicate_ids
+from api.utils.api_utils import (
+    add_tenant_id_to_kwargs,
+    check_duplicate_ids,
+    construct_json_result,
+    get_data_error_result,
+    get_error_argument_result,
+    get_error_data_result,
+    get_json_result,
+    get_request_json,
+    get_result,
+    server_error_response,
+)
+from api.utils.file_utils import filename_type, thumbnail, validate_knowledge_upload_paths
 from api.utils.pagination_utils import validate_rest_api_page_size
 from api.utils.validation_utils import (
-    UpdateDocumentReq, format_validation_error_message, validate_and_parse_json_request, DeleteDocumentReq,
+    DeleteDocumentReq,
+    UpdateDocumentReq,
+    format_validation_error_message,
+    validate_and_parse_json_request,
 )
-
+from api.utils.web_utils import CONTENT_TYPE_MAP, apply_safe_file_response_headers, html2pdf, is_valid_url
 from common import settings
-from common.constants import ParserType, RetCode, TaskStatus, SANDBOX_ARTIFACT_BUCKET
+from common.constants import SANDBOX_ARTIFACT_BUCKET, ParserType, RetCode, TaskStatus
 from common.metadata_utils import convert_conditions, meta_filter, turn2jsonschema
 from common.misc_utils import get_uuid, thread_pool_exec
-from api.utils.file_utils import filename_type, thumbnail, validate_knowledge_upload_paths
-from api.utils.web_utils import CONTENT_TYPE_MAP, html2pdf, is_valid_url, apply_safe_file_response_headers
 from common.ssrf_guard import assert_url_is_safe
 from rag.nlp import search
 
@@ -445,11 +463,12 @@ async def upload_document(dataset_id, tenant_id):
         logging.error("No authorization.")
         return get_error_data_result(message="No authorization.", code=RetCode.AUTHENTICATION_ERROR)
 
+    actor_id = tenant_id
     if upload_type == "web":
-        return await _upload_web_document(dataset_id, kb, tenant_id)
+        return await _upload_web_document(dataset_id, kb, actor_id)
 
     if upload_type == "empty":
-        return await _upload_empty_document(dataset_id, kb, tenant_id)
+        return await _upload_empty_document(dataset_id, kb, actor_id)
 
     if upload_type != "local":
         return get_error_data_result(
@@ -457,10 +476,10 @@ async def upload_document(dataset_id, tenant_id):
             code=RetCode.ARGUMENT_ERROR,
         )
 
-    return await _upload_local_documents(kb, tenant_id)
+    return await _upload_local_documents(kb, actor_id)
 
 
-async def _upload_web_document(dataset_id, kb, tenant_id):
+async def _upload_web_document(dataset_id, kb, actor_id):
     form = await request.form
     name = (form.get("name") or "").strip()
     url = form.get("url")
@@ -481,10 +500,11 @@ async def _upload_web_document(dataset_id, kb, tenant_id):
     if not blob:
         return server_error_response(ValueError("Download failure."))
 
-    root_folder = FileService.get_root_folder(tenant_id)
-    FileService.init_knowledgebase_docs(root_folder["id"], tenant_id)
-    kb_root_folder = FileService.get_kb_folder(tenant_id)
-    kb_folder = FileService.new_a_file_from_kb(kb.tenant_id, kb.name, kb_root_folder["id"])
+    owner_tenant_id = kb.tenant_id
+    root_folder = FileService.get_root_folder(owner_tenant_id)
+    FileService.init_knowledgebase_docs(root_folder["id"], owner_tenant_id)
+    kb_root_folder = FileService.get_kb_folder(owner_tenant_id)
+    kb_folder = FileService.new_a_file_from_kb(owner_tenant_id, kb.name, kb_root_folder["id"])
 
     try:
         filename = duplicate_name(DocumentService.query, name=f"{name}.pdf", kb_id=kb.id)
@@ -503,7 +523,7 @@ async def _upload_web_document(dataset_id, kb, tenant_id):
             "parser_id": kb.parser_id,
             "pipeline_id": kb.pipeline_id,
             "parser_config": kb.parser_config,
-            "created_by": tenant_id,
+            "created_by": actor_id,
             "type": filetype,
             "name": filename,
             "location": location,
@@ -521,13 +541,13 @@ async def _upload_web_document(dataset_id, kb, tenant_id):
             doc["parser_id"] = ParserType.EMAIL.value
 
         DocumentService.insert(doc)
-        FileService.add_file_from_kb(doc, kb_folder["id"], kb.tenant_id)
+        FileService.add_file_from_kb(doc, kb_folder["id"], owner_tenant_id, created_by=actor_id)
         return get_result(data=map_doc_keys_with_run_status(doc, run_status="0"))
     except Exception as e:
         return server_error_response(e)
 
 
-async def _upload_empty_document(dataset_id, kb, tenant_id):
+async def _upload_empty_document(dataset_id, kb, actor_id):
     req = await get_request_json()
     name = (req.get("name") or "").strip()
 
@@ -556,7 +576,7 @@ async def _upload_empty_document(dataset_id, kb, tenant_id):
                 "parser_id": kb.parser_id,
                 "pipeline_id": kb.pipeline_id,
                 "parser_config": kb.parser_config,
-                "created_by": tenant_id,
+                "created_by": actor_id,
                 "type": FileType.VIRTUAL,
                 "name": name,
                 "suffix": Path(name).suffix.lstrip("."),
@@ -564,13 +584,13 @@ async def _upload_empty_document(dataset_id, kb, tenant_id):
                 "size": 0,
             }
         )
-        FileService.add_file_from_kb(doc.to_dict(), kb_folder["id"], kb.tenant_id)
+        FileService.add_file_from_kb(doc.to_dict(), kb_folder["id"], kb.tenant_id, created_by=actor_id)
         return get_result(data=map_doc_keys(doc))
     except Exception as e:
         return server_error_response(e)
 
 
-async def _upload_local_documents(kb, tenant_id):
+async def _upload_local_documents(kb, actor_id):
     form = await request.form
     files = await request.files
     if "file" not in files:
@@ -598,7 +618,7 @@ async def _upload_local_documents(kb, tenant_id):
     parent_folder_id = form.get("parent_id")
     if parent_folder_id:
         try:
-            parent_folder = KnowledgeFileService.assert_folder_in_kb(kb, tenant_id, parent_folder_id)
+            parent_folder = KnowledgeFileService.assert_folder_in_kb(kb, kb.tenant_id, parent_folder_id)
             parent_folder_id = parent_folder.id
         except (LookupError, PermissionError, ValueError) as exc:
             return get_error_argument_result(str(exc))
@@ -619,7 +639,11 @@ async def _upload_local_documents(kb, tenant_id):
             parser_config_override = None
 
     err, files = await thread_pool_exec(
-        FileService.upload_document, kb, file_objs, tenant_id,
+        FileService.upload_document,
+        kb,
+        file_objs,
+        kb.tenant_id,
+        created_by=actor_id,
         parent_path=form.get("parent_path"),
         parent_folder_id=parent_folder_id,
         parser_config_override=parser_config_override,
@@ -1094,9 +1118,11 @@ async def delete_documents(tenant_id, dataset_id):
         return get_error_argument_result(err)
 
     try:
-        # Validate dataset exists and user has permission
-        if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
+        # Validate dataset exists and user has permission.
+        found, kb = KnowledgebaseService.get_by_id(dataset_id)
+        if not found or not check_kb_team_permission(kb, tenant_id):
             return get_error_data_result(message=f"You don't own the dataset {dataset_id}. ")
+        owner_tenant_id = kb.tenant_id
 
         # Get documents to delete
         doc_ids = req.get("ids") or []
@@ -1124,7 +1150,7 @@ async def delete_documents(tenant_id, dataset_id):
             doc_ids = unique_doc_ids
 
         # Delete documents using existing FileService.delete_docs
-        errors = await thread_pool_exec(FileService.delete_docs, doc_ids, tenant_id)
+        errors = await thread_pool_exec(FileService.delete_docs, doc_ids, owner_tenant_id)
 
         if errors:
             return get_error_data_result(message=str(errors))
@@ -1489,10 +1515,8 @@ async def parse_documents(tenant_id, dataset_id):
       200:
         description: Successful operation.
     """
-    if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
-        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
     found, kb = KnowledgebaseService.get_by_id(dataset_id)
-    if not found:
+    if not found or not check_kb_team_permission(kb, tenant_id):
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
     dataset_tenant_id = kb.tenant_id
 
@@ -1611,10 +1635,8 @@ async def stop_parse_documents(tenant_id, dataset_id):
       200:
         description: Successful operation.
     """
-    if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
-        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
     found, kb = KnowledgebaseService.get_by_id(dataset_id)
-    if not found:
+    if not found or not check_kb_team_permission(kb, tenant_id):
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
     dataset_tenant_id = kb.tenant_id
 

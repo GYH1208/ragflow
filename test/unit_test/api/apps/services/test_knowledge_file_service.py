@@ -13,8 +13,8 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
-from types import SimpleNamespace
 from contextlib import contextmanager, nullcontext
+from types import SimpleNamespace
 
 import pytest
 
@@ -239,6 +239,22 @@ def test_create_folder_adds_knowledge_base_folder(service_fixture, monkeypatch):
     assert result["parent_id"] == root.id
     assert result["name"] == "新建目录"
     assert kb._entries["new-folder"].source_type == "knowledgebase"
+
+
+def test_team_member_created_folder_uses_owner_context_and_actor_audit(service_fixture, monkeypatch):
+    kb, owner_tenant_id, root, *_ = service_fixture
+    monkeypatch.setattr(knowledge_file_service_module, "get_uuid", lambda: "member-folder")
+
+    result = KnowledgeFileService.create_folder(
+        kb,
+        owner_tenant_id,
+        root.id,
+        "成员目录",
+        created_by="member-1",
+    )
+
+    assert result["tenant_id"] == owner_tenant_id
+    assert result["created_by"] == "member-1"
 
 
 def test_create_folder_does_not_close_connection_inside_transaction(service_fixture, monkeypatch):
