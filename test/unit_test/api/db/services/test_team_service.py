@@ -111,6 +111,7 @@ def test_member_kb_access(permission, team_id, active_team_ids, expected, monkey
         status=StatusEnum.VALID.value,
     )
     monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda _user_id: active_team_ids)
+    monkeypatch.setattr(TeamService, "get_owned_team", lambda _team_id, _owner_id: object())
 
     assert TeamAuthorizationService.can_access_kb("member-1", kb) is expected
 

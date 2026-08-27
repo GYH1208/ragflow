@@ -19,7 +19,7 @@ from peewee import JOIN, fn
 
 from api.constants import DATASET_NAME_LIMIT
 from api.db import TenantPermission
-from api.db.db_models import DB, Document, Knowledgebase, User, UserCanvas
+from api.db.db_models import DB, Document, Knowledgebase, Team, User, UserCanvas
 from api.db.services import duplicate_name
 from api.db.services.common_service import CommonService
 from api.db.services.team_service import TeamAuthorizationService
@@ -60,9 +60,18 @@ class KnowledgebaseService(CommonService):
         - KBs owned by the current user (`tenant_id == user_id`)
         Always constrained to `StatusEnum.VALID`.
         """
+        valid_owned_team = Team.select(Team.id).where(
+            Team.id == cls.model.team_id,
+            Team.tenant_id == cls.model.tenant_id,
+            Team.status == StatusEnum.VALID.value,
+        )
         return (
             (
-                (cls.model.team_id.in_(active_team_ids or []) & (cls.model.permission == TenantPermission.TEAM.value))
+                (
+                    cls.model.team_id.in_(active_team_ids or [])
+                    & (cls.model.permission == TenantPermission.TEAM.value)
+                    & fn.EXISTS(valid_owned_team)
+                )
                 | (cls.model.tenant_id == user_id)
             )
             & (cls.model.status == StatusEnum.VALID.value)

@@ -128,7 +128,9 @@ class TeamAuthorizationService:
             return True
         if kb.permission != TenantPermission.TEAM.value or not kb.team_id:
             return False
-        return kb.team_id in set(TeamMemberService.active_team_ids(user_id))
+        if kb.team_id not in set(TeamMemberService.active_team_ids(user_id)):
+            return False
+        return TeamService.get_owned_team(kb.team_id, kb.tenant_id) is not None
 
     @classmethod
     def validate_assignment(

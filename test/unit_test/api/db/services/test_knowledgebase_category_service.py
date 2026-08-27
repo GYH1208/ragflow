@@ -5,7 +5,7 @@ import pytest
 from peewee import SqliteDatabase
 
 from api.db import TenantPermission
-from api.db.db_models import Knowledgebase, KnowledgebaseCategory
+from api.db.db_models import Knowledgebase, KnowledgebaseCategory, Team
 from api.db.services.knowledgebase_category_service import KnowledgebaseCategoryService
 from api.db.services.team_service import TeamMemberService
 from common.constants import StatusEnum
@@ -14,7 +14,7 @@ from common.constants import StatusEnum
 @pytest.fixture()
 def category_database():
     database = SqliteDatabase(":memory:")
-    models = [Knowledgebase, KnowledgebaseCategory]
+    models = [Knowledgebase, KnowledgebaseCategory, Team]
     with database.bind_ctx(models), database.connection_context():
         database.create_tables(models)
         yield
@@ -44,6 +44,16 @@ def _kb(kb_id: str, owner_id: str, *, category_id: str, permission: str, team_id
     )
 
 
+def _team(team_id: str, owner_id: str):
+    return Team.create(
+        id=team_id,
+        tenant_id=owner_id,
+        name=team_id,
+        created_by=owner_id,
+        status=StatusEnum.VALID.value,
+    )
+
+
 def test_visible_tenant_ids_include_owner_and_active_team_owners_only(monkeypatch):
     monkeypatch.setattr(TeamMemberService, "visible_owner_ids", lambda _user_id: ["owner-a", "owner-b", "owner-a"])
     monkeypatch.setattr(
@@ -66,6 +76,10 @@ def test_resolve_owner_ids_never_expands_visible_scope(monkeypatch):
 
 
 def test_category_counts_use_active_team_ids_instead_of_legacy_tenants(category_database, monkeypatch):
+    _team("team-active", "owner-1")
+    _team("team-other", "owner-1")
+    _team("team-hidden", "owner-2")
+    _team("team-cross-owner", "owner-2")
     _category("cat-mine", "member-1")
     _category("cat-owner", "owner-1")
     _category("cat-hidden", "owner-2")
@@ -111,8 +125,19 @@ def test_category_counts_use_active_team_ids_instead_of_legacy_tenants(category_
         permission=TenantPermission.TEAM.value,
         team_id="team-hidden",
     )
+    _kb(
+        "kb-cross-owner",
+        "owner-1",
+        category_id="cat-owner",
+        permission=TenantPermission.TEAM.value,
+        team_id="team-cross-owner",
+    )
     monkeypatch.setattr(TeamMemberService, "visible_owner_ids", lambda _user_id: ["owner-1"])
-    monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda _user_id: ["team-active"])
+    monkeypatch.setattr(
+        TeamMemberService,
+        "active_team_ids",
+        lambda _user_id: ["team-active", "team-cross-owner"],
+    )
     monkeypatch.setattr(
         "api.db.services.user_service.TenantService.get_joined_tenants_by_user_id",
         lambda _user_id: [{"tenant_id": "owner-1"}, {"tenant_id": "owner-2"}],

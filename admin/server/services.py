@@ -15,26 +15,27 @@
 #
 
 import json
-import os
 import logging
+import os
 import re
 from typing import Any
 
+from config import SERVICE_CONFIGS
 from werkzeug.security import check_password_hash
-from common.constants import ActiveEnum
-from api.db.services import UserService
-from api.db.joint_services.user_account_service import create_new_user, delete_user_data
-from api.db.services.canvas_service import UserCanvasService
-from api.db.services.user_service import TenantService, UserTenantService
-from api.db.services.knowledgebase_service import KnowledgebaseService
-from api.db.services.system_settings_service import SystemSettingsService
-from api.db.services.api_service import APITokenService
-from api.db.db_models import APIToken
-from api.utils.crypt import decrypt
-from api.utils import health_utils
 
 from api.common.exceptions import AdminException, UserAlreadyExistsError, UserNotFoundError
-from config import SERVICE_CONFIGS
+from api.db.db_models import APIToken
+from api.db.joint_services.user_account_service import create_new_user, delete_user_data
+from api.db.services import UserService
+from api.db.services.api_service import APITokenService
+from api.db.services.canvas_service import UserCanvasService
+from api.db.services.knowledgebase_service import KnowledgebaseService
+from api.db.services.system_settings_service import SystemSettingsService
+from api.db.services.team_service import TeamMemberService
+from api.db.services.user_service import TenantService, UserTenantService
+from api.utils import health_utils
+from api.utils.crypt import decrypt
+from common.constants import ActiveEnum
 
 
 class UserMgr:
@@ -233,12 +234,10 @@ class UserServiceMgr:
             raise UserNotFoundError(username)
         elif len(user_list) > 1:
             raise AdminException(f"Exist more than 1 user: {username}!")
-        # find tenants
         usr = user_list[0]
-        tenants = TenantService.get_joined_tenants_by_user_id(usr.id)
-        tenant_ids = [m["tenant_id"] for m in tenants]
+        active_team_ids = TeamMemberService.active_team_ids(usr.id)
         # filter permitted kb and owned kb
-        return KnowledgebaseService.get_all_kb_by_tenant_ids(tenant_ids, usr.id)
+        return KnowledgebaseService.get_all_kb_by_tenant_ids(active_team_ids, usr.id)
 
     @staticmethod
     def get_user_agents(username):
@@ -499,11 +498,11 @@ class SandboxMgr:
     def get_provider_config_schema(provider_id: str):
         """Get configuration schema for a specific provider."""
         from agent.sandbox.providers import (
+            AliyunCodeInterpreterProvider,
+            E2BProvider,
             LocalProvider,
             SelfManagedProvider,
             SSHProvider,
-            AliyunCodeInterpreterProvider,
-            E2BProvider,
         )
 
         schemas = {
@@ -572,11 +571,11 @@ class SandboxMgr:
             Dictionary with updated provider_type and config
         """
         from agent.sandbox.providers import (
+            AliyunCodeInterpreterProvider,
+            E2BProvider,
             LocalProvider,
             SelfManagedProvider,
             SSHProvider,
-            AliyunCodeInterpreterProvider,
-            E2BProvider,
         )
 
         try:
@@ -662,11 +661,11 @@ class SandboxMgr:
         """
         try:
             from agent.sandbox.providers import (
+                AliyunCodeInterpreterProvider,
+                E2BProvider,
                 LocalProvider,
                 SelfManagedProvider,
                 SSHProvider,
-                AliyunCodeInterpreterProvider,
-                E2BProvider,
             )
 
             # Instantiate provider based on type
