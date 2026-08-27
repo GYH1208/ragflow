@@ -479,15 +479,50 @@ class DocumentService(CommonService):
         return Document(**doc)
 
     @classmethod
+    def insert_in_transaction(cls, doc):
+        """Insert a document and increment its dataset count in one caller transaction."""
+        if cls.model(**doc).save(force_insert=True) != 1:
+            raise RuntimeError("Database error (Document)!")
+        if KnowledgebaseService.adjust_document_counts_in_transaction(doc["kb_id"], doc_num=1) != 1:
+            raise RuntimeError("Database error (Knowledgebase)!")
+        return cls.model(**doc)
+
+    @classmethod
+    def delete_in_transaction(cls, doc) -> bool:
+        """Delete a document row and decrement counters in one caller transaction."""
+        if cls.model.delete().where(cls.model.id == doc.id).execute() != 1:
+            return False
+        if (
+            KnowledgebaseService.adjust_document_counts_in_transaction(
+                doc.kb_id,
+                doc_num=-1,
+                token_num=-getattr(doc, "token_num", 0),
+                chunk_num=-getattr(doc, "chunk_num", 0),
+            )
+            != 1
+        ):
+            raise RuntimeError("Database error (Knowledgebase)!")
+        return True
+
+    @classmethod
     @DB.connection_context()
     def remove_document(cls, doc, tenant_id):
-        from api.db.services.task_service import TaskService, cancel_all_task_of
-
         if not cls.delete_document_and_update_kb_counts(doc.id):
             return True
 
+        return cls.cleanup_document_resources(doc, tenant_id)
+
+    @classmethod
+    def cleanup_document_resources(cls, doc, tenant_id):
+        """Remove non-transactional resources after the document row is durably deleted."""
+        from api.db.services.task_service import TaskService, cancel_all_task_of
+
         chunk_index_name = search.index_name(tenant_id)
-        chunk_index_exists = settings.docStoreConn.index_exist(chunk_index_name, doc.kb_id)
+        try:
+            chunk_index_exists = settings.docStoreConn.index_exist(chunk_index_name, doc.kb_id)
+        except Exception as e:
+            logging.warning(f"Failed to inspect chunk index for document {doc.id}: {e}")
+            chunk_index_exists = False
 
         # Cancel all running tasks first using preset function in task_service.py --- set cancel flag in Redis
         try:

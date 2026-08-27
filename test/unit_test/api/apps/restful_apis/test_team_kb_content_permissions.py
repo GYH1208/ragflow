@@ -21,12 +21,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from peewee import SqliteDatabase
 
 import api.apps
 import api.utils.api_utils
 from api.apps.services.dataset_api_service import delete_datasets, update_dataset
 from api.common.check_team_permission import check_kb_team_permission
 from api.db import FileType, TenantPermission
+from api.db.db_models import Document, File, File2Document, Knowledgebase, Task
 from api.db.services.team_service import TeamMemberService, TeamService
 from common.constants import ParserType, StatusEnum, TaskStatus
 
@@ -637,25 +639,33 @@ def test_knowledge_file_create_folder_uses_owner_context_and_actor_audit(monkeyp
 def test_file_conversion_keeps_target_owner_context_and_actor_audit(monkeypatch):
     module = _load_route_module(monkeypatch, "file2document_api")
     kb = _team_kb()
-    source_file = SimpleNamespace(id="file-1", type="doc", name="A.txt", location="A.txt", size=3)
-    inserted = []
-    monkeypatch.setattr(module.File2DocumentService, "get_by_file_id", lambda _file_id: [])
-    monkeypatch.setattr(module.File2DocumentService, "delete_by_file_id", lambda _file_id: None)
-    monkeypatch.setattr(module.File2DocumentService, "insert", lambda payload: payload)
-    monkeypatch.setattr(module.FileService, "get_by_id", lambda _file_id: (True, source_file))
+    source_file = SimpleNamespace(
+        id="file-1",
+        tenant_id=kb.tenant_id,
+        type="doc",
+        name="A.txt",
+        location="A.txt",
+        size=3,
+    )
     monkeypatch.setattr(module.FileService, "get_parser", lambda *_args: "naive")
-    monkeypatch.setattr(module.DocumentService, "insert", lambda payload: inserted.append(payload) or SimpleNamespace(id=payload["id"]))
 
-    module._convert_files([source_file.id], {source_file.id: []}, [kb], "member-active")
+    staged = module._stage_document_replacements([source_file], [kb], "member-active")
 
-    assert inserted[0]["kb_id"] == kb.id
-    assert inserted[0]["created_by"] == "member-active"
+    assert staged[0][1]["kb_id"] == kb.id
+    assert staged[0][1]["created_by"] == "member-active"
 
 
-def _prepare_file_conversion_route(monkeypatch, *, authorized_kb_ids):
+def _prepare_file_conversion_route(monkeypatch, *, authorized_kb_ids, target_owner_id="owner-source"):
     module = _load_route_module(monkeypatch, "file2document_api")
     module.current_user = SimpleNamespace(id="member-active")
-    source_file = SimpleNamespace(id="file-1", type="doc", name="A.txt", location="A.txt", size=3)
+    source_file = SimpleNamespace(
+        id="file-1",
+        tenant_id="owner-source",
+        type="doc",
+        name="A.txt",
+        location="A.txt",
+        size=3,
+    )
     old_documents = {
         "doc-team-a": SimpleNamespace(id="doc-team-a", kb_id="kb-team-a"),
         "doc-private-b": SimpleNamespace(id="doc-private-b", kb_id="kb-private-b"),
@@ -663,7 +673,7 @@ def _prepare_file_conversion_route(monkeypatch, *, authorized_kb_ids):
     knowledge_bases = {
         "kb-target": SimpleNamespace(
             id="kb-target",
-            tenant_id="owner-target",
+            tenant_id=target_owner_id,
             parser_id="naive",
             pipeline_id=None,
             parser_config={},
@@ -675,21 +685,13 @@ def _prepare_file_conversion_route(monkeypatch, *, authorized_kb_ids):
         SimpleNamespace(file_id=source_file.id, document_id="doc-team-a"),
         SimpleNamespace(file_id=source_file.id, document_id="doc-private-b"),
     ]
-    scheduled = []
+    conversions = []
     removed = []
 
-    class _Future:
-        @staticmethod
-        def add_done_callback(_callback):
-            return None
+    async def capture_conversion(function, *args):
+        conversions.append((function, args))
 
-    class _Loop:
-        @staticmethod
-        def run_in_executor(_executor, function, *args):
-            scheduled.append((function, args))
-            return _Future()
-
-    module.asyncio = SimpleNamespace(get_running_loop=lambda: _Loop())
+    monkeypatch.setattr(module, "thread_pool_exec", capture_conversion, raising=False)
     monkeypatch.setattr(
         module,
         "get_request_json",
@@ -715,11 +717,11 @@ def _prepare_file_conversion_route(monkeypatch, *, authorized_kb_ids):
     )
     monkeypatch.setattr(module, "check_file_team_permission", lambda _file, _user_id: True)
     monkeypatch.setattr(module, "check_kb_team_permission", lambda kb, _user_id: kb.id in authorized_kb_ids)
-    return module, scheduled, removed
+    return module, conversions, removed
 
 
 def test_file_conversion_rejects_when_any_existing_linked_kb_is_unauthorized(monkeypatch):
-    module, scheduled, removed = _prepare_file_conversion_route(
+    module, conversions, removed = _prepare_file_conversion_route(
         monkeypatch,
         authorized_kb_ids={"kb-target", "kb-team-a"},
     )
@@ -727,12 +729,12 @@ def test_file_conversion_rejects_when_any_existing_linked_kb_is_unauthorized(mon
     result = _run(inspect.unwrap(module.convert)())
 
     assert result["code"] != 0
-    assert scheduled == []
+    assert conversions == []
     assert removed == []
 
 
-def test_file_conversion_schedules_only_preauthorized_existing_documents(monkeypatch):
-    module, scheduled, _removed = _prepare_file_conversion_route(
+def test_file_conversion_runs_only_preauthorized_existing_documents_synchronously(monkeypatch):
+    module, conversions, _removed = _prepare_file_conversion_route(
         monkeypatch,
         authorized_kb_ids={"kb-target", "kb-team-a", "kb-private-b"},
     )
@@ -740,8 +742,9 @@ def test_file_conversion_schedules_only_preauthorized_existing_documents(monkeyp
     result = _run(inspect.unwrap(module.convert)())
 
     assert result["code"] == 0
-    assert len(scheduled) == 1
-    function, args = scheduled[0]
+    assert result["data"] is True
+    assert len(conversions) == 1
+    function, args = conversions[0]
     assert function is module._convert_files
     assert args[0] == ["file-1"]
     assert [(doc.id, owner_id) for doc, owner_id in args[1]["file-1"]] == [
@@ -752,13 +755,48 @@ def test_file_conversion_schedules_only_preauthorized_existing_documents(monkeyp
     assert args[3] == "member-active"
 
 
+def test_file_conversion_rejects_cross_owner_targets_without_mutation(monkeypatch):
+    module, conversions, removed = _prepare_file_conversion_route(
+        monkeypatch,
+        authorized_kb_ids={"kb-target", "kb-team-a", "kb-private-b"},
+        target_owner_id="owner-other",
+    )
+
+    result = _run(inspect.unwrap(module.convert)())
+
+    assert result["code"] != 0
+    assert conversions == []
+    assert removed == []
+
+
+def test_file_conversion_returns_error_when_synchronous_worker_fails(monkeypatch):
+    module, _conversions, removed = _prepare_file_conversion_route(
+        monkeypatch,
+        authorized_kb_ids={"kb-target", "kb-team-a", "kb-private-b"},
+    )
+
+    async def fail_conversion(_function, *_args):
+        raise RuntimeError("late conversion failure")
+
+    monkeypatch.setattr(module, "thread_pool_exec", fail_conversion, raising=False)
+
+    result = _run(inspect.unwrap(module.convert)())
+
+    assert result["code"] != 0
+    assert removed == []
+
+
 def test_file_conversion_route_deduplicates_overlapping_file_and_folder_selection(monkeypatch):
     module = _load_route_module(monkeypatch, "file2document_api")
     module.current_user = SimpleNamespace(id="member-active")
     folder = SimpleNamespace(id="folder-1", type="folder")
     files = {
-        "file-1": SimpleNamespace(id="file-1", type="doc", name="A.txt", location="A.txt", size=3),
-        "file-2": SimpleNamespace(id="file-2", type="doc", name="B.txt", location="B.txt", size=5),
+        "file-1": SimpleNamespace(
+            id="file-1", tenant_id="owner-target", type="doc", name="A.txt", location="A.txt", size=3
+        ),
+        "file-2": SimpleNamespace(
+            id="file-2", tenant_id="owner-target", type="doc", name="B.txt", location="B.txt", size=5
+        ),
     }
     target_kb = SimpleNamespace(
         id="kb-target",
@@ -767,20 +805,12 @@ def test_file_conversion_route_deduplicates_overlapping_file_and_folder_selectio
         pipeline_id=None,
         parser_config={},
     )
-    scheduled = []
+    conversions = []
 
-    class _Future:
-        @staticmethod
-        def add_done_callback(_callback):
-            return None
+    async def capture_conversion(function, *args):
+        conversions.append((function, args))
 
-    class _Loop:
-        @staticmethod
-        def run_in_executor(_executor, function, *args):
-            scheduled.append((function, args))
-            return _Future()
-
-    module.asyncio = SimpleNamespace(get_running_loop=lambda: _Loop())
+    monkeypatch.setattr(module, "thread_pool_exec", capture_conversion, raising=False)
     monkeypatch.setattr(
         module,
         "get_request_json",
@@ -802,18 +832,22 @@ def test_file_conversion_route_deduplicates_overlapping_file_and_folder_selectio
     result = _run(inspect.unwrap(module.convert)())
 
     assert result["code"] == 0
-    assert len(scheduled) == 1
-    function, args = scheduled[0]
+    assert len(conversions) == 1
+    function, args = conversions[0]
     assert function is module._convert_files
     assert args[0] == ["file-1", "file-2"]
     assert list(args[1]) == args[0]
 
 
-def test_file_conversion_worker_deduplicates_files_before_deleting_and_creating(monkeypatch):
+def test_file_conversion_worker_deduplicates_files_before_staging(monkeypatch):
     module = _load_route_module(monkeypatch, "file2document_api")
     source_files = {
-        "file-1": SimpleNamespace(id="file-1", type="doc", name="A.txt", location="A.txt", size=3),
-        "file-2": SimpleNamespace(id="file-2", type="doc", name="B.txt", location="B.txt", size=5),
+        "file-1": SimpleNamespace(
+            id="file-1", tenant_id="owner-target", type="doc", name="A.txt", location="A.txt", size=3
+        ),
+        "file-2": SimpleNamespace(
+            id="file-2", tenant_id="owner-target", type="doc", name="B.txt", location="B.txt", size=5
+        ),
     }
     old_documents = {
         "file-1": SimpleNamespace(id="doc-old-1", kb_id="kb-old"),
@@ -822,102 +856,307 @@ def test_file_conversion_worker_deduplicates_files_before_deleting_and_creating(
     target_kbs = [
         SimpleNamespace(
             id="kb-target-1",
-            tenant_id="owner-target-1",
+            tenant_id="owner-target",
             parser_id="naive",
             pipeline_id=None,
             parser_config={},
         ),
         SimpleNamespace(
             id="kb-target-2",
-            tenant_id="owner-target-2",
+            tenant_id="owner-target",
             parser_id="naive",
             pipeline_id=None,
             parser_config={},
         ),
     ]
-    removed = []
-    deleted_links = []
-    inserted_documents = []
-    inserted_links = []
-
-    monkeypatch.setattr(
-        module.DocumentService,
-        "remove_document",
-        lambda document, owner_id: removed.append((document.id, owner_id)),
-    )
-    monkeypatch.setattr(
-        module.DocumentService,
-        "insert",
-        lambda payload: inserted_documents.append(payload) or SimpleNamespace(id=payload["id"]),
-    )
-    monkeypatch.setattr(
-        module.File2DocumentService,
-        "delete_by_document_id",
-        lambda document_id: deleted_links.append(document_id),
-    )
-    monkeypatch.setattr(module.File2DocumentService, "insert", lambda payload: inserted_links.append(payload))
     monkeypatch.setattr(module.FileService, "get_by_id", lambda file_id: (True, source_files[file_id]))
-    monkeypatch.setattr(module.FileService, "get_parser", lambda *_args: "naive")
-
-    module._convert_files(
-        ["file-1", "file-2", "file-1", "file-2"],
-        {
+    monkeypatch.setattr(
+        module.KnowledgebaseService,
+        "get_by_id",
+        lambda kb_id: (True, next(kb for kb in target_kbs if kb.id == kb_id)),
+    )
+    monkeypatch.setattr(module, "check_file_team_permission", lambda *_args: True)
+    monkeypatch.setattr(module, "check_kb_team_permission", lambda *_args: True)
+    monkeypatch.setattr(
+        module,
+        "_authorize_existing_documents",
+        lambda _file_ids, _actor_id: {
             "file-1": [(old_documents["file-1"], "owner-old")],
             "file-2": [(old_documents["file-2"], "owner-old")],
         },
-        target_kbs,
+    )
+    monkeypatch.setattr(module.FileService, "get_parser", lambda *_args: "naive")
+
+    files, kbs, _existing = module._load_conversion_state(
+        ["file-1", "file-2", "file-1", "file-2"],
+        ["kb-target-1", "kb-target-2", "kb-target-1"],
         "member-active",
     )
+    staged = module._stage_document_replacements(files, kbs, "member-active")
 
-    assert removed == [("doc-old-1", "owner-old"), ("doc-old-2", "owner-old")]
-    assert deleted_links == ["doc-old-1", "doc-old-2"]
-    assert [(document["name"], document["kb_id"]) for document in inserted_documents] == [
+    assert [file.id for file in files] == ["file-1", "file-2"]
+    assert [kb.id for kb in kbs] == ["kb-target-1", "kb-target-2"]
+    assert [(document["name"], document["kb_id"]) for _file_id, document in staged] == [
         ("A.txt", "kb-target-1"),
         ("A.txt", "kb-target-2"),
         ("B.txt", "kb-target-1"),
         ("B.txt", "kb-target-2"),
     ]
-    assert [link["file_id"] for link in inserted_links] == ["file-1", "file-1", "file-2", "file-2"]
+    assert [file_id for file_id, _document in staged] == ["file-1", "file-1", "file-2", "file-2"]
 
 
-def test_file_conversion_worker_never_expands_deletion_from_bare_file_id(monkeypatch):
+def test_file_conversion_worker_rejects_relationship_changes_before_replacement(monkeypatch):
     module = _load_route_module(monkeypatch, "file2document_api")
     old_document = SimpleNamespace(id="doc-team-a", kb_id="kb-team-a")
     target_kb = _team_kb()
-    source_file = SimpleNamespace(id="file-1", type="doc", name="A.txt", location="A.txt", size=3)
-    removed = []
-    deleted_links = []
-
+    source_file = SimpleNamespace(
+        id="file-1",
+        tenant_id=target_kb.tenant_id,
+        type="doc",
+        name="A.txt",
+        location="A.txt",
+        size=3,
+    )
+    changed_document = SimpleNamespace(id="doc-changed", kb_id="kb-team-a")
     monkeypatch.setattr(
-        module.File2DocumentService,
-        "get_by_file_id",
-        lambda _file_id: pytest.fail("worker must not rediscover links from a bare file id"),
+        module,
+        "_load_conversion_state",
+        lambda *_args: (
+            [source_file],
+            [target_kb],
+            {source_file.id: [(changed_document, "owner-a")]},
+        ),
     )
     monkeypatch.setattr(
-        module.File2DocumentService,
-        "delete_by_file_id",
-        lambda _file_id: pytest.fail("worker must not delete links by a bare file id"),
-    )
-    monkeypatch.setattr(module.File2DocumentService, "delete_by_document_id", lambda doc_id: deleted_links.append(doc_id))
-    monkeypatch.setattr(module.File2DocumentService, "insert", lambda payload: payload)
-    monkeypatch.setattr(module.FileService, "get_by_id", lambda _file_id: (True, source_file))
-    monkeypatch.setattr(module.FileService, "get_parser", lambda *_args: "naive")
-    monkeypatch.setattr(
-        module.DocumentService,
-        "remove_document",
-        lambda doc, owner_id: removed.append((doc.id, owner_id)),
-    )
-    monkeypatch.setattr(module.DocumentService, "insert", lambda payload: SimpleNamespace(id=payload["id"]))
-
-    module._convert_files(
-        [source_file.id],
-        {source_file.id: [(old_document, "owner-a")]},
-        [target_kb],
-        "member-active",
+        module,
+        "_replace_document_rows",
+        lambda *_args: pytest.fail("changed relationships must be rejected before replacement"),
     )
 
-    assert removed == [(old_document.id, "owner-a")]
-    assert deleted_links == [old_document.id]
+    with pytest.raises(RuntimeError, match="relationships changed concurrently"):
+        module._convert_files(
+            [source_file.id],
+            {source_file.id: [(old_document, "owner-a")]},
+            [target_kb],
+            "member-active",
+        )
+
+
+
+@pytest.mark.parametrize("failure_point", ["second_target", "after_original_delete"])
+def test_file_conversion_rolls_back_staged_targets_and_preserves_original_on_late_failure(monkeypatch, failure_point):
+    module = _load_route_module(monkeypatch, "file2document_api")
+    database = SqliteDatabase(":memory:")
+    models = [File, Knowledgebase, Document, File2Document, Task]
+
+    with database.bind_ctx(models), database.connection_context():
+        database.create_tables(models)
+        monkeypatch.setattr(module, "DB", database, raising=False)
+        source_file = File.create(
+            id="file-1",
+            parent_id="root",
+            tenant_id="owner-1",
+            created_by="owner-1",
+            name="A.txt",
+            type="doc",
+            location="A.txt",
+            size=3,
+        )
+        old_kb = Knowledgebase.create(
+            id="kb-old",
+            tenant_id="owner-1",
+            name="Old",
+            embd_id="embedding-1",
+            created_by="owner-1",
+            doc_num=1,
+        )
+        targets = [
+            Knowledgebase.create(
+                id=f"kb-target-{index}",
+                tenant_id="owner-1",
+                name=f"Target {index}",
+                embd_id="embedding-1",
+                created_by="owner-1",
+            )
+            for index in (1, 2)
+        ]
+        old_document = Document.create(
+            id="doc-old",
+            kb_id=old_kb.id,
+            parser_id="naive",
+            type="doc",
+            created_by="owner-1",
+            name="A.txt",
+            location="A.txt",
+            size=3,
+            suffix="txt",
+        )
+        File2Document.create(id="link-old", file_id=source_file.id, document_id=old_document.id)
+
+        if failure_point == "second_target":
+            original_insert = module._insert_staged_document
+            insert_count = 0
+
+            def fail_after_second_insert(*args):
+                nonlocal insert_count
+                result = original_insert(*args)
+                insert_count += 1
+                if insert_count == 2:
+                    raise RuntimeError("late insert failure")
+                return result
+
+            monkeypatch.setattr(module, "_insert_staged_document", fail_after_second_insert)
+        else:
+            original_delete = module._delete_original_document
+
+            def fail_after_original_delete(*args):
+                original_delete(*args)
+                raise RuntimeError("late delete failure")
+
+            monkeypatch.setattr(module, "_delete_original_document", fail_after_original_delete)
+
+        monkeypatch.setattr(
+            module.DocumentService,
+            "cleanup_document_resources",
+            lambda *_args: pytest.fail("external cleanup must happen only after a durable replacement"),
+            raising=False,
+        )
+
+        with pytest.raises(RuntimeError, match="late (insert|delete) failure"):
+            module._replace_document_rows(
+                [source_file],
+                targets,
+                {source_file.id: [(old_document, "owner-1")]},
+                "owner-1",
+            )
+
+        assert [document.id for document in Document.select()] == [old_document.id]
+        assert [(link.file_id, link.document_id) for link in File2Document.select()] == [
+            (source_file.id, old_document.id)
+        ]
+        assert Knowledgebase.get_by_id(old_kb.id).doc_num == 1
+        assert [Knowledgebase.get_by_id(target.id).doc_num for target in targets] == [0, 0]
+
+
+def test_cross_owner_conversion_has_zero_mutations_and_source_deletion_cannot_touch_target(monkeypatch):
+    module = _load_route_module(monkeypatch, "file2document_api")
+    database = SqliteDatabase(":memory:")
+    models = [File, Knowledgebase, Document, File2Document, Task]
+
+    with database.bind_ctx(models), database.connection_context():
+        database.create_tables(models)
+        monkeypatch.setattr(module, "DB", database, raising=False)
+        monkeypatch.setattr(module, "check_file_team_permission", lambda *_args: True)
+        monkeypatch.setattr(module, "check_kb_team_permission", lambda *_args: True)
+        source_file = File.create(
+            id="file-owner-a",
+            parent_id="root",
+            tenant_id="owner-a",
+            created_by="owner-a",
+            name="A.txt",
+            type="doc",
+            location="A.txt",
+            size=3,
+        )
+        target_kb = Knowledgebase.create(
+            id="kb-owner-b",
+            tenant_id="owner-b",
+            name="Owner B",
+            embd_id="embedding-1",
+            created_by="owner-b",
+            doc_num=1,
+        )
+        target_document = Document.create(
+            id="doc-owner-b",
+            kb_id=target_kb.id,
+            parser_id="naive",
+            type="doc",
+            created_by="owner-b",
+            name="Existing.txt",
+            location="Existing.txt",
+            size=4,
+            suffix="txt",
+        )
+
+        with pytest.raises(PermissionError, match="same owner"):
+            module._replace_document_rows([source_file], [target_kb], {source_file.id: []}, "authorized-actor")
+
+        assert [document.id for document in Document.select()] == [target_document.id]
+        assert File2Document.select().count() == 0
+        source_file.delete_instance()
+        assert Document.get_by_id(target_document.id).kb_id == target_kb.id
+        assert Knowledgebase.get_by_id(target_kb.id).doc_num == 1
+
+
+def test_file_conversion_cleans_external_state_only_after_durable_replacement(monkeypatch):
+    module = _load_route_module(monkeypatch, "file2document_api")
+    database = SqliteDatabase(":memory:")
+    models = [File, Knowledgebase, Document, File2Document, Task]
+
+    with database.bind_ctx(models), database.connection_context():
+        database.create_tables(models)
+        monkeypatch.setattr(module, "DB", database, raising=False)
+        source_file = File.create(
+            id="file-1",
+            parent_id="root",
+            tenant_id="owner-1",
+            created_by="owner-1",
+            name="A.txt",
+            type="doc",
+            location="A.txt",
+            size=3,
+        )
+        old_kb = Knowledgebase.create(
+            id="kb-old",
+            tenant_id="owner-1",
+            name="Old",
+            embd_id="embedding-1",
+            created_by="owner-1",
+            doc_num=1,
+        )
+        target_kb = Knowledgebase.create(
+            id="kb-target",
+            tenant_id="owner-1",
+            name="Target",
+            embd_id="embedding-1",
+            created_by="owner-1",
+        )
+        old_document = Document.create(
+            id="doc-old",
+            kb_id=old_kb.id,
+            parser_id="naive",
+            type="doc",
+            created_by="owner-1",
+            name="A.txt",
+            location="A.txt",
+            size=3,
+            suffix="txt",
+        )
+        File2Document.create(id="link-old", file_id=source_file.id, document_id=old_document.id)
+        cleanup_calls = []
+
+        def verify_durable_cleanup(document, owner_id):
+            assert database.in_transaction() is False
+            assert Document.get_or_none(Document.id == document.id) is None
+            assert Document.select().where(Document.kb_id == target_kb.id).count() == 1
+            cleanup_calls.append((document.id, owner_id))
+
+        monkeypatch.setattr(module.DocumentService, "cleanup_document_resources", verify_durable_cleanup)
+
+        module._replace_document_rows(
+            [source_file],
+            [target_kb],
+            {source_file.id: [(old_document, "owner-1")]},
+            "owner-1",
+        )
+
+        assert cleanup_calls == [(old_document.id, "owner-1")]
+        assert Knowledgebase.get_by_id(old_kb.id).doc_num == 0
+        assert Knowledgebase.get_by_id(target_kb.id).doc_num == 1
+        links = list(File2Document.select())
+        assert len(links) == 1
+        assert links[0].file_id == source_file.id
+        assert links[0].document_id != old_document.id
 
 
 def test_web_upload_storage_calls_use_kb_owner_context(monkeypatch):

@@ -14,21 +14,24 @@
 #  limitations under the License
 #
 
-import asyncio
 import logging
 from pathlib import Path
 
 from api.apps import current_user, login_required
 from api.common.check_team_permission import check_file_team_permission, check_kb_team_permission
-from api.db import FileType
+from api.db import FileType, TenantPermission
+from api.db.db_models import DB, Document, File, File2Document, Knowledgebase, Task
 from api.db.services.document_service import DocumentService
 from api.db.services.file2document_service import File2DocumentService
 from api.db.services.file_service import FileService
 from api.db.services.knowledgebase_service import KnowledgebaseService
+from api.db.services.team_service import TeamService, select_for_update
 from api.utils.api_utils import get_data_error_result, get_json_result, get_request_json, server_error_response, validate_request
-from common.misc_utils import get_uuid
+from common.constants import StatusEnum
+from common.misc_utils import get_uuid, thread_pool_exec
 
 logger = logging.getLogger(__name__)
+CROSS_OWNER_ERROR = "The source file and target dataset must have the same owner."
 
 
 def _authorize_existing_documents(file_ids, actor_id):
@@ -52,24 +55,39 @@ def _authorize_existing_documents(file_ids, actor_id):
     return authorized_documents
 
 
-def _convert_files(file_ids, existing_documents_by_file, target_kbs, actor_id):
-    """Synchronous worker: delete old docs and insert new ones for the given file/kb pairs."""
-    file_ids = list(dict.fromkeys(file_ids))
-    for id in file_ids:
-        for document, owner_tenant_id in existing_documents_by_file.get(id, []):
-            DocumentService.remove_document(document, owner_tenant_id)
-            File2DocumentService.delete_by_document_id(document.id)
+def _ensure_same_owner(files, target_kbs):
+    if any(file.tenant_id != kb.tenant_id for file in files for kb in target_kbs):
+        raise PermissionError(CROSS_OWNER_ERROR)
 
-        e, file = FileService.get_by_id(id)
-        if not e:
-            continue
 
+def _load_conversion_state(file_ids, kb_ids, actor_id):
+    files = []
+    for file_id in list(dict.fromkeys(file_ids)):
+        found, file = FileService.get_by_id(file_id)
+        if not found or not file:
+            raise LookupError("File not found!")
+        if not check_file_team_permission(file, actor_id):
+            raise PermissionError("No authorization.")
+        files.append(file)
+
+    target_kbs = []
+    for kb_id in list(dict.fromkeys(kb_ids)):
+        found, kb = KnowledgebaseService.get_by_id(kb_id)
+        if not found:
+            raise LookupError("Can't find this dataset!")
+        if not check_kb_team_permission(kb, actor_id):
+            raise PermissionError("No authorization.")
+        target_kbs.append(kb)
+
+    _ensure_same_owner(files, target_kbs)
+    return files, target_kbs, _authorize_existing_documents([file.id for file in files], actor_id)
+
+
+def _stage_document_replacements(files, target_kbs, actor_id):
+    staged = []
+    for file in files:
         for kb in target_kbs:
-            owner_tenant_id = kb.tenant_id
-            if not owner_tenant_id:
-                logging.warning("owner tenant not found for kb_id=%s, skipping document conversion", kb.id)
-                continue
-            doc = DocumentService.insert({
+            document = {
                 "id": get_uuid(),
                 "kb_id": kb.id,
                 "parser_id": FileService.get_parser(file.type, file.name, kb.parser_id),
@@ -80,13 +98,147 @@ def _convert_files(file_ids, existing_documents_by_file, target_kbs, actor_id):
                 "name": file.name,
                 "suffix": Path(file.name).suffix.lstrip("."),
                 "location": file.location,
-                "size": file.size
-            })
-            File2DocumentService.insert({
-                "id": get_uuid(),
-                "file_id": id,
-                "document_id": doc.id,
-            })
+                "size": file.size,
+            }
+            staged.append((file.id, document))
+    return staged
+
+
+def _insert_staged_document(file_id, document):
+    inserted = DocumentService.insert_in_transaction(document)
+    File2DocumentService.insert_in_transaction(
+        {
+            "id": get_uuid(),
+            "file_id": file_id,
+            "document_id": inserted.id,
+        }
+    )
+    return inserted
+
+
+def _delete_original_document(document):
+    if File2DocumentService.delete_by_document_id_in_transaction(document.id) < 1:
+        raise RuntimeError("File/document relationship changed concurrently.")
+    if not DocumentService.delete_in_transaction(document):
+        raise RuntimeError("Document changed concurrently.")
+
+
+def _replace_document_rows(files, target_kbs, existing_documents_by_file, actor_id):
+    """Atomically stage replacements, then delete originals and clean external state."""
+    file_ids = [file.id for file in files]
+    target_kb_ids = [kb.id for kb in target_kbs]
+    old_documents = {
+        document.id: document
+        for file_id in file_ids
+        for document, _owner_tenant_id in existing_documents_by_file.get(file_id, [])
+    }
+    old_kb_ids = {document.kb_id for document in old_documents.values()}
+    preliminary_kbs = {kb.id: kb for kb in target_kbs}
+    for kb_id in old_kb_ids:
+        found, kb = KnowledgebaseService.get_by_id(kb_id)
+        if not found:
+            raise LookupError("Cannot find a dataset associated with this file.")
+        preliminary_kbs[kb_id] = kb
+
+    cleanup = []
+    with DB.atomic():
+        team_owners = sorted(
+            {
+                (kb.team_id, kb.tenant_id)
+                for kb in preliminary_kbs.values()
+                if getattr(kb, "permission", None) == TenantPermission.TEAM.value and getattr(kb, "team_id", None)
+            }
+        )
+        for team_id, owner_id in team_owners:
+            if TeamService.get_owned_team_for_update(team_id, owner_id) is None:
+                raise PermissionError("No authorization.")
+
+        locked_files = list(
+            select_for_update(File.select().where(File.id.in_(file_ids))).order_by(File.id)
+        )
+        all_kb_ids = set(target_kb_ids) | old_kb_ids
+        locked_kbs = list(
+            select_for_update(
+                Knowledgebase.select().where(
+                    Knowledgebase.id.in_(all_kb_ids),
+                    Knowledgebase.status == StatusEnum.VALID.value,
+                )
+            ).order_by(Knowledgebase.id)
+        )
+        if {file.id for file in locked_files} != set(file_ids) or {kb.id for kb in locked_kbs} != all_kb_ids:
+            raise RuntimeError("Conversion inputs changed concurrently.")
+
+        files_by_id = {file.id: file for file in locked_files}
+        kbs_by_id = {kb.id: kb for kb in locked_kbs}
+        if any(
+            (kbs_by_id[kb_id].tenant_id, kbs_by_id[kb_id].permission, kbs_by_id[kb_id].team_id)
+            != (kb.tenant_id, kb.permission, kb.team_id)
+            for kb_id, kb in preliminary_kbs.items()
+        ):
+            raise RuntimeError("Dataset assignments changed concurrently.")
+        ordered_files = [files_by_id[file_id] for file_id in file_ids]
+        ordered_targets = [kbs_by_id[kb_id] for kb_id in target_kb_ids]
+        if any(not check_file_team_permission(file, actor_id) for file in ordered_files):
+            raise PermissionError("No authorization.")
+        if any(not check_kb_team_permission(kb, actor_id) for kb in locked_kbs):
+            raise PermissionError("No authorization.")
+        _ensure_same_owner(ordered_files, ordered_targets)
+
+        selected_links = list(
+            select_for_update(File2Document.select().where(File2Document.file_id.in_(file_ids))).order_by(
+                File2Document.id
+            )
+        )
+        current_old_document_ids = {link.document_id for link in selected_links}
+        if current_old_document_ids != set(old_documents):
+            raise RuntimeError("File/document relationships changed concurrently.")
+
+        if current_old_document_ids:
+            list(
+                select_for_update(
+                    File2Document.select().where(File2Document.document_id.in_(current_old_document_ids))
+                ).order_by(File2Document.id)
+            )
+            locked_documents = list(
+                select_for_update(Document.select().where(Document.id.in_(current_old_document_ids))).order_by(Document.id)
+            )
+        else:
+            locked_documents = []
+        if {document.id for document in locked_documents} != current_old_document_ids:
+            raise RuntimeError("Documents changed concurrently.")
+
+        staged = _stage_document_replacements(ordered_files, ordered_targets, actor_id)
+        for file_id, document in staged:
+            _insert_staged_document(file_id, document)
+
+        if current_old_document_ids:
+            Task.delete().where(Task.doc_id.in_(current_old_document_ids)).execute()
+        for document in locked_documents:
+            _delete_original_document(document)
+            cleanup.append((document, kbs_by_id[document.kb_id].tenant_id))
+
+    for document, owner_tenant_id in cleanup:
+        DocumentService.cleanup_document_resources(document, owner_tenant_id)
+
+
+def _convert_files(file_ids, existing_documents_by_file, target_kbs, actor_id):
+    """Revalidate current state and complete the replacement before returning."""
+    files, fresh_target_kbs, fresh_existing_documents = _load_conversion_state(
+        file_ids,
+        [kb.id for kb in target_kbs],
+        actor_id,
+    )
+    expected_document_ids = {
+        file_id: {document.id for document, _owner_id in documents}
+        for file_id, documents in existing_documents_by_file.items()
+    }
+    fresh_document_ids = {
+        file_id: {document.id for document, _owner_id in documents}
+        for file_id, documents in fresh_existing_documents.items()
+    }
+    if expected_document_ids != fresh_document_ids:
+        raise RuntimeError("File/document relationships changed concurrently.")
+    _replace_document_rows(files, fresh_target_kbs, fresh_existing_documents, actor_id)
 
 
 @manager.route('/files/link-to-datasets', methods=['POST'])  # noqa: F821
@@ -113,7 +265,7 @@ async def convert():
                 )
                 return get_data_error_result(message="File not found!")
 
-        # Validate all kb_ids exist before scheduling background work
+        # Validate all kb_ids exist before conversion work
         kb_map = {}
         for kb_id in kb_ids:
             e, kb = KnowledgebaseService.get_by_id(kb_id)
@@ -139,6 +291,7 @@ async def convert():
         all_file_ids = list(dict.fromkeys(all_file_ids))
 
         user_id = current_user.id
+        expanded_files = []
         for file_id in all_file_ids:
             e, file = FileService.get_by_id(file_id)
             if not e or not file:
@@ -159,6 +312,7 @@ async def convert():
                     kb_ids,
                 )
                 return get_data_error_result(message="No authorization.")
+            expanded_files.append(file)
 
         for kb_id, kb in kb_map.items():
             if not check_kb_team_permission(kb, user_id):
@@ -170,6 +324,17 @@ async def convert():
                     kb_ids,
                 )
                 return get_data_error_result(message="No authorization.")
+
+        try:
+            _ensure_same_owner(expanded_files, list(kb_map.values()))
+        except PermissionError as exc:
+            logger.warning(
+                "user_id=%s resource_type=file_to_dataset_link resource_id=batch action=validate_owner result=denied file_ids=%s kb_ids=%s",
+                user_id,
+                all_file_ids,
+                kb_ids,
+            )
+            return get_data_error_result(message=str(exc))
 
         try:
             existing_documents_by_file = _authorize_existing_documents(all_file_ids, user_id)
@@ -190,23 +355,17 @@ async def convert():
             )
             return get_data_error_result(message=str(exc))
 
-        # Run the blocking DB work in a thread so the event loop is not blocked.
-        # For large folders this prevents 504 Gateway Timeout by returning as
-        # soon as the background task is scheduled.
-        loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(
-            None,
+        # Keep the event loop responsive, but await the destructive conversion
+        # so the success response truthfully means the replacement committed.
+        await thread_pool_exec(
             _convert_files,
             all_file_ids,
             existing_documents_by_file,
             list(kb_map.values()),
             user_id,
         )
-        future.add_done_callback(
-            lambda f: logging.error("_convert_files failed: %s", f.exception()) if f.exception() else None
-        )
         logger.info(
-            "user_id=%s resource_type=file_to_dataset_link resource_id=batch action=schedule_convert result=scheduled file_ids=%s kb_ids=%s",
+            "user_id=%s resource_type=file_to_dataset_link resource_id=batch action=convert result=completed file_ids=%s kb_ids=%s",
             user_id,
             all_file_ids,
             kb_ids,

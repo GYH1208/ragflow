@@ -27,7 +27,7 @@ from api.db.services.user_service import TenantService
 from api.utils.api_utils import get_data_error_result, get_parser_config
 from common.constants import StatusEnum
 from common.misc_utils import get_uuid
-from common.time_utils import current_timestamp, datetime_format
+from common.time_utils import current_timestamp, datetime_format, get_format_time
 
 
 class KnowledgebaseService(CommonService):
@@ -63,6 +63,28 @@ class KnowledgebaseService(CommonService):
     def save_in_transaction(cls, **kwargs):
         """Insert a dataset without opening a second connection context."""
         return cls.model(**kwargs).save(force_insert=True)
+
+    @classmethod
+    def adjust_document_counts_in_transaction(
+        cls,
+        kb_id: str,
+        *,
+        doc_num: int,
+        token_num: int = 0,
+        chunk_num: int = 0,
+    ) -> int:
+        """Adjust dataset counters on the caller's existing transaction."""
+        return (
+            cls.model.update(
+                doc_num=cls.model.doc_num + doc_num,
+                token_num=cls.model.token_num + token_num,
+                chunk_num=cls.model.chunk_num + chunk_num,
+                update_time=current_timestamp(),
+                update_date=get_format_time(),
+            )
+            .where(cls.model.id == kb_id)
+            .execute()
+        )
 
     @classmethod
     def _visibility_and_status_filter(cls, active_team_ids, user_id):
