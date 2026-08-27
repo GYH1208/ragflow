@@ -61,6 +61,16 @@ const ownedTeam = {
   can_manage: true,
 };
 
+const migratedDefaultTeam = {
+  ...ownedTeam,
+  id: 'default-team',
+  name: '默认团队',
+  create_date: null,
+  create_time: null,
+  update_date: null,
+  update_time: null,
+} satisfies import('@/interfaces/database/user-setting').ITeam;
+
 const invitedMember = {
   id: 'user-2',
   email: 'member@example.com',
@@ -74,6 +84,15 @@ const response = <T,>(data: T) => ({
     code: 0,
     data,
     message: '',
+    status: 200,
+  },
+});
+
+const failedResponse = (message = 'Team request failed') => ({
+  data: {
+    code: 100,
+    data: false,
+    message,
     status: 200,
   },
 });
@@ -110,6 +129,28 @@ test('loads the flat owned, active, and invited team list returned by the servic
   expect(result.current.data).toEqual([ownedTeam]);
 });
 
+test('keeps nullable timestamps from a migrated default team', async () => {
+  mockListTeams.mockResolvedValue(response([migratedDefaultTeam]) as never);
+  const { result } = renderTeamHook(() => useTeams());
+
+  await waitFor(() => expect(result.current.loading).toBe(false));
+
+  expect(result.current.data).toEqual([migratedDefaultTeam]);
+});
+
+test('keeps the initial team list and exposes an error on business failure', async () => {
+  mockListTeams.mockResolvedValue(
+    failedResponse('Unable to list teams') as never,
+  );
+  const { result } = renderTeamHook(() => useTeams());
+
+  await waitFor(() =>
+    expect(result.current.error?.message).toBe('Unable to list teams'),
+  );
+
+  expect(result.current.data).toEqual([]);
+});
+
 test('loads members for the requested team', async () => {
   mockListTeamMembers.mockResolvedValue(response([invitedMember]) as never);
   const { result } = renderTeamHook(() => useTeamMembers('team-1'));
@@ -120,6 +161,19 @@ test('loads members for the requested team', async () => {
   expect(result.current.data).toEqual([invitedMember]);
 });
 
+test('keeps the initial member list and exposes an error on business failure', async () => {
+  mockListTeamMembers.mockResolvedValue(
+    failedResponse('Unable to list members') as never,
+  );
+  const { result } = renderTeamHook(() => useTeamMembers('team-1'));
+
+  await waitFor(() =>
+    expect(result.current.error?.message).toBe('Unable to list members'),
+  );
+
+  expect(result.current.data).toEqual([]);
+});
+
 test('creates a team with its name and invalidates all team queries', async () => {
   mockCreateTeam.mockResolvedValue(response(ownedTeam) as never);
   const { result, invalidateQueries } = renderTeamHook(() => useCreateTeam());
@@ -128,6 +182,15 @@ test('creates a team with its name and invalidates all team queries', async () =
 
   expect(mockCreateTeam).toHaveBeenCalledWith('HR 团队');
   expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ['teams'] });
+});
+
+test('does not invalidate team queries when creation fails', async () => {
+  mockCreateTeam.mockResolvedValue(failedResponse() as never);
+  const { result, invalidateQueries } = renderTeamHook(() => useCreateTeam());
+
+  await act(() => result.current.createTeam('HR 团队'));
+
+  expect(invalidateQueries).not.toHaveBeenCalled();
 });
 
 test('renames the requested team and invalidates all team queries', async () => {
@@ -179,6 +242,22 @@ test('invites by team and email and invalidates team and member queries', async 
   });
 });
 
+test('does not invalidate team or member queries when invitation fails', async () => {
+  mockInviteTeamMember.mockResolvedValue(failedResponse() as never);
+  const { result, invalidateQueries } = renderTeamHook(() =>
+    useInviteTeamMember(),
+  );
+
+  await act(() =>
+    result.current.inviteTeamMember({
+      teamId: 'team-1',
+      email: 'member@example.com',
+    }),
+  );
+
+  expect(invalidateQueries).not.toHaveBeenCalled();
+});
+
 test('removes the requested user and invalidates team and member queries', async () => {
   mockRemoveTeamMember.mockResolvedValue(response(true) as never);
   const { result, invalidateQueries } = renderTeamHook(() =>
@@ -194,6 +273,19 @@ test('removes the requested user and invalidates team and member queries', async
   expect(invalidateQueries).toHaveBeenCalledWith({
     queryKey: ['teams', 'team-1', 'members'],
   });
+});
+
+test('does not invalidate team or member queries when removal fails', async () => {
+  mockRemoveTeamMember.mockResolvedValue(failedResponse() as never);
+  const { result, invalidateQueries } = renderTeamHook(() =>
+    useRemoveTeamMember(),
+  );
+
+  await act(() =>
+    result.current.removeTeamMember({ teamId: 'team-1', userId: 'user-2' }),
+  );
+
+  expect(invalidateQueries).not.toHaveBeenCalled();
 });
 
 test.each(['accept', 'reject'] as const)(

@@ -107,10 +107,10 @@ export interface ITeamRecord {
   name: string;
   created_by: string;
   status: string;
-  create_date: string;
-  create_time: number;
-  update_date: string;
-  update_time: number;
+  create_date: string | null;
+  create_time: number | null;
+  update_date: string | null;
+  update_time: number | null;
 }
 
 export interface ITeam extends ITeamRecord {

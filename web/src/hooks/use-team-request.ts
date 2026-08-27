@@ -33,38 +33,46 @@ export const enum TeamApiAction {
 export const useTeams = () => {
   const {
     data,
+    error,
     isFetching: loading,
     refetch,
-  } = useQuery<ITeamListResponse>({
+  } = useQuery<ITeamListResponse, Error>({
     queryKey: teamKeys.all,
     initialData: [],
     gcTime: 0,
     queryFn: async () => {
-      const { data } = await listTeams();
-      return data?.data ?? [];
+      const { data: response } = await listTeams();
+      if (response.code !== 0) {
+        throw new Error(response.message || 'Failed to fetch teams');
+      }
+      return response.data ?? [];
     },
   });
 
-  return { data, loading, refetch };
+  return { data, error, loading, refetch };
 };
 
 export const useTeamMembers = (teamId: string) => {
   const {
     data,
+    error,
     isFetching: loading,
     refetch,
-  } = useQuery<ITeamMember[]>({
+  } = useQuery<ITeamMember[], Error>({
     queryKey: teamKeys.members(teamId),
     initialData: [],
     gcTime: 0,
     enabled: !!teamId,
     queryFn: async () => {
-      const { data } = await listTeamMembers(teamId);
-      return data?.data ?? [];
+      const { data: response } = await listTeamMembers(teamId);
+      if (response.code !== 0) {
+        throw new Error(response.message || 'Failed to fetch team members');
+      }
+      return response.data ?? [];
     },
   });
 
-  return { data, loading, refetch };
+  return { data, error, loading, refetch };
 };
 
 export const useCreateTeam = () => {
