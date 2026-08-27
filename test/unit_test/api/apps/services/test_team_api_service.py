@@ -14,7 +14,7 @@
 #  limitations under the License.
 #
 import pytest
-from peewee import SqliteDatabase
+from peewee import IntegrityError, OperationalError, SqliteDatabase
 
 from api.apps.services import team_api_service
 from api.apps.services.team_api_service import (
@@ -30,7 +30,7 @@ from api.apps.services.team_api_service import (
 from api.db import TeamMemberState, TenantPermission
 from api.db.db_models import Knowledgebase, Team, TeamMember, User
 from api.db.services.knowledgebase_service import KnowledgebaseService
-from api.db.services.team_service import TeamAuthorizationService, TeamMemberService, TeamService
+from api.db.services.team_service import TeamMemberService, TeamService
 from common.constants import StatusEnum
 
 
@@ -41,7 +41,16 @@ def team_database(monkeypatch):
     with database.bind_ctx(models), database.connection_context():
         database.create_tables(models)
         monkeypatch.setattr(team_api_service, "DB", database)
+        assert team_api_service.DB is database
+        assert all(model._meta.database is database for model in models)
         yield database
+
+
+def _bind_connection_context(monkeypatch, database, service, method_name):
+    """Rebind a decorated service method so its wrapper and models use one DB."""
+    method = getattr(service, method_name)
+    undecorated = method.__func__.__wrapped__
+    monkeypatch.setattr(service, method_name, classmethod(database.connection_context()(undecorated)))
 
 
 def _user(user_id, email=None, *, admin=False, status=StatusEnum.VALID.value):
@@ -117,24 +126,27 @@ def test_rename_team_hides_cross_owner_teams_and_rejects_duplicate_names(team_da
     assert renamed["name"] == "Accounting"
 
 
-def test_delete_team_unassigns_datasets_atomically(monkeypatch):
-    updates = []
-    deletions = []
-    monkeypatch.setattr(TeamAuthorizationService, "can_manage_team", lambda *_args: True)
-    monkeypatch.setattr(
-        KnowledgebaseService,
-        "filter_update",
-        lambda conditions, values: updates.append(values) or 2,
-    )
-    monkeypatch.setattr(TeamMemberService, "deactivate_by_team", lambda team_id: deletions.append(("members", team_id)))
-    monkeypatch.setattr(TeamService, "deactivate", lambda team_id: deletions.append(("team", team_id)))
+def test_delete_team_does_not_nest_connection_contexts_on_the_transaction_database(team_database, monkeypatch):
+    _user("admin-1", admin=True)
+    _team("team-1", "admin-1")
+    _member("member-1", "team-1", "member-1")
+    _kb("kb-1", "admin-1", team_id="team-1")
+    _bind_connection_context(monkeypatch, team_database, KnowledgebaseService, "filter_update")
+    _bind_connection_context(monkeypatch, team_database, TeamMemberService, "deactivate_by_team")
+    _bind_connection_context(monkeypatch, team_database, TeamService, "deactivate")
 
-    ok, result = delete_team("admin-1", "team-1")
+    try:
+        ok, result = delete_team("admin-1", "team-1")
+    except OperationalError as error:
+        pytest.fail(f"transactional delete closed its active connection: {error}")
 
     assert ok is True
-    assert result == {"unassigned_dataset_count": 2}
-    assert updates == [{"permission": "me", "team_id": None}]
-    assert deletions == [("members", "team-1"), ("team", "team-1")]
+    assert result == {"unassigned_dataset_count": 1}
+    assert Knowledgebase.get_by_id("kb-1").permission == TenantPermission.ME.value
+    assert Knowledgebase.get_by_id("kb-1").team_id is None
+    assert TeamMember.get_by_id("member-1").status == StatusEnum.INVALID.value
+    assert Team.get_by_id("team-1").status == StatusEnum.INVALID.value
+    assert team_database.is_closed() is False
 
 
 def test_deactivate_helpers_only_invalidate_current_valid_rows(team_database):
@@ -157,7 +169,7 @@ def test_delete_team_rolls_back_every_step_on_failure(team_database, monkeypatch
     _team("team-1", "admin-1")
     _member("member-1", "team-1", "member-1")
     _kb("kb-1", "admin-1", team_id="team-1")
-    monkeypatch.setattr(TeamService, "deactivate", lambda _team_id: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(Team, "update", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
 
     with pytest.raises(RuntimeError, match="boom"):
         delete_team("admin-1", "team-1")
@@ -201,6 +213,97 @@ def test_invite_reuses_an_invalid_unique_relationship(team_database):
     assert relation.invited_by == "admin-1"
 
 
+def test_invite_reads_and_restores_on_the_transaction_database(team_database, monkeypatch):
+    _user("admin-1", admin=True)
+    _user("member-1", "member@example.com")
+    _team("team-1", "admin-1")
+    _member("old-rel", "team-1", "member-1", status=StatusEnum.INVALID.value)
+    transaction_states = []
+    original_get_or_none = TeamMember.get_or_none
+    original_update = TeamMember.update
+
+    def tracking_get_or_none(*query):
+        transaction_states.append(("read", team_database.in_transaction()))
+        return original_get_or_none(*query)
+
+    def tracking_update(__data=None, /, **update):
+        transaction_states.append(("restore", team_database.in_transaction()))
+        return original_update(__data, **update)
+
+    monkeypatch.setattr(TeamMember, "get_or_none", tracking_get_or_none)
+    monkeypatch.setattr(TeamMember, "update", tracking_update)
+    _bind_connection_context(monkeypatch, team_database, TeamMemberService, "update_by_id")
+
+    try:
+        ok, result = invite_member("admin-1", "team-1", "member@example.com")
+    except OperationalError as error:
+        pytest.fail(f"transactional invite closed its active connection: {error}")
+
+    assert ok is True
+    assert result["state"] == TeamMemberState.INVITED.value
+    assert transaction_states == [("read", True), ("restore", True)]
+    assert team_database.is_closed() is False
+
+
+def test_invite_invalid_relationship_race_only_allows_the_winner(team_database, monkeypatch):
+    _user("admin-1", admin=True)
+    _user("member-1", "member@example.com")
+    _team("team-1", "admin-1")
+    _member("relation-1", "team-1", "member-1", status=StatusEnum.INVALID.value)
+    original_update = TeamMember.update
+    raced = False
+
+    def racing_update(__data=None, /, **update):
+        nonlocal raced
+        values = __data or update
+        if not raced and values.get("status") == StatusEnum.VALID.value:
+            raced = True
+            (
+                original_update(
+                    {
+                        "status": StatusEnum.VALID.value,
+                        "state": TeamMemberState.INVITED.value,
+                        "invited_by": "admin-1",
+                    }
+                )
+                .where(TeamMember.id == "relation-1")
+                .execute()
+            )
+        return original_update(__data, **update)
+
+    monkeypatch.setattr(TeamMember, "update", racing_update)
+
+    assert invite_member("admin-1", "team-1", "member@example.com") == (False, "User has already been invited.")
+
+
+def test_invite_insert_race_reloads_the_winning_relationship(team_database, monkeypatch):
+    _user("admin-1", admin=True)
+    _user("member-1", "member@example.com")
+    _team("team-1", "admin-1")
+    winner = type("MemberRecord", (), {"id": "winner", "status": StatusEnum.VALID.value, "state": TeamMemberState.ACTIVE.value})()
+    relationships = iter([None, winner])
+    transaction_states = []
+
+    def racing_get_or_none(*_args):
+        transaction_states.append(("read", team_database.in_transaction()))
+        return next(relationships)
+
+    def racing_save(*_args, **_kwargs):
+        transaction_states.append(("insert", team_database.in_transaction()))
+        raise IntegrityError("duplicate")
+
+    monkeypatch.setattr(TeamMember, "get_or_none", racing_get_or_none)
+    monkeypatch.setattr(TeamMember, "save", racing_save)
+
+    try:
+        result = invite_member("admin-1", "team-1", "member@example.com")
+    except IntegrityError as error:
+        pytest.fail(f"concurrent insert conflict escaped the application service: {error}")
+    assert result == (False, "User is already in the team.")
+    assert transaction_states == [("read", True), ("insert", True), ("read", True)]
+    assert team_database.is_closed() is False
+
+
 def test_invitation_accept_and_reject_only_change_the_named_current_user(team_database):
     _team("team-1", "admin-1")
     _member("invite-1", "team-1", "member-1", state=TeamMemberState.INVITED.value)
@@ -211,7 +314,7 @@ def test_invitation_accept_and_reject_only_change_the_named_current_user(team_da
     assert TeamMember.get_by_id("invite-2").state == TeamMemberState.INVITED.value
     assert update_invitation("member-2", "team-1", "reject") == (True, True)
     assert TeamMember.get_by_id("invite-2").status == StatusEnum.INVALID.value
-    assert update_invitation("member-3", "team-1", "accept") == (False, "Invitation not found.")
+    assert update_invitation("member-3", "team-1", "accept") == (False, "No authorization.")
 
 
 def test_member_can_leave_self_and_only_owner_admin_can_remove_others(team_database):
@@ -258,6 +361,17 @@ def test_list_teams_returns_owned_active_and_invited_entries_with_counts(team_da
     assert by_id["owned"]["dataset_count"] == 2
     assert by_id["joined"]["membership_state"] == TeamMemberState.ACTIVE.value
     assert by_id["invited"]["membership_state"] == TeamMemberState.INVITED.value
+
+
+def test_list_teams_marks_historical_owner_as_unmanageable_after_admin_revocation(team_database):
+    _user("former-admin", admin=False)
+    _team("owned", "former-admin")
+
+    ok, teams = list_teams("former-admin")
+
+    assert ok is True
+    assert teams[0]["membership_state"] == "owner"
+    assert teams[0]["can_manage"] is False
 
 
 def test_members_are_visible_only_to_the_owner_admin(team_database):

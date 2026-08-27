@@ -94,6 +94,20 @@ def test_accept_invitation_uses_current_user(team_api_module, monkeypatch):
     assert seen == [("member-1", "team-1", "accept")]
 
 
+def test_missing_current_user_invitation_returns_authorization_error(team_api_module, monkeypatch):
+    monkeypatch.setattr(team_api_module, "_parse_json", lambda _validator: _async_value(({"action": "reject"}, None)))
+    monkeypatch.setattr(
+        team_api_module.team_api_service,
+        "update_invitation",
+        lambda *_args: (False, "No authorization."),
+    )
+
+    result = _run(team_api_module.update_invitation("hidden-team"))
+
+    assert result["code"] == team_api_module.RetCode.AUTHENTICATION_ERROR
+    assert result["message"] == "No authorization."
+
+
 def test_remove_member_uses_current_user_as_actor(team_api_module, monkeypatch):
     seen = []
     monkeypatch.setattr(
