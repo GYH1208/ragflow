@@ -1,6 +1,9 @@
 import { ButtonLoading } from '@/components/ui/button';
 import { ParseType } from '@/constants/knowledge';
-import { useUpdateKnowledge } from '@/hooks/use-knowledge-request';
+import {
+  normalizeTeamPermission,
+  useUpdateKnowledge,
+} from '@/hooks/use-knowledge-request';
 import { useMemo } from 'react';
 import { useFormContext } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
@@ -27,7 +30,8 @@ export function GeneralSavingButton() {
       onClick={() => {
         (async () => {
           const isValidate = await form.trigger('name');
-          const { name, description, permission, avatar } = form.getValues();
+          const { name, description, permission, team_id, avatar } =
+            form.getValues();
 
           if (isValidate) {
             saveKnowledgeConfiguration({
@@ -36,7 +40,7 @@ export function GeneralSavingButton() {
               name,
               description,
               avatar,
-              permission,
+              ...normalizeTeamPermission(permission, team_id),
             });
           }
         })();
@@ -78,6 +82,7 @@ export function SavingButton() {
                 await saveKnowledgeConfiguration({
                   kb_id,
                   ...values,
+                  ...normalizeTeamPermission(values.permission, values.team_id),
                   parser_config: {
                     ...values.parser_config,
                     image_table_context_window:

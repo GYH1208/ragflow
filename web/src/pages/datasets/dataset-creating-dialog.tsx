@@ -20,6 +20,8 @@ import { Input } from '@/components/ui/input';
 import { RAGFlowSelect } from '@/components/ui/select';
 import { FormLayout } from '@/constants/form';
 import { ParseType } from '@/constants/knowledge';
+import { PermissionRole } from '@/constants/permission';
+import { normalizeTeamPermission } from '@/hooks/use-knowledge-request';
 import { useFetchDefaultModelDictionary } from '@/hooks/use-llm-request';
 import { IModalProps } from '@/interfaces/common';
 import { IDatasetCategory } from '@/interfaces/database/dataset';
@@ -34,6 +36,8 @@ import {
   EmbeddingModelItem,
   ParseTypeItem,
 } from '../dataset/dataset-setting/configuration/common-item';
+import { validateTeamPermission } from '../dataset/dataset-setting/form-schema';
+import { PermissionFormField } from '../dataset/dataset-setting/permission-form-field';
 import { UNCATEGORIZED_CATEGORY } from './category-constants';
 
 const FormId = 'dataset-creating-form';
@@ -71,8 +75,12 @@ export function InputForm({
         .trim(),
       [ChunkMethodName]: z.string().optional(),
       pipeline_id: z.string().optional(),
+      permission: z.nativeEnum(PermissionRole),
+      team_id: z.string().nullable().optional(),
     })
     .superRefine((data, ctx) => {
+      validateTeamPermission(data, ctx);
+
       // When parseType === BuiltIn, chunk_method is required
       if (
         data.parseType === ParseType.BuiltIn &&
@@ -102,6 +110,8 @@ export function InputForm({
       parseType: ParseType.BuiltIn,
       [ChunkMethodName]: '',
       embedding_model: defaultModelDictionary?.embd_id,
+      permission: PermissionRole.Me,
+      team_id: null,
     },
   });
 
@@ -113,6 +123,7 @@ export function InputForm({
   function onSubmit(data: z.infer<typeof FormSchema>) {
     const normalizedData = {
       ...data,
+      ...normalizeTeamPermission(data.permission, data.team_id),
       category_id:
         data.category_id === UNCATEGORIZED_CATEGORY ? null : data.category_id,
     };
@@ -188,6 +199,7 @@ export function InputForm({
         />
 
         <EmbeddingModelItem line={2} isEdit={false} />
+        <PermissionFormField />
         <ParseTypeItem />
         {parseType === ParseType.BuiltIn && (
           <ChunkMethodItem name={ChunkMethodName}></ChunkMethodItem>

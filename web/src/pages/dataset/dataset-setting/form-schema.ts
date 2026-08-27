@@ -1,6 +1,20 @@
 import { ParseType } from '@/constants/knowledge';
+import { PermissionRole } from '@/constants/permission';
 import { t } from 'i18next';
 import { z } from 'zod';
+
+export const validateTeamPermission = (
+  data: { permission?: PermissionRole; team_id?: string | null },
+  ctx: z.RefinementCtx,
+) => {
+  if (data.permission === PermissionRole.Team && !data.team_id) {
+    ctx.addIssue({
+      path: ['team_id'],
+      message: t('knowledgeConfiguration.teamPlaceholder'),
+      code: z.ZodIssueCode.custom,
+    });
+  }
+};
 
 export const formSchema = z
   .object({
@@ -11,7 +25,8 @@ export const formSchema = z
     description: z.string().optional(),
     // avatar: z.instanceof(File),
     avatar: z.any().nullish(),
-    permission: z.string().optional(),
+    permission: z.nativeEnum(PermissionRole).optional(),
+    team_id: z.string().nullable().optional(),
     language: z.string().optional(),
     chunk_method: z.string(),
     pipeline_id: z.string().optional(),
@@ -132,6 +147,8 @@ export const formSchema = z
     // icon: z.array(z.instanceof(File)),
   })
   .superRefine((data, ctx) => {
+    validateTeamPermission(data, ctx);
+
     if (data.parse_type === ParseType.Pipeline && !data.pipeline_id) {
       ctx.addIssue({
         path: ['pipeline_id'],
