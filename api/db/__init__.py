@@ -32,6 +32,11 @@ class TenantPermission(StrEnum):
     TEAM = 'team'
 
 
+class TeamMemberState(StrEnum):
+    INVITED = 'invited'
+    ACTIVE = 'active'
+
+
 class SerializedType(IntEnum):
     PICKLE = 1
     JSON = 2
