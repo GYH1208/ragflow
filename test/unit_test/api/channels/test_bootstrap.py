@@ -888,12 +888,24 @@ async def test_capability_answer_never_sends_cited_approval_screenshot_without_t
     assert ("persist", "conversation-1", "message-1", []) in events
 
 
+@pytest.mark.parametrize(
+    ("llm_id", "disable_thinking"),
+    [
+        ("deepseek-v4-flash@Deepseek-v4-Falsh@DeepSeek", False),
+        ("deepseek-v4-pro@Deepseek-v4-Falsh@DeepSeek", True),
+    ],
+)
 @pytest.mark.asyncio
-async def test_streaming_channel_sends_cumulative_visible_answer(monkeypatch):
+async def test_streaming_channel_sends_cumulative_visible_answer(
+    monkeypatch,
+    llm_id,
+    disable_thinking,
+):
     channel = RecordingStreamingChannel()
     conversation = FakeConversation()
     dialog = SimpleNamespace(
         id="dialog-1",
+        llm_id=llm_id,
         kb_ids=["kb-1"],
         prompt_config={"quote": True},
     )
@@ -946,7 +958,10 @@ async def test_streaming_channel_sends_cumulative_visible_answer(monkeypatch):
     )
 
     assert stream_flags == [True]
-    assert captured_kwargs["_channel_disable_thinking"] is True
+    assert (
+        captured_kwargs.get("_channel_disable_thinking", False)
+        is disable_thinking
+    )
     assert [update[0].text for update in channel.stream_updates] == [
         "正在查询知识库，请稍候…",
         "第一段",
