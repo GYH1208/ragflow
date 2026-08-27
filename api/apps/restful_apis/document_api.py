@@ -1491,6 +1491,10 @@ async def parse_documents(tenant_id, dataset_id):
     """
     if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    found, kb = KnowledgebaseService.get_by_id(dataset_id)
+    if not found:
+        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    dataset_tenant_id = kb.tenant_id
 
     req = await get_request_json()
     if req is None:
@@ -1546,11 +1550,11 @@ async def parse_documents(tenant_id, dataset_id):
                 if reset_info:
                     DocumentService.update_by_id(doc_id, reset_info)
                 TaskService.filter_delete([Task.doc_id == doc_id])
-                if settings.docStoreConn.index_exist(search.index_name(tenant_id), doc.kb_id):
-                    settings.docStoreConn.delete({"doc_id": doc_id}, search.index_name(tenant_id), doc.kb_id)
+                if settings.docStoreConn.index_exist(search.index_name(dataset_tenant_id), doc.kb_id):
+                    settings.docStoreConn.delete({"doc_id": doc_id}, search.index_name(dataset_tenant_id), doc.kb_id)
 
                 doc_dict = doc.to_dict()
-                DocumentService.run(tenant_id, doc_dict, kb_table_num_map)
+                DocumentService.run(dataset_tenant_id, doc_dict, kb_table_num_map)
                 success_count += 1
 
             result = {"success_count": success_count}
@@ -1609,6 +1613,10 @@ async def stop_parse_documents(tenant_id, dataset_id):
     """
     if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    found, kb = KnowledgebaseService.get_by_id(dataset_id)
+    if not found:
+        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    dataset_tenant_id = kb.tenant_id
 
     req = await get_request_json()
     if req is None:
@@ -1662,7 +1670,7 @@ async def stop_parse_documents(tenant_id, dataset_id):
                         "chunk_num": 0,
                     },
                 )
-                index_name = search.index_name(tenant_id)
+                index_name = search.index_name(dataset_tenant_id)
                 if settings.docStoreConn.index_exist(index_name, doc.kb_id):
                     settings.docStoreConn.delete({"doc_id": doc.id}, index_name, doc.kb_id)
                 success_count += 1

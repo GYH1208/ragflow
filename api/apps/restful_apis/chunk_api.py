@@ -177,6 +177,9 @@ def _enrich_chunks_with_document_metadata(chunks: list[dict], metadata_fields=No
 async def parse(tenant_id, dataset_id):
     if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    dataset_tenant_id = _get_dataset_tenant_id(dataset_id)
+    if not dataset_tenant_id:
+        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
     req = await get_request_json()
     if not req.get("document_ids"):
         return get_error_data_result("`document_ids` is required")
@@ -198,7 +201,7 @@ async def parse(tenant_id, dataset_id):
         if str(doc.run) == TaskStatus.DONE.value:
             DocumentService.clear_chunk_num_when_rerun(id)
         DocumentService.update_by_id(id, {"progress_msg": "", "chunk_num": 0, "token_num": 0})
-        index_name = search.index_name(tenant_id)
+        index_name = search.index_name(dataset_tenant_id)
         if settings.docStoreConn.index_exist(index_name, dataset_id):
             settings.docStoreConn.delete({"doc_id": id}, index_name, dataset_id)
         else:
@@ -211,7 +214,7 @@ async def parse(tenant_id, dataset_id):
         TaskService.filter_delete([Task.doc_id == id])
         e, current_doc = DocumentService.get_by_id(id)
         current_doc = current_doc.to_dict()
-        current_doc["tenant_id"] = tenant_id
+        current_doc["tenant_id"] = dataset_tenant_id
         bucket, name = File2DocumentService.get_storage_address(doc_id=current_doc["id"])
         queue_tasks(current_doc, bucket, name, 0)
         success_count += 1
@@ -235,6 +238,9 @@ async def parse(tenant_id, dataset_id):
 async def stop_parsing(tenant_id, dataset_id):
     if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    dataset_tenant_id = _get_dataset_tenant_id(dataset_id)
+    if not dataset_tenant_id:
+        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
     req = await get_request_json()
 
     if not req.get("document_ids"):
@@ -257,7 +263,7 @@ async def stop_parsing(tenant_id, dataset_id):
         cancel_all_task_of(id)
         info = {"run": "2", "progress": 0, "chunk_num": 0}
         DocumentService.update_by_id(id, info)
-        index_name = search.index_name(tenant_id)
+        index_name = search.index_name(dataset_tenant_id)
         if settings.docStoreConn.index_exist(index_name, dataset_id):
             settings.docStoreConn.delete({"doc_id": doc[0].id}, index_name, dataset_id)
         else:
