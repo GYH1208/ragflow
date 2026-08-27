@@ -68,7 +68,7 @@ from api.utils.validation_utils import (
 )
 from api.utils.web_utils import CONTENT_TYPE_MAP, apply_safe_file_response_headers, html2pdf, is_valid_url
 from common import settings
-from common.constants import SANDBOX_ARTIFACT_BUCKET, ParserType, RetCode, TaskStatus
+from common.constants import SANDBOX_ARTIFACT_BUCKET, ParserType, RetCode, StatusEnum, TaskStatus
 from common.metadata_utils import convert_conditions, meta_filter, turn2jsonschema
 from common.misc_utils import get_uuid, thread_pool_exec
 from common.ssrf_guard import assert_url_is_safe
@@ -192,12 +192,10 @@ async def update_document(tenant_id, dataset_id, document_id):
     """
     req = await get_request_json()
 
-    # Verify ownership and existence of dataset and document
-    if not KnowledgebaseService.query(id=dataset_id, tenant_id=tenant_id):
-        return get_error_data_result(message="You don't own the dataset.")
     e, kb = KnowledgebaseService.get_by_id(dataset_id)
-    if not e:
-        return get_error_data_result(message="Can't find this dataset!")
+    if not e or not check_kb_team_permission(kb, tenant_id):
+        return get_error_data_result(message="No authorization.")
+    owner_tenant_id = kb.tenant_id
 
     # Prepare data for validation
     docs = DocumentService.query(kb_id=dataset_id, id=document_id)
@@ -239,11 +237,11 @@ async def update_document(tenant_id, dataset_id, document_id):
 
     # pipeline_id provided - reset document for reparse
     if update_doc_req.pipeline_id:
-        if error := reset_document_for_reparse(doc, tenant_id, pipeline_id=update_doc_req.pipeline_id):
+        if error := reset_document_for_reparse(doc, owner_tenant_id, pipeline_id=update_doc_req.pipeline_id):
             return error
     # chunk method provided - the update method will check if it's different with existing one
     elif update_doc_req.chunk_method:
-        if error := update_chunk_method(req, doc, tenant_id):
+        if error := update_chunk_method(req, doc, owner_tenant_id):
             return error
 
     if "enabled" in req: # already checked in UpdateDocumentReq - it's int if present
@@ -1201,9 +1199,10 @@ async def update_metadata_config(tenant_id, dataset_id, document_id):
       200:
         description: Document updated successfully.
     """
-    # Verify ownership and existence of dataset
-    if not KnowledgebaseService.query(id=dataset_id, tenant_id=tenant_id):
-        return get_error_data_result(message="You don't own the dataset.")
+    # Active team members may maintain documents in an assigned team dataset.
+    e, kb = KnowledgebaseService.get_by_id(dataset_id)
+    if not e or not check_kb_team_permission(kb, tenant_id):
+        return get_error_data_result(message="No authorization.")
 
     # Verify document exists in the dataset
     doc = DocumentService.query(id=document_id, kb_id=dataset_id)
@@ -1263,6 +1262,16 @@ def list_thumbnails():
         return get_json_result(data=False, message='Lack of "Document ID"', code=RetCode.ARGUMENT_ERROR)
 
     try:
+        requested_ids = set(doc_ids)
+        documents = list(DocumentService.get_by_ids(requested_ids))
+        authorized_ids = {
+            document.id
+            for document in documents
+            if document.status == StatusEnum.VALID.value and DocumentService.accessible(document.id, current_user.id)
+        }
+        if authorized_ids != requested_ids:
+            return get_data_error_result(message="Document not found.")
+
         docs = DocumentService.get_thumbnails(doc_ids)
 
         for doc_item in docs:
@@ -1785,6 +1794,9 @@ async def get_document_image(image_id):
         if not parsed:
             return get_data_error_result(message="Image not found.")
         bkt, nm = parsed
+        documents = DocumentService.query(kb_id=bkt, thumbnail=nm, status=StatusEnum.VALID.value)
+        if not any(DocumentService.accessible(document.id, current_user.id) for document in documents):
+            return get_data_error_result(message="Image not found.")
         data = await thread_pool_exec(settings.STORAGE_IMPL.get, bkt, nm)
         if not data:
             return get_data_error_result(message="Image not found.")
@@ -1915,13 +1927,9 @@ async def batch_update_document_status(tenant_id, dataset_id):
     if status not in ["0", "1"]:
         return get_error_argument_result(message=f'"Status" must be either 0 or 1:{status}!')
 
-    # Verify dataset ownership
-    if not KnowledgebaseService.query(id=dataset_id, tenant_id=tenant_id):
-        return get_error_data_result(message="You don't own the dataset.")
-
     e, kb = KnowledgebaseService.get_by_id(dataset_id)
-    if not e:
-        return get_error_data_result(message="Can't find this dataset!")
+    if not e or not check_kb_team_permission(kb, tenant_id):
+        return get_error_data_result(message="No authorization.")
 
     result = {}
     has_error = False
@@ -2022,6 +2030,18 @@ def _mimetype_for_document(doc) -> str:
     return CONTENT_TYPE_MAP.get(ext, f"{fallback_prefix}/{ext}")
 
 
+def _get_authorized_document(document_id, user_id, dataset_id=None):
+    """Return a valid document only when the actor may read its knowledge base."""
+    exists, document = DocumentService.get_by_id(document_id)
+    if not exists or document.status != StatusEnum.VALID.value:
+        return None
+    if dataset_id is not None and document.kb_id != dataset_id:
+        return None
+    if not DocumentService.accessible(document.id, user_id):
+        return None
+    return document
+
+
 @manager.route("/datasets/<dataset_id>/documents/<document_id>", methods=["GET"])  # noqa: F821
 @login_required
 async def download(dataset_id, document_id):
@@ -2062,9 +2082,9 @@ async def download(dataset_id, document_id):
     """
     if not document_id:
         return get_error_data_result(message="Specify document_id please.")
-    doc = DocumentService.query(kb_id=dataset_id, id=document_id)
+    doc = _get_authorized_document(document_id, current_user.id, dataset_id)
     if not doc:
-        return get_error_data_result(message=f"The dataset not own the document {document_id}.")
+        return get_data_error_result(message="Document not found.")
     # The process of downloading
     doc_id, doc_location = File2DocumentService.get_storage_address(doc_id=document_id)  # minio address
     file_stream = settings.STORAGE_IMPL.get(doc_id, doc_location)
@@ -2075,8 +2095,8 @@ async def download(dataset_id, document_id):
     return await send_file(
         file,
         as_attachment=True,
-        attachment_filename=doc[0].name,
-        mimetype=_mimetype_for_document(doc[0]),
+        attachment_filename=doc.name,
+        mimetype=_mimetype_for_document(doc),
     )
 
 @manager.route("/documents/<document_id>", methods=["GET"])  # noqa: F821
@@ -2119,9 +2139,9 @@ async def download_document(document_id):
     """
     if not document_id:
         return get_error_data_result(message="Specify document_id please.")
-    doc = DocumentService.query(id=document_id)
+    doc = _get_authorized_document(document_id, current_user.id)
     if not doc:
-        return get_error_data_result(message=f"The dataset not own the document {document_id}.")
+        return get_data_error_result(message="Document not found.")
     # The process of downloading
     doc_id, doc_location = File2DocumentService.get_storage_address(doc_id=document_id)  # minio address
     file_stream = settings.STORAGE_IMPL.get(doc_id, doc_location)
@@ -2132,6 +2152,6 @@ async def download_document(document_id):
     return await send_file(
         file,
         as_attachment=True,
-        attachment_filename=doc[0].name,
-        mimetype=_mimetype_for_document(doc[0]),
+        attachment_filename=doc.name,
+        mimetype=_mimetype_for_document(doc),
     )

@@ -26,7 +26,7 @@ import api.apps
 import api.utils.api_utils
 from api.apps.services.dataset_api_service import delete_datasets, update_dataset
 from api.common.check_team_permission import check_kb_team_permission
-from api.db import TenantPermission
+from api.db import FileType, TenantPermission
 from api.db.services.team_service import TeamMemberService, TeamService
 from common.constants import ParserType, StatusEnum, TaskStatus
 
@@ -142,12 +142,20 @@ def permission_harness(monkeypatch):
         )
 
     class PermissionHarness:
-        def call(self, operation, user_id):
+        def call(self, operation, user_id, *, document_id="doc-1"):
             document = SimpleNamespace(
                 id="doc-1",
                 kb_id=kb.id,
                 name="A.txt",
                 parser_id=ParserType.NAIVE.value,
+                pipeline_id=None,
+                parser_config={},
+                type=FileType.DOC.value,
+                status=StatusEnum.VALID.value,
+                chunk_num=0,
+                token_num=0,
+                progress=0,
+                process_duration=0,
                 run=TaskStatus.RUNNING.value if operation == "stop_parse" else TaskStatus.UNSTART.value,
                 to_dict=lambda: {"id": "doc-1", "kb_id": kb.id, "run": TaskStatus.UNSTART.value},
             )
@@ -176,11 +184,21 @@ def permission_harness(monkeypatch):
                 monkeypatch.setattr(
                     document_api,
                     "get_request_json",
-                    lambda: _AwaitableValue({"document_ids": [document.id]}),
+                    lambda: _AwaitableValue({"document_ids": [document_id]}),
                 )
                 monkeypatch.setattr(document_api, "thread_pool_exec", _run_inline)
-                monkeypatch.setattr(document_api.DocumentService, "query", lambda **_kwargs: [document])
-                monkeypatch.setattr(document_api.DocumentService, "get_by_id", lambda _doc_id: (True, document))
+                monkeypatch.setattr(
+                    document_api.DocumentService,
+                    "query",
+                    lambda **kwargs: [document]
+                    if kwargs.get("id") == document.id and kwargs.get("kb_id") == document.kb_id
+                    else [],
+                )
+                monkeypatch.setattr(
+                    document_api.DocumentService,
+                    "get_by_id",
+                    lambda doc_id: (doc_id == document.id, document if doc_id == document.id else None),
+                )
                 monkeypatch.setattr(document_api.DocumentService, "try_start_parse", lambda *_args, **_kwargs: True)
                 monkeypatch.setattr(document_api.DocumentService, "update_by_id", lambda *_args, **_kwargs: True)
                 monkeypatch.setattr(document_api.DocumentService, "run", lambda *_args, **_kwargs: None)
@@ -194,6 +212,79 @@ def permission_harness(monkeypatch):
                 )
                 route = document_api.parse_documents if operation == "parse" else document_api.stop_parse_documents
                 return _run(route(user_id, kb.id))
+
+            if operation == "update_document":
+                monkeypatch.setattr(
+                    document_api.KnowledgebaseService,
+                    "query",
+                    lambda **kwargs: [kb] if kwargs.get("tenant_id") == kb.tenant_id else [],
+                )
+                monkeypatch.setattr(
+                    document_api,
+                    "get_request_json",
+                    lambda: _AwaitableValue({"name": "B.txt"}),
+                )
+                monkeypatch.setattr(
+                    document_api.DocumentService,
+                    "query",
+                    lambda **kwargs: [document]
+                    if kwargs.get("id") == document.id and kwargs.get("kb_id") == document.kb_id
+                    else [],
+                )
+                monkeypatch.setattr(document_api, "validate_document_update_fields", lambda *_args: (None, None))
+                monkeypatch.setattr(document_api, "update_document_name_only", lambda *_args: None)
+                monkeypatch.setattr(
+                    document_api.DocumentService,
+                    "get_by_id",
+                    lambda doc_id: (doc_id == document.id, document if doc_id == document.id else None),
+                )
+                monkeypatch.setattr(document_api, "map_doc_keys", lambda doc: doc.to_dict())
+                return _run(document_api.update_document(user_id, kb.id, document_id))
+
+            if operation == "update_metadata_config":
+                monkeypatch.setattr(
+                    document_api.KnowledgebaseService,
+                    "query",
+                    lambda **kwargs: [kb] if kwargs.get("tenant_id") == kb.tenant_id else [],
+                )
+                monkeypatch.setattr(
+                    document_api,
+                    "get_request_json",
+                    lambda: _AwaitableValue({"metadata": {"department": "HR"}}),
+                )
+                monkeypatch.setattr(
+                    document_api.DocumentService,
+                    "query",
+                    lambda **kwargs: [document]
+                    if kwargs.get("id") == document.id and kwargs.get("kb_id") == document.kb_id
+                    else [],
+                )
+                monkeypatch.setattr(document_api.DocumentService, "update_parser_config", lambda *_args: None)
+                monkeypatch.setattr(
+                    document_api.DocumentService,
+                    "get_by_id",
+                    lambda doc_id: (doc_id == document.id, document if doc_id == document.id else None),
+                )
+                return _run(document_api.update_metadata_config(user_id, kb.id, document_id))
+
+            if operation == "batch_update_status":
+                monkeypatch.setattr(
+                    document_api.KnowledgebaseService,
+                    "query",
+                    lambda **kwargs: [kb] if kwargs.get("tenant_id") == kb.tenant_id else [],
+                )
+                monkeypatch.setattr(
+                    document_api,
+                    "get_request_json",
+                    lambda: _AwaitableValue({"doc_ids": [document_id], "status": "0"}),
+                )
+                monkeypatch.setattr(
+                    document_api.DocumentService,
+                    "get_by_id",
+                    lambda doc_id: (doc_id == document.id, document if doc_id == document.id else None),
+                )
+                monkeypatch.setattr(document_api.DocumentService, "update_by_id", lambda *_args, **_kwargs: True)
+                return _run(document_api.batch_update_document_status(user_id, kb.id))
 
             monkeypatch.setattr(chunk_api.DocumentService, "query", lambda **_kwargs: [document])
             monkeypatch.setattr(chunk_api, "get_request_json", lambda: _AwaitableValue({"delete_all": True}))
@@ -245,6 +336,229 @@ def test_non_active_or_other_team_member_is_rejected(user_id, permission_harness
     result = permission_harness.call("upload", user_id=user_id)
 
     assert result["code"] != 0
+
+
+@pytest.mark.parametrize("operation", ["update_document", "update_metadata_config", "batch_update_status"])
+@pytest.mark.parametrize(
+    ("user_id", "expected_code"),
+    [
+        ("owner-1", 0),
+        ("member-active", 0),
+        ("member-invited", "error"),
+        ("member-removed", "error"),
+        ("member-other", "error"),
+    ],
+)
+def test_document_maintenance_uses_team_permission_matrix(operation, user_id, expected_code, permission_harness):
+    result = permission_harness.call(operation, user_id=user_id)
+
+    if expected_code == 0:
+        assert result["code"] == 0
+    else:
+        assert result["code"] != 0
+
+
+@pytest.mark.parametrize("operation", ["update_document", "update_metadata_config", "batch_update_status"])
+def test_document_maintenance_rejects_document_from_another_dataset(operation, permission_harness):
+    result = permission_harness.call(operation, user_id="owner-1", document_id="doc-other")
+
+    assert result["code"] != 0
+
+
+def test_active_member_document_reparse_uses_owner_tenant(monkeypatch):
+    module = _load_route_module(monkeypatch, "document_api")
+    kb = _team_kb()
+    document = SimpleNamespace(
+        id="doc-1",
+        kb_id=kb.id,
+        name="A.txt",
+        parser_id=ParserType.NAIVE.value,
+        pipeline_id=None,
+        parser_config={},
+        type=FileType.DOC.value,
+        status=StatusEnum.VALID.value,
+        chunk_num=0,
+        token_num=0,
+        progress=0,
+        process_duration=0,
+        run=TaskStatus.UNSTART.value,
+        to_dict=lambda: {"id": "doc-1", "kb_id": kb.id},
+    )
+    memberships = {"member-active": [kb.team_id]}
+    monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda user_id: memberships.get(user_id, []))
+    monkeypatch.setattr(
+        TeamService,
+        "get_owned_team",
+        lambda team_id, owner_id: SimpleNamespace(id=team_id)
+        if (team_id, owner_id) == (kb.team_id, kb.tenant_id)
+        else None,
+    )
+    monkeypatch.setattr(module.KnowledgebaseService, "get_by_id", lambda _dataset_id: (True, kb))
+    monkeypatch.setattr(module.KnowledgebaseService, "query", lambda **_kwargs: [])
+    monkeypatch.setattr(module, "get_request_json", lambda: _AwaitableValue({"pipeline_id": "a" * 32}))
+    monkeypatch.setattr(module.DocumentService, "query", lambda **_kwargs: [document])
+    monkeypatch.setattr(module.DocumentService, "get_by_id", lambda _doc_id: (True, document))
+    monkeypatch.setattr(module, "validate_document_update_fields", lambda *_args: (None, None))
+    monkeypatch.setattr(module, "map_doc_keys", lambda doc: doc.to_dict())
+    reset_tenants = []
+    monkeypatch.setattr(
+        module,
+        "reset_document_for_reparse",
+        lambda _doc, tenant_id, **_kwargs: reset_tenants.append(tenant_id),
+    )
+
+    result = _run(module.update_document("member-active", kb.id, document.id))
+
+    assert result["code"] == 0
+    assert reset_tenants == [kb.tenant_id]
+
+
+class _QueryArgs(dict):
+    def getlist(self, key):
+        return self.get(key, [])
+
+
+class _ResponseHeaders(dict):
+    def set(self, key, value):
+        self[key] = value
+
+
+def _prepare_raw_read_route(monkeypatch, *, user_id, existing=True):
+    module = _load_route_module(monkeypatch, "document_api")
+    module.current_user = SimpleNamespace(id=user_id)
+    kb = SimpleNamespace(
+        id="kb1",
+        tenant_id="owner-1",
+        permission=TenantPermission.TEAM.value,
+        team_id="team-hr",
+        status=StatusEnum.VALID.value,
+    )
+    document = SimpleNamespace(
+        id="doc-1",
+        kb_id=kb.id,
+        name="A.txt",
+        type=FileType.DOC.value,
+        status=StatusEnum.VALID.value,
+        thumbnail="page-1.png",
+    )
+    allowed_users = {kb.tenant_id, "member-active"}
+
+    def query_documents(**kwargs):
+        if not existing:
+            return []
+        if "thumbnail" in kwargs:
+            return [document] if (kwargs.get("kb_id"), kwargs.get("thumbnail")) == (kb.id, document.thumbnail) else []
+        if kwargs.get("id") != document.id:
+            return []
+        if kwargs.get("kb_id") not in (None, document.kb_id):
+            return []
+        return [document]
+
+    monkeypatch.setattr(module.DocumentService, "query", query_documents)
+    monkeypatch.setattr(
+        module.DocumentService,
+        "get_by_id",
+        lambda doc_id: (existing and doc_id == document.id, document if existing and doc_id == document.id else None),
+    )
+    monkeypatch.setattr(module.DocumentService, "get_by_ids", lambda doc_ids: [document] if existing and document.id in doc_ids else [])
+    monkeypatch.setattr(
+        module.DocumentService,
+        "accessible",
+        lambda doc_id, actor_id: existing and doc_id == document.id and actor_id in allowed_users,
+    )
+    monkeypatch.setattr(
+        module.DocumentService,
+        "get_thumbnails",
+        lambda _doc_ids: [{"id": document.id, "kb_id": kb.id, "thumbnail": document.thumbnail}] if existing else [],
+    )
+    monkeypatch.setattr(module.File2DocumentService, "get_storage_address", lambda **_kwargs: (kb.id, document.name))
+    storage_reads = []
+    module.settings = SimpleNamespace(
+        STORAGE_IMPL=SimpleNamespace(
+            get=lambda bucket, object_name: storage_reads.append((bucket, object_name)) or b"content"
+        )
+    )
+    module.request = SimpleNamespace(args=_QueryArgs(doc_ids=[document.id]))
+
+    async def fake_send_file(_stream, **kwargs):
+        return {"sent": kwargs["attachment_filename"]}
+
+    async def fake_make_response(data):
+        return SimpleNamespace(data=data, headers=_ResponseHeaders())
+
+    monkeypatch.setattr(module, "send_file", fake_send_file)
+    monkeypatch.setattr(module, "make_response", fake_make_response)
+    return module, kb, document, storage_reads
+
+
+def _call_raw_read_route(module, kb, document, route):
+    if route == "dataset_download":
+        return _run(module.download(kb.id, document.id))
+    if route == "document_download":
+        return _run(module.download_document(document.id))
+    if route == "thumbnails":
+        return module.list_thumbnails()
+    if route == "image":
+        return _run(module.get_document_image(f"{kb.id}-{document.thumbnail}"))
+    raise AssertionError(f"Unknown route: {route}")
+
+
+@pytest.mark.parametrize("route", ["dataset_download", "document_download", "thumbnails", "image"])
+@pytest.mark.parametrize(
+    ("user_id", "allowed"),
+    [
+        ("owner-1", True),
+        ("member-active", True),
+        ("member-invited", False),
+        ("member-removed", False),
+        ("member-other", False),
+    ],
+)
+def test_raw_document_reads_follow_team_permission_matrix(monkeypatch, route, user_id, allowed):
+    module, kb, document, storage_reads = _prepare_raw_read_route(monkeypatch, user_id=user_id)
+
+    result = _call_raw_read_route(module, kb, document, route)
+
+    if allowed:
+        if route == "thumbnails":
+            assert result["code"] == 0
+        elif route == "image":
+            assert result.data == b"content"
+        else:
+            assert result == {"sent": document.name}
+        assert storage_reads or route == "thumbnails"
+    else:
+        assert result["code"] != 0
+        assert storage_reads == []
+
+
+@pytest.mark.parametrize("route", ["dataset_download", "document_download", "thumbnails", "image"])
+def test_raw_document_reads_hide_missing_and_unauthorized_resources(monkeypatch, route):
+    missing_module, missing_kb, missing_document, missing_reads = _prepare_raw_read_route(
+        monkeypatch,
+        user_id="owner-1",
+        existing=False,
+    )
+    missing = _call_raw_read_route(missing_module, missing_kb, missing_document, route)
+    denied_module, denied_kb, denied_document, denied_reads = _prepare_raw_read_route(
+        monkeypatch,
+        user_id="member-invited",
+        existing=True,
+    )
+    denied = _call_raw_read_route(denied_module, denied_kb, denied_document, route)
+
+    assert (missing["code"], missing["message"]) == (denied["code"], denied["message"])
+    assert missing_reads == []
+    assert denied_reads == []
+
+
+def test_dataset_download_binds_document_to_requested_dataset(monkeypatch):
+    module, _kb, document, storage_reads = _prepare_raw_read_route(monkeypatch, user_id="owner-1")
+
+    result = _run(module.download("kb-other", document.id))
+
+    assert result["code"] != 0
+    assert storage_reads == []
 
 
 def test_local_upload_uses_owner_resources_and_actor_audit(monkeypatch):
