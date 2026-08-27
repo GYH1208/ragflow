@@ -1,5 +1,7 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
 
+from api.apps.services import dataset_api_service
 from api.apps.services.dataset_api_service import (
     create_dataset,
     create_dataset_category,
@@ -126,7 +128,8 @@ async def test_create_dataset_persists_category_id(monkeypatch):
         return True, {"id": "kb-1", "category_id": kwargs["category_id"], "embd_id": "embd-1"}
 
     monkeypatch.setattr(KnowledgebaseService, "create_with_name", fake_create_with_name)
-    monkeypatch.setattr(KnowledgebaseService, "save", lambda **_kwargs: True)
+    monkeypatch.setattr(dataset_api_service, "DB", SimpleNamespace(atomic=nullcontext))
+    monkeypatch.setattr(KnowledgebaseService, "save_in_transaction", lambda **_kwargs: 1)
     monkeypatch.setattr(
         KnowledgebaseService,
         "get_by_id",
@@ -158,6 +161,8 @@ async def test_update_dataset_can_move_to_uncategorized(monkeypatch):
         name="预算库",
         embd_id="embd-1",
         pagerank=0,
+        permission="me",
+        team_id=None,
     )
     updates = []
     monkeypatch.setattr(KnowledgebaseService, "get_or_none", lambda **_kwargs: kb)
