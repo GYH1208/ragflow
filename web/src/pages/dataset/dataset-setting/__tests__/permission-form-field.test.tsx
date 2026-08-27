@@ -7,6 +7,7 @@ import { useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 
 import { PermissionFormField } from '../permission-form-field';
+import { GeneralSavingButton } from '../saving-button';
 
 const React = jest.requireActual<typeof import('react')>('react');
 (globalThis as any).React = React;
@@ -14,6 +15,17 @@ const React = jest.requireActual<typeof import('react')>('react');
 jest.mock('@/hooks/use-team-request', () => ({ useTeams: jest.fn() }));
 jest.mock('@/hooks/use-user-setting-request', () => ({
   useFetchUserInfo: jest.fn(),
+}));
+jest.mock('@/hooks/use-knowledge-request', () => ({
+  normalizeTeamPermission: (permission: string, teamId?: string | null) => ({
+    permission,
+    team_id: permission === 'team' ? (teamId ?? null) : null,
+  }),
+  useUpdateKnowledge: jest.fn(),
+}));
+jest.mock('react-router', () => ({
+  Link: ({ children }: React.PropsWithChildren) => <>{children}</>,
+  useParams: () => ({ id: 'kb-1' }),
 }));
 
 jest.mock('@/components/originui/select-with-search', () => {
@@ -69,6 +81,10 @@ const { useTeams } = jest.requireMock('@/hooks/use-team-request') as {
 const { useFetchUserInfo } = jest.requireMock(
   '@/hooks/use-user-setting-request',
 ) as { useFetchUserInfo: jest.Mock };
+const { useUpdateKnowledge } = jest.requireMock(
+  '@/hooks/use-knowledge-request',
+) as { useUpdateKnowledge: jest.Mock };
+const saveKnowledgeConfiguration = jest.fn();
 
 type FormValues = Record<string, any>;
 
@@ -110,8 +126,33 @@ function PermissionFormHarness({
   );
 }
 
+function GeneralSavingButtonHarness({
+  values,
+  onReady,
+}: {
+  values: Partial<FormValues>;
+  onReady?: (form: any) => void;
+}) {
+  const form = useForm<FormValues>({
+    resolver: zodResolver(formSchema),
+    defaultValues: { ...defaultValues, ...values },
+  });
+
+  useEffect(() => onReady?.(form), [form, onReady]);
+
+  return (
+    <TooltipProvider>
+      <Form {...form}>
+        <PermissionFormField />
+        <GeneralSavingButton />
+      </Form>
+    </TooltipProvider>
+  );
+}
+
 describe('PermissionFormField', () => {
   beforeEach(() => {
+    jest.clearAllMocks();
     useFetchUserInfo.mockReturnValue({
       data: { is_superuser: true },
       loading: false,
@@ -132,6 +173,10 @@ describe('PermissionFormField', () => {
         },
       ],
       loading: false,
+    });
+    useUpdateKnowledge.mockReturnValue({
+      loading: false,
+      saveKnowledgeConfiguration,
     });
   });
 
@@ -177,5 +222,26 @@ describe('PermissionFormField', () => {
         team_id: null,
       });
     });
+  });
+
+  it('does not save a team permission without a selected team', async () => {
+    let form: any;
+    render(
+      <GeneralSavingButtonHarness
+        values={{ permission: 'team', team_id: null }}
+        onReady={(nextForm) => {
+          form = nextForm;
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('ds-settings-basic-save-btn'));
+
+    await waitFor(() => {
+      expect(form?.getFieldState('team_id').error).toMatchObject({
+        message: '请选择团队',
+      });
+    });
+    expect(saveKnowledgeConfiguration).not.toHaveBeenCalled();
   });
 });

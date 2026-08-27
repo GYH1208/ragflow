@@ -29,7 +29,7 @@ export function GeneralSavingButton() {
       data-testid="ds-settings-basic-save-btn"
       onClick={() => {
         (async () => {
-          const isValidate = await form.trigger('name');
+          const isValidate = await form.trigger();
           const { name, description, permission, team_id, avatar } =
             form.getValues();
 
