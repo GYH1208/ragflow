@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { PropsWithChildren } from 'react';
+import { createElement } from 'react';
 
 import {
   createTeam,
@@ -86,9 +86,8 @@ const renderTeamHook = <T,>(hook: () => T) => {
     },
   });
   const invalidateQueries = jest.spyOn(queryClient, 'invalidateQueries');
-  const wrapper = ({ children }: PropsWithChildren) => (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-  );
+  const wrapper = ({ children }: { children?: any }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
 
   return {
     ...renderHook(hook, { wrapper }),

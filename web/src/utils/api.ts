@@ -27,12 +27,10 @@ export default {
   listTeams: `${restAPIv1}/teams`,
   createTeam: `${restAPIv1}/teams`,
   teamDetail: (teamId: string) => `${restAPIv1}/teams/${teamId}`,
-  teamMembers: (teamId: string) =>
-    `${restAPIv1}/teams/${teamId}/members`,
+  teamMembers: (teamId: string) => `${restAPIv1}/teams/${teamId}/members`,
   teamMember: (teamId: string, userId: string) =>
     `${restAPIv1}/teams/${teamId}/members/${userId}`,
-  teamInvitation: (teamId: string) =>
-    `${restAPIv1}/teams/${teamId}/invitation`,
+  teamInvitation: (teamId: string) => `${restAPIv1}/teams/${teamId}/invitation`,
 
   // llm model
   listAllAddedModels: `${restAPIv1}/models`,

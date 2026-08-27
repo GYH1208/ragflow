@@ -135,7 +135,13 @@ export const useInviteTeamMember = () => {
     mutateAsync,
   } = useMutation({
     mutationKey: [TeamApiAction.InviteTeamMember],
-    mutationFn: async ({ teamId, email }: { teamId: string; email: string }) => {
+    mutationFn: async ({
+      teamId,
+      email,
+    }: {
+      teamId: string;
+      email: string;
+    }) => {
       const { data } = await inviteTeamMember(teamId, email);
       if (data.code === 0) {
         await Promise.all([
