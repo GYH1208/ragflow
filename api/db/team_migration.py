@@ -28,19 +28,30 @@ DEFAULT_TEAM_NAME = "默认团队"
 def _get_or_create_default_team(tenant_id: str, created_by: str) -> tuple[Team, bool]:
     team = Team.get_or_none(tenant_id=tenant_id, name=DEFAULT_TEAM_NAME)
     if team:
+        _activate_team_if_needed(team)
         return team, False
 
     try:
-        Team.insert(
-            id=get_uuid(),
-            tenant_id=tenant_id,
-            name=DEFAULT_TEAM_NAME,
-            created_by=created_by,
-        ).execute()
+        with DB.atomic():
+            Team.insert(
+                id=get_uuid(),
+                tenant_id=tenant_id,
+                name=DEFAULT_TEAM_NAME,
+                created_by=created_by,
+            ).execute()
         return Team.get(tenant_id=tenant_id, name=DEFAULT_TEAM_NAME), True
     except IntegrityError:
         # Another migrator may have inserted the unique default team first.
-        return Team.get(tenant_id=tenant_id, name=DEFAULT_TEAM_NAME), False
+        team = Team.get(tenant_id=tenant_id, name=DEFAULT_TEAM_NAME)
+        _activate_team_if_needed(team)
+        return team, False
+
+
+def _activate_team_if_needed(team: Team) -> None:
+    if team.status == StatusEnum.VALID.value:
+        return
+    Team.update(status=StatusEnum.VALID.value).where(Team.id == team.id).execute()
+    team.status = StatusEnum.VALID.value
 
 
 def _default_team_creator(tenant_id: str) -> str:
@@ -78,17 +89,19 @@ def _default_team_creator(tenant_id: str) -> str:
 
 
 def _tenant_ids_to_backfill() -> set[str]:
-    active_tenants = Tenant.select(Tenant.id).where(Tenant.status == StatusEnum.VALID.value)
-    member_tenant_ids = {
-        user_tenant.tenant_id
-        for user_tenant in UserTenant.select(UserTenant.tenant_id)
+    member_tenant_ids = set()
+    for user_tenant in (
+        UserTenant.select()
         .join(Tenant, on=(UserTenant.tenant_id == Tenant.id))
         .where(
             Tenant.status == StatusEnum.VALID.value,
             UserTenant.status == StatusEnum.VALID.value,
-            UserTenant.role != UserTenantRole.OWNER.value,
+            UserTenant.role.in_([UserTenantRole.NORMAL.value, UserTenantRole.INVITE.value]),
         )
-    }
+    ):
+        team = Team.get_or_none(tenant_id=user_tenant.tenant_id, name=DEFAULT_TEAM_NAME)
+        if not team or not TeamMember.get_or_none(team_id=team.id, user_id=user_tenant.user_id):
+            member_tenant_ids.add(user_tenant.tenant_id)
     dataset_tenant_ids = {
         knowledgebase.tenant_id
         for knowledgebase in Knowledgebase.select(Knowledgebase.tenant_id)
@@ -100,8 +113,7 @@ def _tenant_ids_to_backfill() -> set[str]:
             Knowledgebase.team_id.is_null(True),
         )
     }
-    active_tenant_ids = {tenant.id for tenant in active_tenants}
-    return (member_tenant_ids | dataset_tenant_ids) & active_tenant_ids
+    return member_tenant_ids | dataset_tenant_ids
 
 
 def backfill_default_teams() -> dict[str, int]:
@@ -128,13 +140,14 @@ def backfill_default_teams() -> dict[str, int]:
                     continue
                 state = TeamMemberState.ACTIVE.value if legacy_member.role == UserTenantRole.NORMAL.value else TeamMemberState.INVITED.value
                 try:
-                    TeamMember.insert(
-                        id=get_uuid(),
-                        team_id=team.id,
-                        user_id=legacy_member.user_id,
-                        state=state,
-                        invited_by=legacy_member.invited_by,
-                    ).execute()
+                    with DB.atomic():
+                        TeamMember.insert(
+                            id=get_uuid(),
+                            team_id=team.id,
+                            user_id=legacy_member.user_id,
+                            state=state,
+                            invited_by=legacy_member.invited_by,
+                        ).execute()
                     counts["members_created"] += 1
                 except IntegrityError:
                     # A concurrent migration inserted this unique member first.
