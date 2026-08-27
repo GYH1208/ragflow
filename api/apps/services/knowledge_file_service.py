@@ -488,8 +488,6 @@ class KnowledgeFileService:
         documents_by_file, invalid_file_ids = cls._resolve_kb_documents_by_file(kb, links)
         document_by_file_id = {}
         for file_entry in files:
-            if file_entry.id not in documents_by_file and file_entry.id not in invalid_file_ids:
-                continue
             document_by_file_id[file_entry.id] = cls._require_single_kb_document(
                 file_entry.id,
                 documents_by_file,

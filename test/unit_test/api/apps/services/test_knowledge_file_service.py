@@ -462,6 +462,40 @@ def test_delete_rejects_cross_kb_file_association_before_any_delete(service_fixt
     assert deleted == []
 
 
+def test_delete_rejects_file_without_document_association_before_any_delete(service_fixture, monkeypatch):
+    kb, tenant_id, _root, _top_folder, _nested_folder, nested_file, _root_file = service_fixture
+    kb._links[:] = [link for link in kb._links if link.file_id != nested_file.id]
+    deleted = []
+    monkeypatch.setattr(
+        FileService,
+        "delete_docs",
+        classmethod(lambda cls, document_ids, owner_id: deleted.append((document_ids, owner_id)) or ""),
+    )
+    monkeypatch.setattr(FileService, "delete_by_id", classmethod(lambda cls, entry_id: deleted.append(entry_id)))
+
+    with pytest.raises(RuntimeError, match="association"):
+        KnowledgeFileService.delete_entries(kb, tenant_id, [nested_file.id])
+
+    assert deleted == []
+
+
+def test_delete_batch_preflights_valid_and_missing_associations_before_any_delete(service_fixture, monkeypatch):
+    kb, tenant_id, _root, _top_folder, _nested_folder, nested_file, root_file = service_fixture
+    kb._links[:] = [link for link in kb._links if link.file_id != root_file.id]
+    deleted = []
+    monkeypatch.setattr(
+        FileService,
+        "delete_docs",
+        classmethod(lambda cls, document_ids, owner_id: deleted.append((document_ids, owner_id)) or ""),
+    )
+    monkeypatch.setattr(FileService, "delete_by_id", classmethod(lambda cls, entry_id: deleted.append(entry_id)))
+
+    with pytest.raises(RuntimeError, match="association"):
+        KnowledgeFileService.delete_entries(kb, tenant_id, [nested_file.id, root_file.id])
+
+    assert deleted == []
+
+
 def test_delete_preflight_failure_makes_no_changes(service_fixture, monkeypatch):
     kb, tenant_id, *_ = service_fixture
     other_folder = _entry("other", "other-root", "其他目录", "folder", 1)

@@ -54,6 +54,7 @@ def _authorize_existing_documents(file_ids, actor_id):
 
 def _convert_files(file_ids, existing_documents_by_file, target_kbs, actor_id):
     """Synchronous worker: delete old docs and insert new ones for the given file/kb pairs."""
+    file_ids = list(dict.fromkeys(file_ids))
     for id in file_ids:
         for document, owner_tenant_id in existing_documents_by_file.get(id, []):
             DocumentService.remove_document(document, owner_tenant_id)
@@ -135,6 +136,7 @@ async def convert():
                 all_file_ids.extend(FileService.get_all_innermost_file_ids(file_id, []))
             else:
                 all_file_ids.append(file_id)
+        all_file_ids = list(dict.fromkeys(all_file_ids))
 
         user_id = current_user.id
         for file_id in all_file_ids:

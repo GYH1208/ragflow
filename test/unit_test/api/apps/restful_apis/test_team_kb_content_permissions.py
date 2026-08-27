@@ -438,6 +438,134 @@ def test_file_conversion_schedules_only_preauthorized_existing_documents(monkeyp
     assert args[3] == "member-active"
 
 
+def test_file_conversion_route_deduplicates_overlapping_file_and_folder_selection(monkeypatch):
+    module = _load_route_module(monkeypatch, "file2document_api")
+    module.current_user = SimpleNamespace(id="member-active")
+    folder = SimpleNamespace(id="folder-1", type="folder")
+    files = {
+        "file-1": SimpleNamespace(id="file-1", type="doc", name="A.txt", location="A.txt", size=3),
+        "file-2": SimpleNamespace(id="file-2", type="doc", name="B.txt", location="B.txt", size=5),
+    }
+    target_kb = SimpleNamespace(
+        id="kb-target",
+        tenant_id="owner-target",
+        parser_id="naive",
+        pipeline_id=None,
+        parser_config={},
+    )
+    scheduled = []
+
+    class _Future:
+        @staticmethod
+        def add_done_callback(_callback):
+            return None
+
+    class _Loop:
+        @staticmethod
+        def run_in_executor(_executor, function, *args):
+            scheduled.append((function, args))
+            return _Future()
+
+    module.asyncio = SimpleNamespace(get_running_loop=lambda: _Loop())
+    monkeypatch.setattr(
+        module,
+        "get_request_json",
+        lambda: _AwaitableValue(
+            {
+                "file_ids": ["file-1", folder.id, "file-1"],
+                "kb_ids": [target_kb.id],
+            }
+        ),
+    )
+    monkeypatch.setattr(module.FileService, "get_by_ids", lambda _file_ids: [files["file-1"], folder])
+    monkeypatch.setattr(module.FileService, "get_all_innermost_file_ids", lambda _folder_id, _ids: ["file-1", "file-2"])
+    monkeypatch.setattr(module.FileService, "get_by_id", lambda file_id: (file_id in files, files.get(file_id)))
+    monkeypatch.setattr(module.File2DocumentService, "get_by_file_id", lambda _file_id: [])
+    monkeypatch.setattr(module.KnowledgebaseService, "get_by_id", lambda _kb_id: (True, target_kb))
+    monkeypatch.setattr(module, "check_file_team_permission", lambda _file, _user_id: True)
+    monkeypatch.setattr(module, "check_kb_team_permission", lambda _kb, _user_id: True)
+
+    result = _run(inspect.unwrap(module.convert)())
+
+    assert result["code"] == 0
+    assert len(scheduled) == 1
+    function, args = scheduled[0]
+    assert function is module._convert_files
+    assert args[0] == ["file-1", "file-2"]
+    assert list(args[1]) == args[0]
+
+
+def test_file_conversion_worker_deduplicates_files_before_deleting_and_creating(monkeypatch):
+    module = _load_route_module(monkeypatch, "file2document_api")
+    source_files = {
+        "file-1": SimpleNamespace(id="file-1", type="doc", name="A.txt", location="A.txt", size=3),
+        "file-2": SimpleNamespace(id="file-2", type="doc", name="B.txt", location="B.txt", size=5),
+    }
+    old_documents = {
+        "file-1": SimpleNamespace(id="doc-old-1", kb_id="kb-old"),
+        "file-2": SimpleNamespace(id="doc-old-2", kb_id="kb-old"),
+    }
+    target_kbs = [
+        SimpleNamespace(
+            id="kb-target-1",
+            tenant_id="owner-target-1",
+            parser_id="naive",
+            pipeline_id=None,
+            parser_config={},
+        ),
+        SimpleNamespace(
+            id="kb-target-2",
+            tenant_id="owner-target-2",
+            parser_id="naive",
+            pipeline_id=None,
+            parser_config={},
+        ),
+    ]
+    removed = []
+    deleted_links = []
+    inserted_documents = []
+    inserted_links = []
+
+    monkeypatch.setattr(
+        module.DocumentService,
+        "remove_document",
+        lambda document, owner_id: removed.append((document.id, owner_id)),
+    )
+    monkeypatch.setattr(
+        module.DocumentService,
+        "insert",
+        lambda payload: inserted_documents.append(payload) or SimpleNamespace(id=payload["id"]),
+    )
+    monkeypatch.setattr(
+        module.File2DocumentService,
+        "delete_by_document_id",
+        lambda document_id: deleted_links.append(document_id),
+    )
+    monkeypatch.setattr(module.File2DocumentService, "insert", lambda payload: inserted_links.append(payload))
+    monkeypatch.setattr(module.FileService, "get_by_id", lambda file_id: (True, source_files[file_id]))
+    monkeypatch.setattr(module.FileService, "get_parser", lambda *_args: "naive")
+
+    module._convert_files(
+        ["file-1", "file-2", "file-1", "file-2"],
+        {
+            "file-1": [(old_documents["file-1"], "owner-old")],
+            "file-2": [(old_documents["file-2"], "owner-old")],
+        },
+        target_kbs,
+        "member-active",
+    )
+
+    assert removed == [("doc-old-1", "owner-old"), ("doc-old-2", "owner-old")]
+    assert deleted_links == ["doc-old-1", "doc-old-2"]
+    assert [(document["name"], document["kb_id"]) for document in inserted_documents] == [
+        ("A.txt", "kb-target-1"),
+        ("A.txt", "kb-target-2"),
+        ("B.txt", "kb-target-1"),
+        ("B.txt", "kb-target-2"),
+    ]
+    assert [link["file_id"] for link in inserted_links] == ["file-1", "file-1", "file-2", "file-2"]
+
+
 def test_file_conversion_worker_never_expands_deletion_from_bare_file_id(monkeypatch):
     module = _load_route_module(monkeypatch, "file2document_api")
     old_document = SimpleNamespace(id="doc-team-a", kb_id="kb-team-a")
