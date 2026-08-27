@@ -23,6 +23,17 @@ export default {
   listTenant: `${restAPIv1}/tenants`,
   agreeTenant: (tenantId: string) => `${restAPIv1}/tenants/${tenantId}`,
 
+  // department team
+  listTeams: `${restAPIv1}/teams`,
+  createTeam: `${restAPIv1}/teams`,
+  teamDetail: (teamId: string) => `${restAPIv1}/teams/${teamId}`,
+  teamMembers: (teamId: string) =>
+    `${restAPIv1}/teams/${teamId}/members`,
+  teamMember: (teamId: string, userId: string) =>
+    `${restAPIv1}/teams/${teamId}/members/${userId}`,
+  teamInvitation: (teamId: string) =>
+    `${restAPIv1}/teams/${teamId}/invitation`,
+
   // llm model
   listAllAddedModels: `${restAPIv1}/models`,
   defaultModel: `${restAPIv1}/models/default`,
