@@ -333,6 +333,22 @@ class Base(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class CreateTeamReq(Base):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100), Field(...)]
+
+
+class UpdateTeamReq(CreateTeamReq):
+    pass
+
+
+class InviteTeamMemberReq(Base):
+    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=255), Field(...)]
+
+
+class UpdateTeamInvitationReq(Base):
+    action: Literal["accept", "reject"]
+
+
 class RaptorConfig(Base):
     """Dataset parser configuration for RAPTOR summary generation."""
 

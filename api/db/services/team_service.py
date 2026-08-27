@@ -53,6 +53,18 @@ class TeamService(CommonService):
             .dicts()
         )
 
+    @classmethod
+    @DB.connection_context()
+    def deactivate(cls, team_id: str) -> int:
+        return (
+            cls.model.update({"status": StatusEnum.INVALID.value})
+            .where(
+                cls.model.id == team_id,
+                cls.model.status == StatusEnum.VALID.value,
+            )
+            .execute()
+        )
+
 
 class TeamMemberService(CommonService):
     model = TeamMember
@@ -89,6 +101,18 @@ class TeamMemberService(CommonService):
             .order_by(Team.tenant_id)
         )
         return [owner["tenant_id"] for owner in owners.dicts()]
+
+    @classmethod
+    @DB.connection_context()
+    def deactivate_by_team(cls, team_id: str) -> int:
+        return (
+            cls.model.update({"status": StatusEnum.INVALID.value})
+            .where(
+                cls.model.team_id == team_id,
+                cls.model.status == StatusEnum.VALID.value,
+            )
+            .execute()
+        )
 
 
 class TeamAuthorizationService:
