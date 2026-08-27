@@ -9,6 +9,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Modal } from '@/components/ui/modal/modal';
 import { zodResolver } from '@hookform/resolvers/zod';
+import { useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
 import * as z from 'zod';
@@ -43,6 +44,10 @@ const InviteMemberModal = ({
       email: '',
     },
   });
+
+  useEffect(() => {
+    if (!visible) form.reset({ email: '' });
+  }, [form, visible]);
 
   const handleOk = async (data: FormData) => {
     return onOk(data.email);

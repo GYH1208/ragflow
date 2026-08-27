@@ -14,6 +14,7 @@ import type {
   IUserInfo,
   TeamInvitationAction,
 } from '@/interfaces/database/user-setting';
+import { useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 export type TeamDialogState =
@@ -39,6 +40,7 @@ export const groupTeams = (teams: ITeam[]) => ({
 
 interface UseTeamActionsOptions {
   currentUserId?: string;
+  isSuperuser: boolean;
   manageableOwnedTeams: ITeam[];
   selectedTeam?: ITeam;
   selectedTeamId: string;
@@ -49,6 +51,7 @@ interface UseTeamActionsOptions {
 
 export const useTeamActions = ({
   currentUserId,
+  isSuperuser,
   manageableOwnedTeams,
   selectedTeam,
   selectedTeamId,
@@ -59,11 +62,18 @@ export const useTeamActions = ({
   const { t } = useTranslation();
   const { createTeam, loading: creatingTeam } = useCreateTeam();
   const { renameTeam, loading: renamingTeam } = useRenameTeam();
-  const { deleteTeam } = useDeleteTeam();
+  const { deleteTeam, loading: deletingTeam } = useDeleteTeam();
   const { inviteTeamMember, loading: invitingMember } = useInviteTeamMember();
-  const { removeTeamMember } = useRemoveTeamMember();
-  const { updateInvitation } = useUpdateTeamInvitation();
-  const { leaveTeam } = useLeaveTeam();
+  const { removeTeamMember, loading: removingMember } = useRemoveTeamMember();
+  const { loading: invitationLoading, updateInvitation } =
+    useUpdateTeamInvitation();
+  const { leaveTeam, loading: leavingTeam } = useLeaveTeam();
+  const savingRef = useRef(false);
+  const deletingRef = useRef(false);
+  const invitingRef = useRef(false);
+  const removingRef = useRef(false);
+  const invitationRef = useRef(false);
+  const leavingRef = useRef(false);
 
   const reportFailure = (
     response: { code?: number; message?: string } | undefined,
@@ -75,19 +85,61 @@ export const useTeamActions = ({
     return false;
   };
 
+  const reportRequestError = (error: unknown) => {
+    message.error(
+      error instanceof Error && error.message
+        ? error.message
+        : t('setting.teamOperationFailed'),
+    );
+  };
+
+  async function runRequest<T>(
+    pendingRef: { current: boolean },
+    request: () => Promise<T>,
+  ): Promise<T | undefined> {
+    if (pendingRef.current) return undefined;
+
+    pendingRef.current = true;
+    try {
+      return await request();
+    } catch (error) {
+      reportRequestError(error);
+      return undefined;
+    } finally {
+      pendingRef.current = false;
+    }
+  }
+
   const saveTeam = async (dialog: TeamDialogState, name: string) => {
-    if (!dialog) return;
-    const response =
+    if (!dialog || creatingTeam || renamingTeam) return false;
+    if (dialog.mode === 'create' && !isSuperuser) return false;
+    if (
+      dialog.mode === 'rename' &&
+      !manageableOwnedTeams.some((team) => team.id === dialog.teamId)
+    ) {
+      return false;
+    }
+
+    const response = await runRequest(savingRef, () =>
       dialog.mode === 'create'
-        ? await createTeam(name)
-        : await renameTeam({ teamId: dialog.teamId, name });
-    if (!reportFailure(response)) onTeamSaved();
-    return response;
+        ? createTeam(name)
+        : renameTeam({ teamId: dialog.teamId, name }),
+    );
+    if (!response || reportFailure(response)) return false;
+
+    onTeamSaved();
+    return true;
   };
 
   const removeTeam = async (team: ITeam) => {
-    const response = await deleteTeam(team.id);
-    if (reportFailure(response)) return response;
+    if (
+      deletingTeam ||
+      !manageableOwnedTeams.some((candidate) => candidate.id === team.id)
+    ) {
+      return false;
+    }
+    const response = await runRequest(deletingRef, () => deleteTeam(team.id));
+    if (!response || reportFailure(response)) return false;
 
     if (selectedTeamId === team.id) {
       const nextTeam = manageableOwnedTeams.find(
@@ -95,51 +147,66 @@ export const useTeamActions = ({
       );
       onTeamDeleted(nextTeam?.id ?? '');
     }
-    return response;
+    return true;
   };
 
   const respondToInvitation = async (
     teamId: string,
     action: TeamInvitationAction,
   ) => {
-    const response = await updateInvitation({ teamId, action });
-    reportFailure(response);
-    return response;
+    if (invitationLoading) return false;
+    const response = await runRequest(invitationRef, () =>
+      updateInvitation({ teamId, action }),
+    );
+    if (!response || reportFailure(response)) return false;
+    return true;
   };
 
   const leaveJoinedTeam = async (teamId: string) => {
-    if (!currentUserId) return;
-    const response = await leaveTeam({ teamId, userId: currentUserId });
-    reportFailure(response);
-    return response;
+    if (!currentUserId || leavingTeam) return false;
+    const response = await runRequest(leavingRef, () =>
+      leaveTeam({ teamId, userId: currentUserId }),
+    );
+    if (!response || reportFailure(response)) return false;
+    return true;
   };
 
   const inviteMember = async (email: string) => {
-    if (!selectedTeam) return;
-    const response = await inviteTeamMember({
-      teamId: selectedTeam.id,
-      email,
-    });
-    if (!reportFailure(response)) onMemberInvited();
-    return response;
+    if (!selectedTeam || invitingMember) return false;
+    const response = await runRequest(invitingRef, () =>
+      inviteTeamMember({
+        teamId: selectedTeam.id,
+        email,
+      }),
+    );
+    if (!response || reportFailure(response)) return false;
+
+    onMemberInvited();
+    return true;
   };
 
   const removeMember = async (member: ITeamMember) => {
-    if (!selectedTeam) return;
-    const response = await removeTeamMember({
-      teamId: selectedTeam.id,
-      userId: member.id,
-    });
-    reportFailure(response);
-    return response;
+    if (!selectedTeam || removingMember) return false;
+    const response = await runRequest(removingRef, () =>
+      removeTeamMember({
+        teamId: selectedTeam.id,
+        userId: member.id,
+      }),
+    );
+    if (!response || reportFailure(response)) return false;
+    return true;
   };
 
   return {
     inviteMember,
     invitingMember,
+    invitationLoading,
     leaveJoinedTeam,
+    leavingTeam,
     removeMember,
+    removingMember,
     removeTeam,
+    deletingTeam,
     respondToInvitation,
     saveTeam,
     teamDialogLoading: creatingTeam || renamingTeam,

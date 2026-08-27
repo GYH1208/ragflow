@@ -6,7 +6,7 @@ import type {
 } from '@/interfaces/database/user-setting';
 import { cn } from '@/lib/utils';
 import { Pencil, Trash2 } from 'lucide-react';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { canManageTeam, groupTeams } from './hooks';
@@ -17,9 +17,15 @@ interface TeamListProps {
   loading: boolean;
   searchTerm: string;
   selectedTeamId: string;
-  onDelete: (team: ITeam) => Promise<unknown>;
-  onInvitation: (teamId: string, action: TeamInvitationAction) => void;
-  onLeave: (teamId: string) => void;
+  deleteLoading: boolean;
+  invitationLoading: boolean;
+  leaveLoading: boolean;
+  onDelete: (team: ITeam) => Promise<boolean>;
+  onInvitation: (
+    teamId: string,
+    action: TeamInvitationAction,
+  ) => Promise<boolean>;
+  onLeave: (teamId: string) => Promise<boolean>;
   onRename: (team: ITeam) => void;
   onSelect: (teamId: string) => void;
 }
@@ -30,6 +36,9 @@ const TeamList = ({
   loading,
   searchTerm,
   selectedTeamId,
+  deleteLoading,
+  invitationLoading,
+  leaveLoading,
   onDelete,
   onInvitation,
   onLeave,
@@ -37,6 +46,7 @@ const TeamList = ({
   onSelect,
 }: TeamListProps) => {
   const { t } = useTranslation();
+  const [deletingTeamId, setDeletingTeamId] = useState<string | null>(null);
   const filteredTeams = useMemo(() => {
     const normalizedSearch = searchTerm.trim().toLocaleLowerCase();
     if (!normalizedSearch) return teams;
@@ -46,6 +56,19 @@ const TeamList = ({
   }, [searchTerm, teams]);
   const groupedTeams = groupTeams(filteredTeams);
   const userInfo = { is_superuser: isSuperuser };
+
+  useEffect(() => {
+    if (
+      deletingTeamId &&
+      !teams.some(
+        (team) =>
+          team.id === deletingTeamId &&
+          canManageTeam({ is_superuser: isSuperuser }, team),
+      )
+    ) {
+      setDeletingTeamId(null);
+    }
+  }, [deletingTeamId, isSuperuser, teams]);
 
   const renderTeam = (team: ITeam) => {
     const manageable = canManageTeam(userInfo, team);
@@ -97,15 +120,26 @@ const TeamList = ({
                 <Pencil />
               </Button>
               <ConfirmDeleteDialog
+                confirmLoading={deleteLoading}
                 title={t('setting.deleteTeam')}
+                manualClose
+                open={deletingTeamId === team.id}
                 content={{
                   title: t('setting.deleteTeamWarning'),
                   node: <span>{team.name}</span>,
                 }}
-                onOk={() => onDelete(team)}
+                onOpenChange={(open) => {
+                  if (!deleteLoading) {
+                    setDeletingTeamId(open ? team.id : null);
+                  }
+                }}
+                onOk={async () => {
+                  if (await onDelete(team)) setDeletingTeamId(null);
+                }}
               >
                 <Button
                   aria-label={`${t('setting.deleteTeam')} ${team.name}`}
+                  disabled={deleteLoading}
                   size="icon-sm"
                   variant="delete"
                 >
@@ -120,6 +154,7 @@ const TeamList = ({
           <div className="mt-3 flex gap-2">
             <Button
               aria-label={`${t('setting.acceptInvitation')} ${team.name}`}
+              disabled={invitationLoading}
               size="sm"
               onClick={() => onInvitation(team.id, 'accept')}
             >
@@ -127,6 +162,7 @@ const TeamList = ({
             </Button>
             <Button
               aria-label={`${t('setting.rejectInvitation')} ${team.name}`}
+              disabled={invitationLoading}
               size="sm"
               variant="outline"
               onClick={() => onInvitation(team.id, 'reject')}
@@ -140,6 +176,7 @@ const TeamList = ({
           <Button
             aria-label={`${t('setting.leaveTeam')} ${team.name}`}
             className="mt-3"
+            disabled={leaveLoading}
             size="sm"
             variant="outline"
             onClick={() => onLeave(team.id)}

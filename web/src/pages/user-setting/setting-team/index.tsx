@@ -54,8 +54,19 @@ const UserSettingTeam = () => {
     }
   }, [manageableOwnedTeams, selectedTeam, selectedTeamId]);
 
+  useEffect(() => {
+    if (!teamDialog) return;
+
+    const authorized =
+      teamDialog.mode === 'create'
+        ? Boolean(userInfo?.is_superuser)
+        : manageableOwnedTeams.some((team) => team.id === teamDialog.teamId);
+    if (!authorized) setTeamDialog(null);
+  }, [manageableOwnedTeams, teamDialog, userInfo?.is_superuser]);
+
   const teamActions = useTeamActions({
     currentUserId: userInfo?.id,
+    isSuperuser: Boolean(userInfo?.is_superuser),
     manageableOwnedTeams,
     selectedTeam,
     selectedTeamId,
@@ -109,6 +120,9 @@ const UserSettingTeam = () => {
               loading={teamsLoading}
               searchTerm={teamSearch}
               selectedTeamId={selectedTeamId}
+              deleteLoading={teamActions.deletingTeam}
+              invitationLoading={teamActions.invitationLoading}
+              leaveLoading={teamActions.leavingTeam}
               onDelete={teamActions.removeTeam}
               onInvitation={teamActions.respondToInvitation}
               onLeave={teamActions.leaveJoinedTeam}
@@ -149,6 +163,7 @@ const UserSettingTeam = () => {
                 error={memberError}
                 loading={membersLoading}
                 members={members}
+                removeLoading={teamActions.removingMember}
                 searchTerm={memberSearch}
                 onRemove={teamActions.removeMember}
               />

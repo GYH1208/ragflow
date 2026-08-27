@@ -15,25 +15,28 @@ import {
 } from '@/components/ui/table';
 import type { ITeamMember } from '@/interfaces/database/user-setting';
 import { Trash2 } from 'lucide-react';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 interface TeamMemberTableProps {
   error?: Error | null;
   loading: boolean;
   members: ITeamMember[];
+  removeLoading: boolean;
   searchTerm: string;
-  onRemove: (member: ITeamMember) => Promise<unknown>;
+  onRemove: (member: ITeamMember) => Promise<boolean>;
 }
 
 const TeamMemberTable = ({
   error,
   loading,
   members,
+  removeLoading,
   searchTerm,
   onRemove,
 }: TeamMemberTableProps) => {
   const { t } = useTranslation();
+  const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
   const filteredMembers = useMemo(() => {
     const normalizedSearch = searchTerm.trim().toLocaleLowerCase();
     if (!normalizedSearch) return members;
@@ -44,6 +47,15 @@ const TeamMemberTable = ({
         member.email.toLocaleLowerCase().includes(normalizedSearch),
     );
   }, [members, searchTerm]);
+
+  useEffect(() => {
+    if (
+      removingMemberId &&
+      !members.some((member) => member.id === removingMemberId)
+    ) {
+      setRemovingMemberId(null);
+    }
+  }, [members, removingMemberId]);
 
   if (error) {
     return (
@@ -97,7 +109,10 @@ const TeamMemberTable = ({
                 </TableCell>
                 <TableCell>
                   <ConfirmDeleteDialog
+                    confirmLoading={removeLoading}
                     title={t('setting.removeMember')}
+                    manualClose
+                    open={removingMemberId === member.id}
                     content={{
                       title: t('setting.confirmRemoveMember'),
                       node: (
@@ -112,10 +127,18 @@ const TeamMemberTable = ({
                       ),
                     }}
                     okButtonText={t('setting.removeMember')}
-                    onOk={() => onRemove(member)}
+                    onOpenChange={(open) => {
+                      if (!removeLoading) {
+                        setRemovingMemberId(open ? member.id : null);
+                      }
+                    }}
+                    onOk={async () => {
+                      if (await onRemove(member)) setRemovingMemberId(null);
+                    }}
                   >
                     <Button
                       aria-label={`${t('setting.removeMember')} ${member.nickname}`}
+                      disabled={removeLoading}
                       size="icon-sm"
                       variant="delete"
                     >
