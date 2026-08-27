@@ -442,10 +442,10 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
     if requested_owner_id != kb.tenant_id:
         return False, "Dataset owner cannot be changed."
 
-    assignment_changed = False
+    assignment_touched = "permission" in req or "team_id" in req
     target_permission = kb.permission
     target_team_id = kb.team_id
-    if "permission" in req or "team_id" in req:
+    if assignment_touched:
         target_permission = req.get("permission", kb.permission)
         if "team_id" in req:
             target_team_id = req["team_id"]
@@ -454,7 +454,6 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
         else:
             target_team_id = kb.team_id
         if (target_permission, target_team_id) != (kb.permission, kb.team_id):
-            assignment_changed = True
             ok, assignment_error = validate_team_assignment(
                 tenant_id,
                 kb,
@@ -526,7 +525,7 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
     if "parse_type" in req:
         del req["parse_type"]
 
-    if assignment_changed:
+    if assignment_touched:
         updated, update_error = _update_dataset_with_locked_assignment(
             tenant_id,
             kb,

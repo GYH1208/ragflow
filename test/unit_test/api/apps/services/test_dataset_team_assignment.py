@@ -338,6 +338,25 @@ async def test_update_revalidates_team_and_dataset_inside_the_mutation_transacti
     assert updates == []
 
 
+async def test_update_revalidates_an_explicit_unchanged_team_assignment(monkeypatch):
+    dataset = _dataset(permission=TenantPermission.TEAM.value, team_id="team-old")
+    updates, _ = _stub_update(monkeypatch, dataset, admin=True, owned_team_ids={"team-old"})
+    monkeypatch.setattr(TeamService, "get_owned_team_for_update", lambda *_args: None, raising=False)
+
+    result = await update_dataset(
+        "owner-1",
+        "kb-1",
+        {
+            "description": "updated",
+            "permission": TenantPermission.TEAM.value,
+            "team_id": "team-old",
+        },
+    )
+
+    assert result == (False, "The team and dataset must have the same owner.")
+    assert updates == []
+
+
 async def test_admin_cannot_update_another_owners_dataset(monkeypatch):
     dataset = _dataset(owner_id="owner-2", permission=TenantPermission.TEAM.value, team_id="team-2")
     updates, _ = _stub_update(monkeypatch, dataset, admin=True, owned_team_ids={"team-2"})
