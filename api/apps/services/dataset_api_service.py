@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from peewee import IntegrityError
 
 from api.db import TenantPermission
-from api.db.db_models import File
+from api.db.db_models import DB, File
 from api.db.joint_services.tenant_model_service import get_model_config_from_provider_instance
 from api.db.services.connector_service import Connector2KbService
 from api.db.services.document_service import DocumentService, queue_raptor_o_graphrag_tasks
@@ -60,6 +60,52 @@ _INDEX_TYPE_TO_DISPLAY_NAME = {
 
 def validate_team_assignment(user_id: str, kb, permission: str, team_id: str | None):
     return TeamAuthorizationService.validate_assignment(user_id, kb, permission, team_id)
+
+
+def _lock_owned_assignment_teams(owner_id: str, *team_ids: str | None) -> bool:
+    for team_id in sorted({team_id for team_id in team_ids if team_id}):
+        if TeamService.get_owned_team_for_update(team_id, owner_id) is None:
+            return False
+    return True
+
+
+def _save_dataset_with_locked_assignment(actor_id: str, payload: dict) -> tuple[bool, str | None]:
+    with DB.atomic():
+        if payload.get("permission") == TenantPermission.TEAM.value and not _lock_owned_assignment_teams(
+            actor_id,
+            payload.get("team_id"),
+        ):
+            return False, "The team and dataset must have the same owner."
+        if KnowledgebaseService.save_in_transaction(**payload) != 1:
+            return False, "Failed to save dataset"
+    return True, None
+
+
+def _update_dataset_with_locked_assignment(
+    actor_id: str,
+    snapshot,
+    values: dict,
+    target_permission: str,
+    target_team_id: str | None,
+) -> tuple[bool, str | None]:
+    with DB.atomic():
+        if not _lock_owned_assignment_teams(
+            actor_id,
+            snapshot.team_id if snapshot.permission == TenantPermission.TEAM.value else None,
+            target_team_id if target_permission == TenantPermission.TEAM.value else None,
+        ):
+            return False, "The team and dataset must have the same owner."
+
+        locked_kb = KnowledgebaseService.get_owned_for_update(snapshot.id, actor_id)
+        if locked_kb is None:
+            return False, f"User '{actor_id}' lacks permission for dataset '{snapshot.id}'"
+        if (locked_kb.permission, locked_kb.team_id) != (snapshot.permission, snapshot.team_id):
+            return False, "Dataset assignment changed concurrently."
+
+        affected = KnowledgebaseService.update_by_id_in_transaction(locked_kb.id, values)
+        if affected != 1:
+            return False, "Update dataset error.(Database error)"
+    return True, None
 
 
 def _attach_team_names(datasets: list[dict]) -> list[dict]:
@@ -207,8 +253,9 @@ async def create_dataset(tenant_id: str, req: dict):
         if not ok:
             return False, err
 
-    if not KnowledgebaseService.save(**create_dict):
-        return False, "Failed to save dataset"
+    saved, save_error = _save_dataset_with_locked_assignment(tenant_id, create_dict)
+    if not saved:
+        return False, save_error
     ok, k = KnowledgebaseService.get_by_id(create_dict["id"])
     if not ok:
         return False, "Dataset created failed"
@@ -395,6 +442,9 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
     if requested_owner_id != kb.tenant_id:
         return False, "Dataset owner cannot be changed."
 
+    assignment_changed = False
+    target_permission = kb.permission
+    target_team_id = kb.team_id
     if "permission" in req or "team_id" in req:
         target_permission = req.get("permission", kb.permission)
         if "team_id" in req:
@@ -404,6 +454,7 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
         else:
             target_team_id = kb.team_id
         if (target_permission, target_team_id) != (kb.permission, kb.team_id):
+            assignment_changed = True
             ok, assignment_error = validate_team_assignment(
                 tenant_id,
                 kb,
@@ -475,7 +526,17 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
     if "parse_type" in req:
         del req["parse_type"]
 
-    if not KnowledgebaseService.update_by_id(kb.id, req):
+    if assignment_changed:
+        updated, update_error = _update_dataset_with_locked_assignment(
+            tenant_id,
+            kb,
+            req,
+            target_permission,
+            target_team_id,
+        )
+        if not updated:
+            return False, update_error
+    elif not KnowledgebaseService.update_by_id(kb.id, req):
         return False, "Update dataset error.(Database error)"
 
     ok, k = KnowledgebaseService.get_by_id(kb.id)

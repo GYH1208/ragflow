@@ -139,10 +139,11 @@ def test_invite_schedules_email_after_database_success(team_api_module, monkeypa
     monkeypatch.setattr(
         team_api_module.team_api_service,
         "invite_member",
-        lambda *_args: (True, {"id": "new-user", "email": "new@example.com", "state": "invited"}),
+        lambda *_args: (
+            True,
+            {"id": "new-user", "email": "new@example.com", "state": "invited", "_team_name": "Finance"},
+        ),
     )
-    monkeypatch.setattr(team_api_module.TeamService, "get_owned_team", lambda *_args: SimpleNamespace(name="Finance"))
-
     async def fake_send(**kwargs):
         sent.append(kwargs)
 
@@ -160,6 +161,7 @@ def test_invite_schedules_email_after_database_success(team_api_module, monkeypa
     _run(created[0])
 
     assert result["code"] == 0
+    assert "_team_name" not in result["data"]
     assert sent == [
         {
             "to_email": "new@example.com",

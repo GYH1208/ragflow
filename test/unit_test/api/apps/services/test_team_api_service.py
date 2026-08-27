@@ -180,6 +180,70 @@ def test_delete_team_rolls_back_every_step_on_failure(team_database, monkeypatch
     assert Team.get_by_id("team-1").status == StatusEnum.VALID.value
 
 
+def test_delete_team_revalidates_after_precheck_race(team_database, monkeypatch):
+    _user("admin-1", admin=True)
+    _team("team-1", "admin-1")
+    _member("member-1", "team-1", "member-1")
+    _kb("kb-1", "admin-1", team_id="team-1")
+
+    def authorize_then_delete(*_args):
+        Team.update({"status": StatusEnum.INVALID.value}).where(Team.id == "team-1").execute()
+        return True
+
+    monkeypatch.setattr(team_api_service.TeamAuthorizationService, "can_manage_team", authorize_then_delete)
+
+    assert delete_team("admin-1", "team-1") == (False, "No authorization.")
+    assert Knowledgebase.get_by_id("kb-1").team_id == "team-1"
+    assert TeamMember.get_by_id("member-1").status == StatusEnum.VALID.value
+
+
+def test_delete_team_locks_rows_in_consistent_order(team_database, monkeypatch):
+    _user("admin-1", admin=True)
+    _team("team-1", "admin-1")
+    _member("member-1", "team-1", "member-1")
+    _kb("kb-1", "admin-1", team_id="team-1")
+    locked_models = []
+
+    def track_lock(query):
+        locked_models.append(query.model.__name__)
+        assert team_database.in_transaction()
+        return query
+
+    monkeypatch.setattr(team_api_service, "select_for_update", track_lock, raising=False)
+
+    assert delete_team("admin-1", "team-1") == (True, {"unassigned_dataset_count": 1})
+    assert locked_models == ["Team", "Knowledgebase", "TeamMember"]
+
+
+def test_delete_team_rolls_back_when_final_affected_row_check_loses(team_database, monkeypatch):
+    _user("admin-1", admin=True)
+    _team("team-1", "admin-1")
+    _member("member-1", "team-1", "member-1")
+    _kb("kb-1", "admin-1", team_id="team-1")
+    original_update = Team.update
+
+    class _ZeroAffectedUpdate:
+        def where(self, *_args):
+            return self
+
+        def execute(self):
+            return 0
+
+    def lose_final_update(data=None, **kwargs):
+        values = data or kwargs
+        if values.get("status") == StatusEnum.INVALID.value:
+            return _ZeroAffectedUpdate()
+        return original_update(data, **kwargs)
+
+    monkeypatch.setattr(Team, "update", lose_final_update)
+
+    with pytest.raises(RuntimeError, match="Team changed concurrently"):
+        delete_team("admin-1", "team-1")
+
+    assert Knowledgebase.get_by_id("kb-1").team_id == "team-1"
+    assert TeamMember.get_by_id("member-1").status == StatusEnum.VALID.value
+
+
 def test_invite_requires_valid_registered_user_and_rejects_live_relationships(team_database):
     _user("admin-1", admin=True)
     _user("inactive", "inactive@example.com", status=StatusEnum.INVALID.value)
@@ -213,24 +277,60 @@ def test_invite_reuses_an_invalid_unique_relationship(team_database):
     assert relation.invited_by == "admin-1"
 
 
+def test_invite_revalidates_locked_team_after_precheck_race(team_database, monkeypatch):
+    _user("admin-1", admin=True)
+    _user("member-1", "member@example.com")
+    _team("team-1", "admin-1")
+
+    def authorize_then_delete(*_args):
+        Team.update({"status": StatusEnum.INVALID.value}).where(Team.id == "team-1").execute()
+        return True
+
+    monkeypatch.setattr(team_api_service.TeamAuthorizationService, "can_manage_team", authorize_then_delete)
+
+    assert invite_member("admin-1", "team-1", "member@example.com") == (False, "No authorization.")
+    assert TeamMember.select().count() == 0
+
+
+def test_invite_locks_team_before_membership_and_returns_locked_name(team_database, monkeypatch):
+    _user("admin-1", admin=True)
+    _user("member-1", "member@example.com")
+    _team("team-1", "admin-1", "Finance")
+    locked_models = []
+
+    def track_lock(query):
+        locked_models.append(query.model.__name__)
+        assert team_database.in_transaction()
+        return query
+
+    monkeypatch.setattr(team_api_service, "select_for_update", track_lock, raising=False)
+
+    ok, result = invite_member("admin-1", "team-1", "member@example.com")
+
+    assert ok is True
+    assert result["_team_name"] == "Finance"
+    assert locked_models == ["Team", "TeamMember"]
+
+
 def test_invite_reads_and_restores_on_the_transaction_database(team_database, monkeypatch):
     _user("admin-1", admin=True)
     _user("member-1", "member@example.com")
     _team("team-1", "admin-1")
     _member("old-rel", "team-1", "member-1", status=StatusEnum.INVALID.value)
     transaction_states = []
-    original_get_or_none = TeamMember.get_or_none
     original_update = TeamMember.update
+    original_select_for_update = team_api_service.select_for_update
 
-    def tracking_get_or_none(*query):
-        transaction_states.append(("read", team_database.in_transaction()))
-        return original_get_or_none(*query)
+    def tracking_select_for_update(query):
+        if query.model is TeamMember:
+            transaction_states.append(("read", team_database.in_transaction()))
+        return original_select_for_update(query)
 
     def tracking_update(__data=None, /, **update):
         transaction_states.append(("restore", team_database.in_transaction()))
         return original_update(__data, **update)
 
-    monkeypatch.setattr(TeamMember, "get_or_none", tracking_get_or_none)
+    monkeypatch.setattr(team_api_service, "select_for_update", tracking_select_for_update)
     monkeypatch.setattr(TeamMember, "update", tracking_update)
     _bind_connection_context(monkeypatch, team_database, TeamMemberService, "update_by_id")
 
@@ -294,6 +394,18 @@ def test_invite_insert_race_reloads_the_winning_relationship(team_database, monk
 
     monkeypatch.setattr(TeamMember, "get_or_none", racing_get_or_none)
     monkeypatch.setattr(TeamMember, "save", racing_save)
+    original_select_for_update = team_api_service.select_for_update
+
+    class _RacingLockedRelationship:
+        def get_or_none(self):
+            return racing_get_or_none()
+
+    def racing_select_for_update(query):
+        if query.model is TeamMember:
+            return _RacingLockedRelationship()
+        return original_select_for_update(query)
+
+    monkeypatch.setattr(team_api_service, "select_for_update", racing_select_for_update)
 
     try:
         result = invite_member("admin-1", "team-1", "member@example.com")

@@ -17,7 +17,7 @@ from peewee import IntegrityError
 
 from api.db import TeamMemberState, TenantPermission
 from api.db.db_models import DB, Knowledgebase, Team, TeamMember, User
-from api.db.services.team_service import TeamAuthorizationService, TeamMemberService, TeamService
+from api.db.services.team_service import TeamAuthorizationService, TeamMemberService, TeamService, select_for_update
 from api.db.services.user_service import UserService
 from common.constants import StatusEnum
 from common.misc_utils import get_uuid
@@ -101,6 +101,33 @@ def delete_team(admin_id: str, team_id: str):
     if not TeamAuthorizationService.can_manage_team(admin_id, team_id):
         return False, NO_AUTHORIZATION
     with DB.atomic():
+        team = select_for_update(
+            Team.select().where(
+                Team.id == team_id,
+                Team.tenant_id == admin_id,
+                Team.status == StatusEnum.VALID.value,
+            )
+        ).get_or_none()
+        if team is None:
+            return False, NO_AUTHORIZATION
+
+        datasets = list(
+            select_for_update(
+                Knowledgebase.select().where(
+                    Knowledgebase.team_id == team_id,
+                    Knowledgebase.tenant_id == admin_id,
+                )
+            ).order_by(Knowledgebase.id)
+        )
+        memberships = list(
+            select_for_update(
+                TeamMember.select().where(
+                    TeamMember.team_id == team_id,
+                    TeamMember.status == StatusEnum.VALID.value,
+                )
+            ).order_by(TeamMember.id)
+        )
+
         unassigned_count = (
             Knowledgebase.update({"permission": TenantPermission.ME.value, "team_id": None})
             .where(
@@ -109,7 +136,10 @@ def delete_team(admin_id: str, team_id: str):
             )
             .execute()
         )
-        (
+        if unassigned_count != len(datasets):
+            raise RuntimeError("Dataset assignments changed concurrently.")
+
+        deactivated_member_count = (
             TeamMember.update({"status": StatusEnum.INVALID.value})
             .where(
                 TeamMember.team_id == team_id,
@@ -117,14 +147,20 @@ def delete_team(admin_id: str, team_id: str):
             )
             .execute()
         )
-        (
+        if deactivated_member_count != len(memberships):
+            raise RuntimeError("Team memberships changed concurrently.")
+
+        deactivated_team_count = (
             Team.update({"status": StatusEnum.INVALID.value})
             .where(
                 Team.id == team_id,
+                Team.tenant_id == admin_id,
                 Team.status == StatusEnum.VALID.value,
             )
             .execute()
         )
+        if deactivated_team_count != 1:
+            raise RuntimeError("Team changed concurrently.")
     return True, {"unassigned_dataset_count": unassigned_count}
 
 
@@ -207,10 +243,22 @@ def invite_member(admin_id: str, team_id: str, email: str):
     user = users[0]
 
     with DB.atomic():
-        relationship = TeamMember.get_or_none(
-            TeamMember.team_id == team_id,
-            TeamMember.user_id == user.id,
-        )
+        team = select_for_update(
+            Team.select().where(
+                Team.id == team_id,
+                Team.tenant_id == admin_id,
+                Team.status == StatusEnum.VALID.value,
+            )
+        ).get_or_none()
+        if team is None:
+            return False, NO_AUTHORIZATION
+
+        relationship = select_for_update(
+            TeamMember.select().where(
+                TeamMember.team_id == team_id,
+                TeamMember.user_id == user.id,
+            )
+        ).get_or_none()
         duplicate_error = _duplicate_membership_error(relationship)
         if duplicate_error is not None:
             return False, duplicate_error
@@ -239,7 +287,7 @@ def invite_member(admin_id: str, team_id: str, email: str):
         else:
             try:
                 with DB.atomic():
-                    TeamMember(
+                    inserted = TeamMember(
                         id=get_uuid(),
                         team_id=team_id,
                         user_id=user.id,
@@ -247,6 +295,8 @@ def invite_member(admin_id: str, team_id: str, email: str):
                         invited_by=admin_id,
                         status=StatusEnum.VALID.value,
                     ).save(force_insert=True)
+                    if inserted != 1:
+                        raise RuntimeError("Team invitation changed concurrently.")
             except IntegrityError:
                 winner = TeamMember.get_or_none(
                     TeamMember.team_id == team_id,
@@ -259,6 +309,7 @@ def invite_member(admin_id: str, team_id: str, email: str):
         "nickname": user.nickname,
         "avatar": user.avatar,
         "state": TeamMemberState.INVITED.value,
+        "_team_name": team.name,
     }
 
 

@@ -20,7 +20,6 @@ from quart import request
 
 from api.apps import current_user, login_required
 from api.apps.services import team_api_service
-from api.db.services.team_service import TeamService
 from api.db.services.user_service import UserService
 from api.utils.api_utils import get_data_error_result, get_error_argument_result, get_json_result
 from api.utils.validation_utils import (
@@ -127,13 +126,14 @@ async def invite_member(team_id):
     if not success:
         return _service_response(success, result)
 
-    team = TeamService.get_owned_team(team_id, current_user.id)
+    result = dict(result)
+    team_name = result.pop("_team_name")
     task = asyncio.create_task(
         send_team_invite_email(
             to_email=req["email"],
             invite_url=settings.MAIL_FRONTEND_URL,
             team_id=team_id,
-            team_name=team.name,
+            team_name=team_name,
             inviter=current_user.nickname or current_user.email,
         )
     )

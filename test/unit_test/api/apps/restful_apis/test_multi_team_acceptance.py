@@ -18,7 +18,7 @@ import asyncio
 import pytest
 from peewee import SqliteDatabase
 
-from api.apps.services import team_api_service
+from api.apps.services import dataset_api_service, team_api_service
 from api.apps.services.dataset_api_service import update_dataset
 from api.db import TeamMemberState, TenantPermission
 from api.db.db_models import Connector2Kb, Document, Knowledgebase, Team, TeamMember, User
@@ -118,6 +118,7 @@ def multi_team_harness(monkeypatch):
     models = [User, Team, TeamMember, Knowledgebase, Document, Connector2Kb]
     with database.bind_ctx(models), database.connection_context():
         database.create_tables(models)
+        monkeypatch.setattr(dataset_api_service, "DB", database)
         monkeypatch.setattr(team_api_service, "DB", database)
         for user_id, admin in (("admin-1", True), ("admin-2", True), ("alice", False), ("bob", False)):
             User.create(

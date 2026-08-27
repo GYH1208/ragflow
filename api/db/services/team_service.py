@@ -13,11 +13,24 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
+from peewee import SqliteDatabase
+
 from api.db import TeamMemberState, TenantPermission
 from api.db.db_models import DB, Knowledgebase, Team, TeamMember
 from api.db.services.common_service import CommonService
 from api.db.services.user_service import UserService
 from common.constants import StatusEnum
+
+
+def select_for_update(query):
+    """Apply a production row lock while keeping SQLite unit fixtures deterministic.
+
+    SQLite does not implement ``SELECT ... FOR UPDATE``; its transaction locking
+    behavior is intentionally not treated as evidence of production row locking.
+    """
+    if isinstance(query._database, SqliteDatabase):
+        return query
+    return query.for_update()
 
 
 class TeamService(CommonService):
@@ -39,6 +52,16 @@ class TeamService(CommonService):
             )
             .first()
         )
+
+    @classmethod
+    def get_owned_team_for_update(cls, team_id: str, admin_id: str) -> Team | None:
+        """Read and lock one valid owned team inside the caller's transaction."""
+        query = cls.model.select().where(
+            cls.model.id == team_id,
+            cls.model.tenant_id == admin_id,
+            cls.model.status == StatusEnum.VALID.value,
+        )
+        return select_for_update(query).get_or_none()
 
     @classmethod
     @DB.connection_context()

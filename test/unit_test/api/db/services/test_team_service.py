@@ -20,6 +20,7 @@ from peewee import SqliteDatabase
 
 from api.db import TeamMemberState, TenantPermission
 from api.db.db_models import Team, TeamMember
+from api.db.services import team_service
 from api.db.services.team_service import TeamAuthorizationService, TeamMemberService, TeamService
 from common.constants import StatusEnum
 
@@ -64,6 +65,29 @@ def test_team_service_normalizes_and_returns_only_valid_owned_teams(team_databas
     assert TeamService.get_owned_team("team-invalid", "owner-1") is None
     assert TeamService.get_owned_team("team-other", "owner-1") is None
     assert [team["id"] for team in TeamService.list_owned("owner-1")] == ["team-owned"]
+
+
+def test_select_for_update_requests_a_production_row_lock():
+    class _ProductionQuery:
+        _database = object()
+
+        def __init__(self):
+            self.locked = False
+
+        def for_update(self):
+            self.locked = True
+            return self
+
+    query = _ProductionQuery()
+
+    assert team_service.select_for_update(query) is query
+    assert query.locked is True
+
+
+def test_sqlite_lock_helper_is_deterministic_without_claiming_row_lock_support(team_database):
+    query = Team.select().where(Team.id == "missing")
+
+    assert team_service.select_for_update(query) is query
 
 
 def test_active_team_ids_and_visible_owners_exclude_invited_invalid_members_and_invalid_teams(team_database):

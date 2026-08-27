@@ -13,10 +13,12 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 
+from api.apps.services import dataset_api_service
 from api.apps.services.dataset_api_service import create_dataset, get_dataset, list_datasets, update_dataset
 from api.db import TenantPermission
 from api.db.services.connector_service import Connector2KbService
@@ -94,8 +96,21 @@ def _stub_create(monkeypatch, *, admin, owned_team_ids=(), team_names=None):
         "get_owned_team",
         lambda team_id, owner_id: SimpleNamespace(id=team_id, tenant_id=owner_id) if team_id in owned_team_ids else None,
     )
+    monkeypatch.setattr(
+        TeamService,
+        "get_owned_team_for_update",
+        lambda team_id, owner_id: SimpleNamespace(id=team_id, tenant_id=owner_id) if team_id in owned_team_ids else None,
+        raising=False,
+    )
+    monkeypatch.setattr(dataset_api_service, "DB", SimpleNamespace(atomic=nullcontext), raising=False)
     monkeypatch.setattr(KnowledgebaseService, "create_with_name", create_with_name)
     monkeypatch.setattr(KnowledgebaseService, "save", lambda **payload: saved.update(payload) or True)
+    monkeypatch.setattr(
+        KnowledgebaseService,
+        "save_in_transaction",
+        lambda **payload: saved.update(payload) or True,
+        raising=False,
+    )
     monkeypatch.setattr(
         KnowledgebaseService,
         "get_by_id",
@@ -125,8 +140,22 @@ def _stub_update(monkeypatch, dataset, *, admin, owned_team_ids=(), team_names=N
         "get_owned_team",
         lambda team_id, owner_id: SimpleNamespace(id=team_id, tenant_id=owner_id) if team_id in owned_team_ids else None,
     )
+    monkeypatch.setattr(
+        TeamService,
+        "get_owned_team_for_update",
+        lambda team_id, owner_id: SimpleNamespace(id=team_id, tenant_id=owner_id) if team_id in owned_team_ids else None,
+        raising=False,
+    )
+    monkeypatch.setattr(dataset_api_service, "DB", SimpleNamespace(atomic=nullcontext), raising=False)
     monkeypatch.setattr(KnowledgebaseService, "get_or_none", lambda **kwargs: dataset if kwargs.get("tenant_id") == dataset.tenant_id else None)
     monkeypatch.setattr(KnowledgebaseService, "update_by_id", update_by_id)
+    monkeypatch.setattr(KnowledgebaseService, "update_by_id_in_transaction", update_by_id)
+    monkeypatch.setattr(
+        KnowledgebaseService,
+        "get_owned_for_update",
+        lambda dataset_id, owner_id: dataset if (dataset_id, owner_id) == (dataset.id, dataset.tenant_id) else None,
+        raising=False,
+    )
     monkeypatch.setattr(KnowledgebaseService, "get_by_id", lambda _dataset_id: (True, dataset))
     monkeypatch.setattr(Connector2KbService, "link_connectors", lambda *_args: [])
     team_calls = _stub_team_queries(monkeypatch, team_names)
@@ -164,6 +193,19 @@ async def test_admin_can_create_dataset_for_owned_team(monkeypatch):
     assert result["team_id"] == "team-1"
     assert result["team_name"] == "Finance"
     assert team_calls == [["team-1"]]
+
+
+async def test_create_revalidates_team_inside_the_persistence_transaction(monkeypatch):
+    saved, _ = _stub_create(monkeypatch, admin=True, owned_team_ids={"team-1"})
+    monkeypatch.setattr(TeamService, "get_owned_team_for_update", lambda *_args: None, raising=False)
+
+    result = await create_dataset(
+        "owner-1",
+        {"name": "Shared", "permission": TenantPermission.TEAM.value, "team_id": "team-1", "ext": {}},
+    )
+
+    assert result == (False, "The team and dataset must have the same owner.")
+    assert saved == {}
 
 
 async def test_ordinary_user_cannot_create_team_dataset(monkeypatch):
@@ -281,6 +323,17 @@ async def test_update_rejects_another_owners_team(monkeypatch):
     assert updates == []
 
 
+async def test_update_revalidates_team_and_dataset_inside_the_mutation_transaction(monkeypatch):
+    dataset = _dataset(permission=TenantPermission.TEAM.value, team_id="team-old")
+    updates, _ = _stub_update(monkeypatch, dataset, admin=True, owned_team_ids={"team-old", "team-new"})
+    monkeypatch.setattr(TeamService, "get_owned_team_for_update", lambda team_id, _owner_id: None if team_id == "team-new" else SimpleNamespace(id=team_id), raising=False)
+
+    result = await update_dataset("owner-1", "kb-1", {"team_id": "team-new"})
+
+    assert result == (False, "The team and dataset must have the same owner.")
+    assert updates == []
+
+
 async def test_admin_cannot_update_another_owners_dataset(monkeypatch):
     dataset = _dataset(owner_id="owner-2", permission=TenantPermission.TEAM.value, team_id="team-2")
     updates, _ = _stub_update(monkeypatch, dataset, admin=True, owned_team_ids={"team-2"})
@@ -325,7 +378,7 @@ async def test_team_switch_changes_member_access_and_returns_new_team_name(monke
         monkeypatch,
         dataset,
         admin=True,
-        owned_team_ids={"team-new"},
+        owned_team_ids={"team-old", "team-new"},
         team_names={"team-new": "Research"},
     )
 

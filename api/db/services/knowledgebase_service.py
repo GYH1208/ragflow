@@ -22,7 +22,7 @@ from api.db import TenantPermission
 from api.db.db_models import DB, Document, Knowledgebase, Team, User, UserCanvas
 from api.db.services import duplicate_name
 from api.db.services.common_service import CommonService
-from api.db.services.team_service import TeamAuthorizationService
+from api.db.services.team_service import TeamAuthorizationService, select_for_update
 from api.db.services.user_service import TenantService
 from api.utils.api_utils import get_data_error_result, get_parser_config
 from common.constants import StatusEnum
@@ -48,6 +48,21 @@ class KnowledgebaseService(CommonService):
         model: The Knowledgebase model class for database operations.
     """
     model = Knowledgebase
+
+    @classmethod
+    def get_owned_for_update(cls, kb_id: str, owner_id: str) -> Knowledgebase | None:
+        """Read and lock one valid owned dataset inside the caller's transaction."""
+        query = cls.model.select().where(
+            cls.model.id == kb_id,
+            cls.model.tenant_id == owner_id,
+            cls.model.status == StatusEnum.VALID.value,
+        )
+        return select_for_update(query).get_or_none()
+
+    @classmethod
+    def save_in_transaction(cls, **kwargs):
+        """Insert a dataset without opening a second connection context."""
+        return cls.model(**kwargs).save(force_insert=True)
 
     @classmethod
     def _visibility_and_status_filter(cls, active_team_ids, user_id):
