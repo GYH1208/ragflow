@@ -13,161 +13,113 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { useListTenantUser } from '@/hooks/use-user-setting-request';
-import { formatDate } from '@/utils/date';
-import { upperFirst } from 'lodash';
-import { ArrowDown, ArrowUp, ArrowUpDown, Trash2 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import type { ITeamMember } from '@/interfaces/database/user-setting';
+import { Trash2 } from 'lucide-react';
+import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { TenantRole } from '../constants';
-import { useHandleDeleteUser } from './hooks';
 
-const ColorMap: Record<string, string> = {
-  [TenantRole.Normal]: 'bg-transparent text-white',
-  [TenantRole.Invite]: 'bg-accent-primary-5 bg-accent-primary rounded-sm',
-  [TenantRole.Owner]: 'bg-red-100 text-red-800',
-};
+interface TeamMemberTableProps {
+  error?: Error | null;
+  loading: boolean;
+  members: ITeamMember[];
+  searchTerm: string;
+  onRemove: (member: ITeamMember) => Promise<unknown>;
+}
 
-const UserTable = ({ searchUser }: { searchUser: string }) => {
-  const { data, loading } = useListTenantUser();
-  const { deleteTenantUser } = useHandleDeleteUser();
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc' | null>(null);
+const TeamMemberTable = ({
+  error,
+  loading,
+  members,
+  searchTerm,
+  onRemove,
+}: TeamMemberTableProps) => {
   const { t } = useTranslation();
-  const sortedData = useMemo(() => {
-    console.log('sortedData', data, searchUser);
-    if (!data || data.length === 0) return data;
-    let filtered = data;
-    if (searchUser) {
-      filtered = filtered.filter(
-        (tenant) =>
-          tenant.nickname.toLowerCase().includes(searchUser.toLowerCase()) ||
-          tenant.email.toLowerCase().includes(searchUser.toLowerCase()),
-      );
-    }
-    if (sortOrder) {
-      filtered = [...filtered].sort((a, b) => {
-        const dateA = new Date(a.update_date).getTime();
-        const dateB = new Date(b.update_date).getTime();
+  const filteredMembers = useMemo(() => {
+    const normalizedSearch = searchTerm.trim().toLocaleLowerCase();
+    if (!normalizedSearch) return members;
 
-        if (sortOrder === 'asc') {
-          return dateA - dateB;
-        } else {
-          return dateB - dateA;
-        }
-      });
-    }
+    return members.filter(
+      (member) =>
+        member.nickname.toLocaleLowerCase().includes(normalizedSearch) ||
+        member.email.toLocaleLowerCase().includes(normalizedSearch),
+    );
+  }, [members, searchTerm]);
 
-    return filtered;
-  }, [data, sortOrder, searchUser]);
-  const toggleSortOrder = () => {
-    if (sortOrder === 'asc') {
-      setSortOrder('desc');
-    } else if (sortOrder === 'desc') {
-      setSortOrder(null);
-    } else {
-      setSortOrder('asc');
-    }
-  };
+  if (error) {
+    return (
+      <div role="alert" className="p-6 text-center text-state-error">
+        {error.message}
+      </div>
+    );
+  }
 
-  const renderSortIcon = () => {
-    if (sortOrder === 'asc') {
-      return <ArrowUp className="size-[1em] " />;
-    } else if (sortOrder === 'desc') {
-      return <ArrowDown className="size-[1em]" />;
-    } else {
-      return <ArrowUpDown className="size-[1em]" />;
-    }
-  };
   return (
-    <div className="rounded-lg bg-bg-input scrollbar-auto overflow-hidden border border-border-default">
+    <div className="overflow-hidden rounded-lg border border-border-default bg-bg-input">
       <Table rootClassName="rounded-lg">
         <TableHeader className="bg-bg-title">
           <TableRow className="hover:bg-bg-title">
-            <TableHead className="h-12 px-4">{t('common.name')}</TableHead>
-            <TableHead className="h-12 px-4">
-              <div className="flex items-center gap-1">
-                {t('setting.updateDate')}
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  onClick={toggleSortOrder}
-                >
-                  {renderSortIcon()}
-                </Button>
-              </div>
-            </TableHead>
-            <TableHead className="h-12 px-4">{t('setting.email')}</TableHead>
-            <TableHead className="h-12 px-4">{t('setting.role')}</TableHead>
-            <TableHead className="h-12 px-4">{t('common.action')}</TableHead>
+            <TableHead>{t('common.name')}</TableHead>
+            <TableHead>{t('setting.email')}</TableHead>
+            <TableHead>{t('setting.role')}</TableHead>
+            <TableHead>{t('common.action')}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody className="bg-bg-base">
           {loading ? (
             <TableRow>
-              <TableCell colSpan={5} className="h-24 text-center">
-                <div className="flex items-center justify-center">
-                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-solid border-current border-r-transparent align-[-0.125em] motion-reduce:animate-[spin_1.5s_linear_infinite]"></div>
-                </div>
+              <TableCell colSpan={4} className="h-24 text-center">
+                {t('setting.loadingMembers')}
               </TableCell>
             </TableRow>
-          ) : sortedData && sortedData.length > 0 ? (
-            sortedData.map((record) => (
-              <TableRow key={record.user_id} className="hover:bg-bg-card">
-                <TableCell className="p-4">
-                  <div className="flex gap-1 items-center">
+          ) : filteredMembers.length > 0 ? (
+            filteredMembers.map((member) => (
+              <TableRow key={member.id}>
+                <TableCell>
+                  <div className="flex items-center gap-2">
                     <RAGFlowAvatar
                       isPerson
-                      className="size-4"
-                      avatar={record.avatar}
-                      name={record.nickname}
+                      className="size-6"
+                      avatar={member.avatar ?? undefined}
+                      name={member.nickname}
                     />
-                    {record.nickname}
+                    <span>{member.nickname}</span>
                   </div>
                 </TableCell>
-                <TableCell className="p-4">
-                  {formatDate(record.update_date)}
+                <TableCell>{member.email}</TableCell>
+                <TableCell>
+                  <Badge variant="outline">
+                    {t(
+                      member.state === 'invited'
+                        ? 'setting.memberInvited'
+                        : 'setting.memberActive',
+                    )}
+                  </Badge>
                 </TableCell>
-                <TableCell className="p-4">{record.email}</TableCell>
-                <TableCell className="p-4">
-                  {record.role === TenantRole.Normal && (
-                    <Badge className={ColorMap[record.role]}>
-                      {upperFirst('Member')}
-                    </Badge>
-                  )}
-                  {record.role !== TenantRole.Normal && (
-                    <Badge className={ColorMap[record.role]}>
-                      {upperFirst(record.role)}
-                    </Badge>
-                  )}
-                </TableCell>
-                <TableCell className="p-4">
+                <TableCell>
                   <ConfirmDeleteDialog
-                    title={t('deleteModal.delMember')}
-                    onOk={async () => {
-                      await deleteTenantUser({
-                        userId: record.user_id,
-                      });
-                      return;
-                    }}
+                    title={t('setting.removeMember')}
                     content={{
+                      title: t('setting.confirmRemoveMember'),
                       node: (
                         <ConfirmDeleteDialogNode
                           avatar={{
-                            avatar: record.avatar,
-                            name: record.nickname,
+                            avatar: member.avatar ?? undefined,
+                            name: member.nickname,
                             isPerson: true,
                           }}
-                          name={record.email}
-                        ></ConfirmDeleteDialogNode>
+                          name={member.email}
+                        />
                       ),
                     }}
+                    okButtonText={t('setting.removeMember')}
+                    onOk={() => onRemove(member)}
                   >
                     <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 p-0 hover:bg-state-error-5 hover:text-state-error"
+                      aria-label={`${t('setting.removeMember')} ${member.nickname}`}
+                      size="icon-sm"
+                      variant="delete"
                     >
-                      <Trash2 className="h-4 w-4" />
+                      <Trash2 />
                     </Button>
                   </ConfirmDeleteDialog>
                 </TableCell>
@@ -175,7 +127,7 @@ const UserTable = ({ searchUser }: { searchUser: string }) => {
             ))
           ) : (
             <TableRow>
-              <TableCell colSpan={5} className="h-24 text-center">
+              <TableCell colSpan={4} className="h-24 text-center">
                 {t('common.noData')}
               </TableCell>
             </TableRow>
@@ -186,4 +138,4 @@ const UserTable = ({ searchUser }: { searchUser: string }) => {
   );
 };
 
-export default UserTable;
+export default TeamMemberTable;

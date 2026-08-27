@@ -1,88 +1,147 @@
-import { useSetModalState, useShowDeleteConfirm } from '@/hooks/common-hooks';
+import message from '@/components/ui/message';
 import {
-  useAddTenantUser,
-  useAgreeTenant,
-  useDeleteTenantUser,
-  useFetchUserInfo,
-} from '@/hooks/use-user-setting-request';
-import { useCallback } from 'react';
+  useCreateTeam,
+  useDeleteTeam,
+  useInviteTeamMember,
+  useLeaveTeam,
+  useRemoveTeamMember,
+  useRenameTeam,
+  useUpdateTeamInvitation,
+} from '@/hooks/use-team-request';
+import type {
+  ITeam,
+  ITeamMember,
+  IUserInfo,
+  TeamInvitationAction,
+} from '@/interfaces/database/user-setting';
 import { useTranslation } from 'react-i18next';
 
-export const useAddUser = () => {
-  const { addTenantUser } = useAddTenantUser();
-  const {
-    visible: addingTenantModalVisible,
-    hideModal: hideAddingTenantModal,
-    showModal: showAddingTenantModal,
-  } = useSetModalState();
+export type TeamDialogState =
+  | { mode: 'create' }
+  | { mode: 'rename'; teamId: string }
+  | null;
 
-  const handleAddUserOk = useCallback(
-    async (email: string) => {
-      const code = await addTenantUser(email);
-      if (code === 0) {
-        hideAddingTenantModal();
-      }
-    },
-    [addTenantUser, hideAddingTenantModal],
+export const canManageTeam = (
+  userInfo: Partial<IUserInfo> | undefined,
+  team: ITeam | undefined,
+) =>
+  Boolean(
+    userInfo?.is_superuser &&
+    team?.membership_state === 'owner' &&
+    team.can_manage,
   );
 
-  return {
-    addingTenantModalVisible,
-    hideAddingTenantModal,
-    showAddingTenantModal,
-    handleAddUserOk,
-  };
-};
+export const groupTeams = (teams: ITeam[]) => ({
+  owned: teams.filter((team) => team.membership_state === 'owner'),
+  active: teams.filter((team) => team.membership_state === 'active'),
+  invited: teams.filter((team) => team.membership_state === 'invited'),
+});
 
-export const useHandleDeleteUser = () => {
-  const { deleteTenantUser, loading } = useDeleteTenantUser();
-  const showDeleteConfirm = useShowDeleteConfirm();
+interface UseTeamActionsOptions {
+  currentUserId?: string;
+  manageableOwnedTeams: ITeam[];
+  selectedTeam?: ITeam;
+  selectedTeamId: string;
+  onMemberInvited: () => void;
+  onTeamDeleted: (nextTeamId: string) => void;
+  onTeamSaved: () => void;
+}
+
+export const useTeamActions = ({
+  currentUserId,
+  manageableOwnedTeams,
+  selectedTeam,
+  selectedTeamId,
+  onMemberInvited,
+  onTeamDeleted,
+  onTeamSaved,
+}: UseTeamActionsOptions) => {
   const { t } = useTranslation();
+  const { createTeam, loading: creatingTeam } = useCreateTeam();
+  const { renameTeam, loading: renamingTeam } = useRenameTeam();
+  const { deleteTeam } = useDeleteTeam();
+  const { inviteTeamMember, loading: invitingMember } = useInviteTeamMember();
+  const { removeTeamMember } = useRemoveTeamMember();
+  const { updateInvitation } = useUpdateTeamInvitation();
+  const { leaveTeam } = useLeaveTeam();
 
-  const handleDeleteTenantUser = (userId: string) => () => {
-    showDeleteConfirm({
-      title: t('setting.sureDelete'),
-      onOk: async () => {
-        const code = await deleteTenantUser({ userId });
-        if (code === 0) {
-        }
-        return;
-      },
-    });
-  };
-
-  return { handleDeleteTenantUser, deleteTenantUser, loading };
-};
-
-export const useHandleAgreeTenant = () => {
-  const { agreeTenant } = useAgreeTenant();
-  const { deleteTenantUser } = useDeleteTenantUser();
-  const { data: user } = useFetchUserInfo();
-
-  const handleAgree = (tenantId: string, isAgree: boolean) => () => {
-    if (isAgree) {
-      agreeTenant(tenantId);
-    } else {
-      deleteTenantUser({ tenantId, userId: user.id });
+  const reportFailure = (
+    response: { code?: number; message?: string } | undefined,
+  ) => {
+    if (response?.code !== 0) {
+      message.error(response?.message || t('setting.teamOperationFailed'));
+      return true;
     }
+    return false;
   };
 
-  return { handleAgree };
-};
+  const saveTeam = async (dialog: TeamDialogState, name: string) => {
+    if (!dialog) return;
+    const response =
+      dialog.mode === 'create'
+        ? await createTeam(name)
+        : await renameTeam({ teamId: dialog.teamId, name });
+    if (!reportFailure(response)) onTeamSaved();
+    return response;
+  };
 
-export const useHandleQuitUser = () => {
-  const { deleteTenantUser, loading } = useDeleteTenantUser();
-  const showDeleteConfirm = useShowDeleteConfirm();
-  const { t } = useTranslation();
+  const removeTeam = async (team: ITeam) => {
+    const response = await deleteTeam(team.id);
+    if (reportFailure(response)) return response;
 
-  const handleQuitTenantUser = (userId: string, tenantId: string) => () => {
-    showDeleteConfirm({
-      title: t('setting.sureQuit'),
-      onOk: async () => {
-        deleteTenantUser({ userId, tenantId });
-      },
+    if (selectedTeamId === team.id) {
+      const nextTeam = manageableOwnedTeams.find(
+        (candidate) => candidate.id !== team.id,
+      );
+      onTeamDeleted(nextTeam?.id ?? '');
+    }
+    return response;
+  };
+
+  const respondToInvitation = async (
+    teamId: string,
+    action: TeamInvitationAction,
+  ) => {
+    const response = await updateInvitation({ teamId, action });
+    reportFailure(response);
+    return response;
+  };
+
+  const leaveJoinedTeam = async (teamId: string) => {
+    if (!currentUserId) return;
+    const response = await leaveTeam({ teamId, userId: currentUserId });
+    reportFailure(response);
+    return response;
+  };
+
+  const inviteMember = async (email: string) => {
+    if (!selectedTeam) return;
+    const response = await inviteTeamMember({
+      teamId: selectedTeam.id,
+      email,
     });
+    if (!reportFailure(response)) onMemberInvited();
+    return response;
   };
 
-  return { handleQuitTenantUser, loading };
+  const removeMember = async (member: ITeamMember) => {
+    if (!selectedTeam) return;
+    const response = await removeTeamMember({
+      teamId: selectedTeam.id,
+      userId: member.id,
+    });
+    reportFailure(response);
+    return response;
+  };
+
+  return {
+    inviteMember,
+    invitingMember,
+    leaveJoinedTeam,
+    removeMember,
+    removeTeam,
+    respondToInvitation,
+    saveTeam,
+    teamDialogLoading: creatingTeam || renamingTeam,
+  };
 };
