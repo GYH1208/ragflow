@@ -15,6 +15,7 @@ import { RAGFlowAvatar } from '@/components/ragflow-avatar';
 import { Button } from '@/components/ui/button';
 import { useSecondPathName } from '@/hooks/route-hook';
 import { useFetchKnowledgeGraph } from '@/hooks/use-knowledge-request';
+import { useFetchUserInfo } from '@/hooks/use-user-setting-request';
 import { cn, formatBytes } from '@/lib/utils';
 import { Routes } from '@/routes';
 import { formatPureDate } from '@/utils/date';
@@ -31,7 +32,9 @@ export function SideBar({ dataset: data }: PropType) {
   const pathName = useSecondPathName();
   const { id } = useParams();
   const { data: routerData } = useFetchKnowledgeGraph();
+  const { data: userInfo } = useFetchUserInfo();
   const { t } = useTranslation();
+  const isOwner = data.tenant_id === userInfo?.id;
 
   const items = useMemo(() => {
     const list = [
@@ -50,12 +53,15 @@ export function SideBar({ dataset: data }: PropType) {
         label: t(`knowledgeDetails.overview`),
         key: Routes.DataSetOverview,
       },
-      {
+    ];
+
+    if (isOwner) {
+      list.push({
         icon: <LucideSettings className="size-[1em]" />,
         label: t(`knowledgeDetails.configuration`),
         key: Routes.DataSetSetting,
-      },
-    ];
+      });
+    }
 
     if (!isEmpty(routerData?.graph)) {
       list.push({
@@ -66,7 +72,7 @@ export function SideBar({ dataset: data }: PropType) {
     }
 
     return list;
-  }, [t, routerData]);
+  }, [t, routerData, isOwner]);
 
   return (
     <aside className="flex flex-col w-64 relative">
