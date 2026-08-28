@@ -69,6 +69,7 @@ export default function DatasetSettings() {
       name: '',
       chunk_method: DocumentParserType.Naive,
       permission: PermissionRole.Me,
+      team_id: null,
       language: 'English',
       parser_config: {
         layout_recognize: DocumentType.DeepDOC,
@@ -166,6 +167,7 @@ export default function DatasetSettings() {
         knowledgeDetails.pipeline_id ? ParseType.Pipeline : ParseType.BuiltIn,
       );
       form.setValue('pipeline_id', knowledgeDetails.pipeline_id || '');
+      form.setValue('team_id', knowledgeDetails.team_id ?? null);
     }
   }, [knowledgeDetails, form]);
 

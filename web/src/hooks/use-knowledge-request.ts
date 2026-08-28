@@ -1,6 +1,7 @@
 import { useHandleFilterSubmit } from '@/components/list-filter-bar/use-handle-filter-submit';
 import message from '@/components/ui/message';
 import { ParseType } from '@/constants/knowledge';
+import { PermissionRole } from '@/constants/permission';
 import { ResponsePostType } from '@/interfaces/database/base';
 import {
   IDataset,
@@ -52,6 +53,14 @@ export const enum KnowledgeApiAction {
   FetchKnowledgeList = 'fetchKnowledgeList',
   RemoveKnowledgeGraph = 'removeKnowledgeGraph',
 }
+
+export const normalizeTeamPermission = (
+  permission: PermissionRole,
+  teamId?: string | null,
+) => ({
+  permission,
+  team_id: permission === PermissionRole.Team ? (teamId ?? null) : null,
+});
 
 export const useKnowledgeBaseId = (): string => {
   const { id } = useParams();
@@ -196,12 +205,20 @@ export const useCreateKnowledge = () => {
       chunk_method?: string;
       parseType?: ParseType;
       pipeline_id?: string | null;
+      permission?: PermissionRole;
+      team_id?: string | null;
       ext?: {
         language?: string;
         [key: string]: any;
       };
     }) => {
-      const { data = {} } = await kbService.createKb(params);
+      const payload = params.permission
+        ? {
+            ...params,
+            ...normalizeTeamPermission(params.permission, params.team_id),
+          }
+        : params;
+      const { data = {} } = await kbService.createKb(payload);
       if (data.code === 0) {
         message.success(
           i18n.t(`message.${params?.id ? 'modified' : 'created'}`),
@@ -256,7 +273,8 @@ export const useUpdateKnowledge = (shouldFetchList = false) => {
       pipeline_id?: string | null;
       avatar?: string | null;
       description?: string;
-      permission?: string;
+      permission?: PermissionRole;
+      team_id?: string | null;
       pagerank?: number;
       parser_config?: Record<string, any>;
       [key: string]: any;
@@ -269,6 +287,7 @@ export const useUpdateKnowledge = (shouldFetchList = false) => {
         avatar,
         description,
         permission,
+        team_id,
         pagerank,
         parser_config,
         ...ext
@@ -283,6 +302,7 @@ export const useUpdateKnowledge = (shouldFetchList = false) => {
         permission,
         pagerank,
         parser_config: extractParserConfigExt(parser_config),
+        ...(permission ? normalizeTeamPermission(permission, team_id) : {}),
         ...omit(ext, ['kb_id']),
       };
 

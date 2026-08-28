@@ -24,12 +24,13 @@ from pydantic import BaseModel, Field, validator
 from quart import request
 
 from api.apps import login_required
+from api.common.check_team_permission import check_kb_team_permission
+from api.db.db_models import Task
 from api.db.joint_services.tenant_model_service import (
-    split_model_name,
     get_model_config_from_provider_instance,
     get_tenant_default_model_by_type,
+    split_model_name,
 )
-from api.db.db_models import Task
 from api.db.services.doc_metadata_service import DocMetadataService
 from api.db.services.document_service import DocumentService
 from api.db.services.file2document_service import File2DocumentService
@@ -46,8 +47,8 @@ from api.utils.api_utils import (
     get_result,
     server_error_response,
 )
-from api.utils.pagination_utils import validate_rest_api_page_size
 from api.utils.image_utils import store_chunk_image
+from api.utils.pagination_utils import validate_rest_api_page_size
 from api.utils.reference_metadata_utils import (
     enrich_chunks_with_document_metadata,
     resolve_reference_metadata_preferences,
@@ -61,7 +62,6 @@ from common.tag_feature_utils import validate_tag_features
 from rag.app.tag import label_question
 from rag.nlp import search
 from rag.prompts.generator import cross_languages, keyword_extraction
-
 
 DOC_STOP_PARSING_INVALID_STATE_MESSAGE = "Can't stop parsing document that has not started or already completed"
 DOC_STOP_PARSING_INVALID_STATE_ERROR_CODE = "DOC_STOP_PARSING_INVALID_STATE"
@@ -156,11 +156,11 @@ def _strip_chunk_runtime_fields(chunk):
     return chunk
 
 
-def _get_dataset_tenant_id(dataset_id):
+def _get_authorized_kb(dataset_id, user_id):
     ok, kb = KnowledgebaseService.get_by_id(dataset_id)
-    if not ok:
+    if not ok or not check_kb_team_permission(kb, user_id):
         return None
-    return kb.tenant_id
+    return kb
 
 
 def _resolve_reference_metadata(req: dict, search_config: dict | None = None):
@@ -175,11 +175,10 @@ def _enrich_chunks_with_document_metadata(chunks: list[dict], metadata_fields=No
 @login_required
 @add_tenant_id_to_kwargs
 async def parse(tenant_id, dataset_id):
-    if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
+    kb = _get_authorized_kb(dataset_id, tenant_id)
+    if not kb:
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
-    dataset_tenant_id = _get_dataset_tenant_id(dataset_id)
-    if not dataset_tenant_id:
-        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    dataset_tenant_id = kb.tenant_id
     req = await get_request_json()
     if not req.get("document_ids"):
         return get_error_data_result("`document_ids` is required")
@@ -236,11 +235,10 @@ async def parse(tenant_id, dataset_id):
 @login_required
 @add_tenant_id_to_kwargs
 async def stop_parsing(tenant_id, dataset_id):
-    if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
+    kb = _get_authorized_kb(dataset_id, tenant_id)
+    if not kb:
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
-    dataset_tenant_id = _get_dataset_tenant_id(dataset_id)
-    if not dataset_tenant_id:
-        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    dataset_tenant_id = kb.tenant_id
     req = await get_request_json()
 
     if not req.get("document_ids"):
@@ -411,11 +409,10 @@ async def retrieval_test(tenant_id):
 async def list_chunks(tenant_id, dataset_id, document_id):
     from rag.nlp import search
 
-    if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
+    kb = _get_authorized_kb(dataset_id, tenant_id)
+    if not kb:
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
-    dataset_tenant_id = _get_dataset_tenant_id(dataset_id)
-    if not dataset_tenant_id:
-        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    dataset_tenant_id = kb.tenant_id
     doc = DocumentService.query(id=document_id, kb_id=dataset_id)
     if not doc:
         return get_error_data_result(message=f"You don't own the document {document_id}.")
@@ -497,11 +494,10 @@ async def list_chunks(tenant_id, dataset_id, document_id):
 async def get_chunk(tenant_id, dataset_id, document_id, chunk_id):
     from rag.nlp import search
 
-    if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
+    kb = _get_authorized_kb(dataset_id, tenant_id)
+    if not kb:
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
-    dataset_tenant_id = _get_dataset_tenant_id(dataset_id)
-    if not dataset_tenant_id:
-        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    dataset_tenant_id = kb.tenant_id
     doc = DocumentService.query(id=document_id, kb_id=dataset_id)
     if not doc:
         return get_error_data_result(message=f"You don't own the document {document_id}.")
@@ -522,11 +518,10 @@ async def get_chunk(tenant_id, dataset_id, document_id, chunk_id):
 async def add_chunk(tenant_id, dataset_id, document_id):
     from rag.nlp import rag_tokenizer, search
 
-    if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
+    kb = _get_authorized_kb(dataset_id, tenant_id)
+    if not kb:
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
-    dataset_tenant_id = _get_dataset_tenant_id(dataset_id)
-    if not dataset_tenant_id:
-        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    dataset_tenant_id = kb.tenant_id
     doc = DocumentService.query(id=document_id, kb_id=dataset_id)
     if not doc:
         return get_error_data_result(message=f"You don't own the document {document_id}.")
@@ -611,11 +606,10 @@ async def add_chunk(tenant_id, dataset_id, document_id):
 async def rm_chunk(tenant_id, dataset_id, document_id):
     from rag.nlp import search
 
-    if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
+    kb = _get_authorized_kb(dataset_id, tenant_id)
+    if not kb:
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
-    dataset_tenant_id = _get_dataset_tenant_id(dataset_id)
-    if not dataset_tenant_id:
-        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    dataset_tenant_id = kb.tenant_id
     docs = DocumentService.query(id=document_id, kb_id=dataset_id)
     if not docs:
         return get_error_data_result(message=f"You don't own the document {document_id}.")
@@ -661,11 +655,10 @@ async def update_chunk(tenant_id, dataset_id, document_id, chunk_id):
     from rag.app.qa import beAdoc, rmPrefix
     from rag.nlp import rag_tokenizer, search
 
-    if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
+    kb = _get_authorized_kb(dataset_id, tenant_id)
+    if not kb:
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
-    dataset_tenant_id = _get_dataset_tenant_id(dataset_id)
-    if not dataset_tenant_id:
-        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    dataset_tenant_id = kb.tenant_id
     doc = DocumentService.query(id=document_id, kb_id=dataset_id)
     if not doc:
         return get_error_data_result(message=f"You don't own the document {document_id}.")
@@ -764,11 +757,10 @@ async def update_chunk(tenant_id, dataset_id, document_id, chunk_id):
 async def switch_chunks(tenant_id, dataset_id, document_id):
     from rag.nlp import search
 
-    if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
+    kb = _get_authorized_kb(dataset_id, tenant_id)
+    if not kb:
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
-    dataset_tenant_id = _get_dataset_tenant_id(dataset_id)
-    if not dataset_tenant_id:
-        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
+    dataset_tenant_id = kb.tenant_id
     req = await get_request_json()
     if not req.get("chunk_ids"):
         return get_error_data_result(message="`chunk_ids` is required.")

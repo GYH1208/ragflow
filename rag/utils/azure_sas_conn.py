@@ -79,7 +79,7 @@ class RAGFlowAzureSasBlob:
                 time.sleep(1)
         return None
 
-    def obj_exist(self, bucket, fnm):
+    def obj_exist(self, bucket, fnm, tenant_id=None):
         blob_name = f"{bucket}/{fnm}"
         try:
             return self.conn.get_blob_client(f"{blob_name}").exists()

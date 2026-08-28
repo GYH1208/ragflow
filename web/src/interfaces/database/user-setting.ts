@@ -94,3 +94,42 @@ export interface ITenant {
   tenant_id: string;
   update_date: string;
 }
+
+export type TeamMemberState = 'invited' | 'active';
+
+export type TeamMembershipState = 'owner' | TeamMemberState;
+
+export type TeamInvitationAction = 'accept' | 'reject';
+
+export interface ITeamRecord {
+  id: string;
+  tenant_id: string;
+  name: string;
+  created_by: string;
+  status: string;
+  create_date: string | null;
+  create_time: number | null;
+  update_date: string | null;
+  update_time: number | null;
+}
+
+export interface ITeam extends ITeamRecord {
+  membership_state: TeamMembershipState;
+  member_count: number;
+  dataset_count: number;
+  can_manage: boolean;
+}
+
+export type ITeamListResponse = ITeam[];
+
+export interface ITeamMember {
+  id: string;
+  email: string;
+  nickname: string;
+  avatar: string | null;
+  state: TeamMemberState;
+}
+
+export interface IDeleteTeamResponse {
+  unassigned_dataset_count: number;
+}

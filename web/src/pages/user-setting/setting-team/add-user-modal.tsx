@@ -8,18 +8,25 @@ import {
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import { Modal } from '@/components/ui/modal/modal';
-import { IModalProps } from '@/interfaces/common';
 import { zodResolver } from '@hookform/resolvers/zod';
+import { useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
 import * as z from 'zod';
 
-const AddingUserModal = ({
+interface InviteMemberModalProps {
+  visible: boolean;
+  hideModal: () => void;
+  loading: boolean;
+  onOk: (email: string) => Promise<unknown>;
+}
+
+const InviteMemberModal = ({
   visible,
   hideModal,
   loading,
   onOk,
-}: IModalProps<string>) => {
+}: InviteMemberModalProps) => {
   const { t } = useTranslation();
 
   const formSchema = z.object({
@@ -38,15 +45,19 @@ const AddingUserModal = ({
     },
   });
 
+  useEffect(() => {
+    if (!visible) form.reset({ email: '' });
+  }, [form, visible]);
+
   const handleOk = async (data: FormData) => {
-    return onOk?.(data.email);
+    return onOk(data.email);
   };
 
   return (
     <Modal
-      title={t('setting.add')}
-      open={visible || false}
-      onOpenChange={(open) => !open && hideModal?.()}
+      title={t('setting.invite')}
+      open={visible}
+      onOpenChange={(open) => !open && hideModal()}
       onOk={form.handleSubmit(handleOk)}
       confirmLoading={loading}
       okText={t('common.ok')}
@@ -73,4 +84,4 @@ const AddingUserModal = ({
   );
 };
 
-export default AddingUserModal;
+export default InviteMemberModal;

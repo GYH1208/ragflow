@@ -58,6 +58,13 @@ class File2DocumentService(CommonService):
         return File2Document(**obj)
 
     @classmethod
+    def insert_in_transaction(cls, obj):
+        """Insert a link on the caller's existing transaction."""
+        if cls.model(**obj).save(force_insert=True) != 1:
+            raise RuntimeError("Database error (File)!")
+        return cls.model(**obj)
+
+    @classmethod
     @DB.connection_context()
     def delete_by_file_id(cls, file_id):
         return cls.model.delete().where(cls.model.file_id == file_id).execute()
@@ -74,6 +81,11 @@ class File2DocumentService(CommonService):
     @classmethod
     @DB.connection_context()
     def delete_by_document_id(cls, doc_id):
+        return cls.delete_by_document_id_in_transaction(doc_id)
+
+    @classmethod
+    def delete_by_document_id_in_transaction(cls, doc_id):
+        """Delete document links on the caller's existing transaction."""
         return cls.model.delete().where(cls.model.document_id == doc_id).execute()
 
     @classmethod

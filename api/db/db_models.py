@@ -784,6 +784,31 @@ class UserTenant(DataBaseModel):
         db_table = "user_tenant"
 
 
+class Team(DataBaseModel):
+    id = CharField(max_length=32, primary_key=True)
+    tenant_id = CharField(max_length=32, null=False, index=True)
+    name = CharField(max_length=100, null=False, index=True)
+    created_by = CharField(max_length=32, null=False, index=True)
+    status = CharField(max_length=1, null=False, default="1", index=True)
+
+    class Meta:
+        db_table = "team"
+        indexes = ((('tenant_id', 'name'), True),)
+
+
+class TeamMember(DataBaseModel):
+    id = CharField(max_length=32, primary_key=True)
+    team_id = CharField(max_length=32, null=False, index=True)
+    user_id = CharField(max_length=32, null=False, index=True)
+    state = CharField(max_length=16, null=False, index=True)
+    invited_by = CharField(max_length=32, null=False, index=True)
+    status = CharField(max_length=1, null=False, default="1", index=True)
+
+    class Meta:
+        db_table = "team_member"
+        indexes = ((('team_id', 'user_id'), True),)
+
+
 class InvitationCode(DataBaseModel):
     id = CharField(max_length=32, primary_key=True)
     code = CharField(max_length=32, null=False, index=True)
@@ -887,6 +912,7 @@ class Knowledgebase(DataBaseModel):
     embd_id = CharField(max_length=128, null=False, help_text="default embedding model ID", index=True)
     tenant_embd_id = IntegerField(null=True, help_text="id in tenant_llm", index=True)
     permission = CharField(max_length=16, null=False, help_text="me|team", default="me", index=True)
+    team_id = CharField(max_length=32, null=True, index=True)
     created_by = CharField(max_length=32, null=False, index=True)
     doc_num = IntegerField(default=0, index=True)
     token_num = IntegerField(default=0, index=True)
@@ -1791,6 +1817,7 @@ def migrate_db():
     alter_db_column_type(migrator, "document", "size", BigIntegerField(default=0, index=True))
     alter_db_column_type(migrator, "file", "size", BigIntegerField(default=0, index=True))
     alter_db_add_column(migrator, "tenant", "ocr_id", CharField(max_length=128, null=True, help_text="default ocr model ID", index=True))
+    alter_db_add_column(migrator, "knowledgebase", "team_id", CharField(max_length=32, null=True, index=True))
     alter_db_column_type(migrator, "chat_channel", "status", IntegerField(default=1, index=True))
     alter_db_rename_column(migrator, "chat_channel", "dialog_id", "chat_id")
     # Drop both the explicit "idx_*" name from later migrations AND the
@@ -1820,3 +1847,10 @@ def migrate_db():
     logging.disable(logging.NOTSET)
     # this is after re-enabling logging to allow logging changed user emails
     migrate_add_unique_email(migrator)
+    try:
+        from api.db.team_migration import backfill_default_teams
+
+        backfill_default_teams()
+    except Exception:
+        logging.exception("Failed to backfill default teams after adding knowledgebase.team_id")
+        raise

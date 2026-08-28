@@ -13,8 +13,8 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
-from types import SimpleNamespace
 from contextlib import contextmanager, nullcontext
+from types import SimpleNamespace
 
 import pytest
 
@@ -178,6 +178,42 @@ def test_list_entries_returns_direct_folders_before_documents(service_fixture):
     assert result["total"] == 2
 
 
+def test_list_entries_never_leaks_cross_kb_linked_document(service_fixture):
+    kb, tenant_id, root, _top_folder, _nested_folder, _nested_file, root_file = service_fixture
+    kb._documents["doc-other"] = {
+        **kb._documents["doc-root"],
+        "id": "doc-other",
+        "kb_id": "kb-other",
+        "name": "Other secret.txt",
+    }
+    kb._links.append(SimpleNamespace(file_id=root_file.id, document_id="doc-other"))
+
+    result = KnowledgeFileService.list_entries(
+        kb,
+        tenant_id,
+        parent_id=root.id,
+        page=1,
+        page_size=20,
+        orderby="create_time",
+        desc=True,
+        keywords="",
+        filters={},
+    )
+
+    listed_documents = [entry for entry in result["entries"] if entry["entry_type"] == "document"]
+    assert [entry["id"] for entry in listed_documents] == ["doc-root"]
+
+
+def test_count_descendants_ignores_cross_kb_linked_document(service_fixture):
+    kb, tenant_id, _root, _top_folder, _nested_folder, _nested_file, root_file = service_fixture
+    kb._documents["doc-other"] = {**kb._documents["doc-root"], "id": "doc-other", "kb_id": "kb-other"}
+    kb._links.append(SimpleNamespace(file_id=root_file.id, document_id="doc-other"))
+
+    count = KnowledgeFileService.count_descendant_documents(kb, tenant_id, [root_file.id])
+
+    assert count == 1
+
+
 def test_global_search_includes_relative_path(service_fixture):
     kb, tenant_id, _root, _top_folder, nested_folder, _nested_file, _root_file = service_fixture
 
@@ -239,6 +275,22 @@ def test_create_folder_adds_knowledge_base_folder(service_fixture, monkeypatch):
     assert result["parent_id"] == root.id
     assert result["name"] == "新建目录"
     assert kb._entries["new-folder"].source_type == "knowledgebase"
+
+
+def test_team_member_created_folder_uses_owner_context_and_actor_audit(service_fixture, monkeypatch):
+    kb, owner_tenant_id, root, *_ = service_fixture
+    monkeypatch.setattr(knowledge_file_service_module, "get_uuid", lambda: "member-folder")
+
+    result = KnowledgeFileService.create_folder(
+        kb,
+        owner_tenant_id,
+        root.id,
+        "成员目录",
+        created_by="member-1",
+    )
+
+    assert result["tenant_id"] == owner_tenant_id
+    assert result["created_by"] == "member-1"
 
 
 def test_create_folder_does_not_close_connection_inside_transaction(service_fixture, monkeypatch):
@@ -353,6 +405,23 @@ def test_rename_document_uses_title_only_update(service_fixture, monkeypatch):
     assert kb._documents["doc-nested"]["chunk_num"] == 10
 
 
+def test_rename_document_rejects_cross_kb_file_association_before_update(service_fixture, monkeypatch):
+    kb, tenant_id, _root, _top_folder, _nested_folder, nested_file, _root_file = service_fixture
+    kb._documents["doc-other"] = {**kb._documents["doc-nested"], "id": "doc-other", "kb_id": "kb-other"}
+    kb._links.append(SimpleNamespace(file_id=nested_file.id, document_id="doc-other"))
+    renamed = []
+    monkeypatch.setattr(
+        knowledge_file_service_module,
+        "update_document_name_only",
+        lambda document_id, name: renamed.append((document_id, name)),
+    )
+
+    with pytest.raises(RuntimeError, match="association"):
+        KnowledgeFileService.rename_entry(kb, tenant_id, nested_file.id, "新名称.docx")
+
+    assert renamed == []
+
+
 def test_delete_folder_removes_documents_before_folders(service_fixture, monkeypatch):
     kb, tenant_id, _root, _top_folder, nested_folder, nested_file, _root_file = service_fixture
     operations = []
@@ -373,6 +442,58 @@ def test_delete_folder_removes_documents_before_folders(service_fixture, monkeyp
 
     assert result == {"deleted": 2, "failed": []}
     assert operations == [("document", "doc-nested"), ("folder", nested_folder.id)]
+
+
+def test_delete_rejects_cross_kb_file_association_before_any_delete(service_fixture, monkeypatch):
+    kb, tenant_id, _root, _top_folder, nested_folder, nested_file, _root_file = service_fixture
+    kb._documents["doc-other"] = {**kb._documents["doc-nested"], "id": "doc-other", "kb_id": "kb-other"}
+    kb._links.append(SimpleNamespace(file_id=nested_file.id, document_id="doc-other"))
+    deleted = []
+    monkeypatch.setattr(
+        FileService,
+        "delete_docs",
+        classmethod(lambda cls, document_ids, owner_id: deleted.append((document_ids, owner_id)) or ""),
+    )
+    monkeypatch.setattr(FileService, "delete_by_id", classmethod(lambda cls, entry_id: deleted.append(entry_id)))
+
+    with pytest.raises(RuntimeError, match="association"):
+        KnowledgeFileService.delete_entries(kb, tenant_id, [nested_folder.id])
+
+    assert deleted == []
+
+
+def test_delete_rejects_file_without_document_association_before_any_delete(service_fixture, monkeypatch):
+    kb, tenant_id, _root, _top_folder, _nested_folder, nested_file, _root_file = service_fixture
+    kb._links[:] = [link for link in kb._links if link.file_id != nested_file.id]
+    deleted = []
+    monkeypatch.setattr(
+        FileService,
+        "delete_docs",
+        classmethod(lambda cls, document_ids, owner_id: deleted.append((document_ids, owner_id)) or ""),
+    )
+    monkeypatch.setattr(FileService, "delete_by_id", classmethod(lambda cls, entry_id: deleted.append(entry_id)))
+
+    with pytest.raises(RuntimeError, match="association"):
+        KnowledgeFileService.delete_entries(kb, tenant_id, [nested_file.id])
+
+    assert deleted == []
+
+
+def test_delete_batch_preflights_valid_and_missing_associations_before_any_delete(service_fixture, monkeypatch):
+    kb, tenant_id, _root, _top_folder, _nested_folder, nested_file, root_file = service_fixture
+    kb._links[:] = [link for link in kb._links if link.file_id != root_file.id]
+    deleted = []
+    monkeypatch.setattr(
+        FileService,
+        "delete_docs",
+        classmethod(lambda cls, document_ids, owner_id: deleted.append((document_ids, owner_id)) or ""),
+    )
+    monkeypatch.setattr(FileService, "delete_by_id", classmethod(lambda cls, entry_id: deleted.append(entry_id)))
+
+    with pytest.raises(RuntimeError, match="association"):
+        KnowledgeFileService.delete_entries(kb, tenant_id, [nested_file.id, root_file.id])
+
+    assert deleted == []
 
 
 def test_delete_preflight_failure_makes_no_changes(service_fixture, monkeypatch):

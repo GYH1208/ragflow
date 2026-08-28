@@ -13,27 +13,29 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
-import logging
 import json
+import logging
 import os
 import re
+from types import SimpleNamespace
 
 from peewee import IntegrityError
 
+from api.db import TenantPermission
+from api.db.db_models import DB, File
 from api.db.joint_services.tenant_model_service import get_model_config_from_provider_instance
-from common.constants import PAGERANK_FLD
-from common import settings
-from api.db.db_models import File
+from api.db.services.connector_service import Connector2KbService
 from api.db.services.document_service import DocumentService, queue_raptor_o_graphrag_tasks
 from api.db.services.file2document_service import File2DocumentService
 from api.db.services.file_service import FileService
-from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.knowledgebase_category_service import KnowledgebaseCategoryService
-from api.db.services.connector_service import Connector2KbService
+from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.task_service import GRAPH_RAPTOR_FAKE_DOC_ID, TaskService
+from api.db.services.team_service import TeamAuthorizationService, TeamMemberService, TeamService
 from api.db.services.user_service import TenantService, UserService, UserTenantService
-from common.constants import FileSource, StatusEnum
 from api.utils.api_utils import deep_merge, get_parser_config, remap_dictionary_keys, verify_embedding_availability
+from common import settings
+from common.constants import PAGERANK_FLD, FileSource, StatusEnum
 
 _VALID_INDEX_TYPES = {"graph", "raptor", "mindmap"}
 
@@ -54,6 +56,72 @@ _INDEX_TYPE_TO_DISPLAY_NAME = {
     "raptor": "RAPTOR",
     "mindmap": "Mindmap",
 }
+
+
+def validate_team_assignment(user_id: str, kb, permission: str, team_id: str | None):
+    return TeamAuthorizationService.validate_assignment(user_id, kb, permission, team_id)
+
+
+def _lock_owned_assignment_teams(owner_id: str, *team_ids: str | None) -> bool:
+    for team_id in sorted({team_id for team_id in team_ids if team_id}):
+        if TeamService.get_owned_team_for_update(team_id, owner_id) is None:
+            return False
+    return True
+
+
+def _save_dataset_with_locked_assignment(actor_id: str, payload: dict) -> tuple[bool, str | None]:
+    with DB.atomic():
+        if payload.get("permission") == TenantPermission.TEAM.value and not _lock_owned_assignment_teams(
+            actor_id,
+            payload.get("team_id"),
+        ):
+            return False, "The team and dataset must have the same owner."
+        if KnowledgebaseService.save_in_transaction(**payload) != 1:
+            return False, "Failed to save dataset"
+    return True, None
+
+
+def _update_dataset_with_locked_assignment(
+    actor_id: str,
+    snapshot,
+    values: dict,
+    target_permission: str,
+    target_team_id: str | None,
+) -> tuple[bool, str | None]:
+    with DB.atomic():
+        if not _lock_owned_assignment_teams(
+            actor_id,
+            snapshot.team_id if snapshot.permission == TenantPermission.TEAM.value else None,
+            target_team_id if target_permission == TenantPermission.TEAM.value else None,
+        ):
+            return False, "The team and dataset must have the same owner."
+
+        locked_kb = KnowledgebaseService.get_owned_for_update(snapshot.id, actor_id)
+        if locked_kb is None:
+            return False, f"User '{actor_id}' lacks permission for dataset '{snapshot.id}'"
+        if (locked_kb.permission, locked_kb.team_id) != (snapshot.permission, snapshot.team_id):
+            return False, "Dataset assignment changed concurrently."
+
+        affected = KnowledgebaseService.update_by_id_in_transaction(locked_kb.id, values)
+        if affected != 1:
+            return False, "Update dataset error.(Database error)"
+    return True, None
+
+
+def _attach_team_names(datasets: list[dict]) -> list[dict]:
+    team_ids = list(dict.fromkeys(dataset.get("team_id") for dataset in datasets if dataset.get("team_id")))
+    team_map = {}
+    if team_ids:
+        teams = TeamService.query(id=team_ids, status=StatusEnum.VALID.value)
+        team_map = {(team.tenant_id, team.id): team.name for team in teams}
+    for dataset in datasets:
+        dataset.setdefault("team_id", None)
+        dataset["team_name"] = team_map.get((dataset.get("tenant_id"), dataset["team_id"]))
+    return datasets
+
+
+def _serialize_dataset(kb) -> dict:
+    return _attach_team_names([remap_dictionary_keys(kb.to_dict())])[0]
 
 
 def list_dataset_categories(user_id: str, args: dict):
@@ -149,6 +217,22 @@ async def create_dataset(tenant_id: str, req: dict):
         req["parser_config"] = parser_cfg
     req.update(ext_fields)
 
+    requested_owner_id = req.pop("tenant_id", tenant_id)
+    if requested_owner_id != tenant_id:
+        return False, "Dataset owner cannot be changed."
+
+    permission = req.get("permission", TenantPermission.ME.value)
+    team_id = req.get("team_id")
+    if (permission, team_id) != (TenantPermission.ME.value, None):
+        ok, assignment_error = validate_team_assignment(
+            tenant_id,
+            SimpleNamespace(tenant_id=tenant_id),
+            permission,
+            team_id,
+        )
+        if not ok:
+            return False, assignment_error
+
     ok, category_or_error = validate_category_assignment(tenant_id, tenant_id, req.get("category_id"))
     if not ok:
         return False, category_or_error
@@ -169,12 +253,13 @@ async def create_dataset(tenant_id: str, req: dict):
         if not ok:
             return False, err
 
-    if not KnowledgebaseService.save(**create_dict):
-        return False, "Failed to save dataset"
+    saved, save_error = _save_dataset_with_locked_assignment(tenant_id, create_dict)
+    if not saved:
+        return False, save_error
     ok, k = KnowledgebaseService.get_by_id(create_dict["id"])
     if not ok:
         return False, "Dataset created failed"
-    response_data = remap_dictionary_keys(k.to_dict())
+    response_data = _serialize_dataset(k)
     return True, response_data
 
 
@@ -274,7 +359,7 @@ def get_dataset(dataset_id: str, tenant_id: str):
     if not ok:
         return False, "Invalid Dataset ID"
 
-    response_data = remap_dictionary_keys(kb.to_dict())
+    response_data = _serialize_dataset(kb)
     response_data["size"] = DocumentService.get_total_size_by_kb_id(dataset_id)
     response_data["connectors"] = list(Connector2KbService.list_connectors(dataset_id))
     return True, response_data
@@ -353,6 +438,33 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
     # Merge ext fields with req
     req.update(ext_fields)
 
+    requested_owner_id = req.pop("tenant_id", kb.tenant_id)
+    if requested_owner_id != kb.tenant_id:
+        return False, "Dataset owner cannot be changed."
+
+    assignment_touched = "permission" in req or "team_id" in req
+    target_permission = kb.permission
+    target_team_id = kb.team_id
+    if assignment_touched:
+        target_permission = req.get("permission", kb.permission)
+        if "team_id" in req:
+            target_team_id = req["team_id"]
+        elif target_permission == TenantPermission.ME.value:
+            target_team_id = None
+        else:
+            target_team_id = kb.team_id
+        if (target_permission, target_team_id) != (kb.permission, kb.team_id):
+            ok, assignment_error = validate_team_assignment(
+                tenant_id,
+                kb,
+                target_permission,
+                target_team_id,
+            )
+            if not ok:
+                return False, assignment_error
+            if target_permission == TenantPermission.ME.value:
+                req["team_id"] = None
+
     # Extract connectors from request
     connectors = []
     if "connectors" in req:
@@ -413,7 +525,17 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
     if "parse_type" in req:
         del req["parse_type"]
 
-    if not KnowledgebaseService.update_by_id(kb.id, req):
+    if assignment_touched:
+        updated, update_error = _update_dataset_with_locked_assignment(
+            tenant_id,
+            kb,
+            req,
+            target_permission,
+            target_team_id,
+        )
+        if not updated:
+            return False, update_error
+    elif not KnowledgebaseService.update_by_id(kb.id, req):
         return False, "Update dataset error.(Database error)"
 
     ok, k = KnowledgebaseService.get_by_id(kb.id)
@@ -425,7 +547,7 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
     if errors:
         logging.error("Link KB errors: %s", errors)
 
-    response_data = remap_dictionary_keys(k.to_dict())
+    response_data = _serialize_dataset(k)
     response_data["connectors"] = connectors
     return True, response_data
 
@@ -466,13 +588,10 @@ def list_datasets(tenant_id: str, args: dict):
         kbs = KnowledgebaseService.get_kb_by_name(name, tenant_id)
         if not kbs:
             return False, f"User '{tenant_id}' lacks permission for dataset '{name}'"
-    if ext_fields.get("owner_ids", []):
-        tenant_ids = ext_fields["owner_ids"]
-    else:
-        tenants = TenantService.get_joined_tenants_by_user_id(tenant_id)
-        tenant_ids = [m["tenant_id"] for m in tenants]
+    active_team_ids = TeamMemberService.active_team_ids(tenant_id)
+    owner_ids = ext_fields.get("owner_ids") or None
     kbs, total = KnowledgebaseService.get_list(
-        tenant_ids,
+        active_team_ids,
         tenant_id,
         page,
         page_size,
@@ -484,6 +603,7 @@ def list_datasets(tenant_id: str, args: dict):
         parser_id,
         category_id,
         uncategorized,
+        owner_ids=owner_ids,
     )
     users = UserService.get_by_ids([m["tenant_id"] for m in kbs])
     user_map = {m.id: m.to_dict() for m in users}
@@ -492,6 +612,7 @@ def list_datasets(tenant_id: str, args: dict):
         user_dict = user_map.get(kb["tenant_id"], {})
         kb.update({"nickname": user_dict.get("nickname", ""), "tenant_avatar": user_dict.get("avatar", "")})
         response_data_list.append(remap_dictionary_keys(kb))
+    _attach_team_names(response_data_list)
     return True, {"data": response_data_list, "total": total}
 
 
@@ -547,8 +668,8 @@ def delete_knowledge_graph(dataset_id: str, tenant_id: str):
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "No authorization."
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
-    from rag.nlp import search
     from rag.graphrag.phase_markers import clear_phase_markers
+    from rag.nlp import search
     settings.docStoreConn.delete({"knowledge_graph_kwd": ["graph", "subgraph", "entity", "relation", "community_report"]},
                                  search.index_name(kb.tenant_id), dataset_id)
     # Wiping the graph invalidates any phase-completion markers used to
@@ -925,8 +1046,8 @@ def delete_index(dataset_id: str, tenant_id: str, index_type: str, wipe: bool = 
         TaskService.delete_by_id(task_id)
 
     if wipe and index_type == "graph":
-        from rag.nlp import search
         from rag.graphrag.phase_markers import clear_phase_markers
+        from rag.nlp import search
         settings.docStoreConn.delete({"knowledge_graph_kwd": ["graph", "subgraph", "entity", "relation", "community_report"]},
                                      search.index_name(kb.tenant_id), dataset_id)
         # Wiping the graph invalidates any phase-completion markers used to
@@ -1186,12 +1307,10 @@ def check_embedding(dataset_id: str, tenant_id: str, req: dict):
 
     import numpy as np
 
-    from common.constants import RetCode
+    from api.db.services.llm_service import LLMBundle
+    from common.constants import LLMType, RetCode
     from common.doc_store.doc_store_base import OrderByExpr
     from rag.nlp import search
-
-    from api.db.services.llm_service import LLMBundle
-    from common.constants import LLMType
 
     def _guess_vec_field(src: dict):
         for k in src or {}:

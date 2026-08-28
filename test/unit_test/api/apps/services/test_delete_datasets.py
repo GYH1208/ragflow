@@ -119,6 +119,7 @@ def _load_delete_datasets_module(monkeypatch, *, f2d_rows, file_filter_delete):
     _stub(
         monkeypatch,
         "api.db.db_models",
+        DB=SimpleNamespace(),
         File=SimpleNamespace(source_type="source_type", id="id", type="type", name="name"),
     )
     _stub(

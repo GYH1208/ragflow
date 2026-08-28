@@ -10,8 +10,17 @@ jest.mock('@/hooks/logic-hooks/navigate-hooks', () => ({
 }));
 
 jest.mock('@/components/home-card', () => ({
-  HomeCard: ({ moreDropdown }: { moreDropdown: React.ReactNode }) => (
-    <div>{moreDropdown}</div>
+  HomeCard: ({
+    moreDropdown,
+    sharedBadge,
+  }: {
+    moreDropdown: React.ReactNode;
+    sharedBadge?: React.ReactNode;
+  }) => (
+    <div>
+      {moreDropdown}
+      {sharedBadge}
+    </div>
   ),
 }));
 
@@ -46,6 +55,24 @@ jest.mock('../dataset-dropdown', () => ({
 }));
 
 describe('DatasetCard', () => {
+  it('shows a distinct assigned team badge alongside the owner badge', () => {
+    render(
+      <DatasetCard
+        {...({
+          dataset: {
+            id: 'kb-1',
+            document_count: 2,
+            nickname: '知识库所有者',
+            team_name: 'HR 团队',
+          },
+          showDatasetRenameModal: jest.fn(),
+        } as any)}
+      />,
+    );
+
+    expect(screen.getByText('HR 团队')).toBeInTheDocument();
+  });
+
   it('keeps homepage cards usable without category controls', () => {
     render(
       <DatasetCard

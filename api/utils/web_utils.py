@@ -251,6 +251,19 @@ async def send_invite_email(to_email, invite_url, tenant_id, inviter):
     )
 
 
+async def send_team_invite_email(to_email, invite_url, team_id, team_name, inviter):
+    await send_email_html(
+        to_email=to_email,
+        subject=f"RAGFlow Team Invitation: {team_name}",
+        template_key="team_invite",
+        email=to_email,
+        invite_url=invite_url,
+        team_id=team_id,
+        team_name=team_name,
+        inviter=inviter,
+    )
+
+
 def otp_keys(email: str):
     email = (email or "").strip().lower()
     return (

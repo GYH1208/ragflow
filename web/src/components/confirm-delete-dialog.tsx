@@ -30,6 +30,8 @@ interface IProps {
   testId?: string;
   confirmButtonTestId?: string;
   cancelButtonTestId?: string;
+  confirmLoading?: boolean;
+  manualClose?: boolean;
 }
 
 export function ConfirmDeleteDialog({
@@ -47,6 +49,8 @@ export function ConfirmDeleteDialog({
   testId,
   confirmButtonTestId,
   cancelButtonTestId,
+  confirmLoading = false,
+  manualClose = false,
 }: IProps & DialogProps) {
   const { t } = useTranslation();
 
@@ -81,7 +85,7 @@ export function ConfirmDeleteDialog({
           {content && (
             <>
               <Separator className="w-[calc(100%+48px)] -translate-x-6"></Separator>
-              <AlertDialogDescription className="mt-5">
+              <AlertDialogDescription asChild className="mt-5">
                 <div className="flex flex-col gap-5  text-base mb-10 px-5">
                   <div className="text-text-primary">
                     {content.title || t('common.deleteModalTitle')}
@@ -103,7 +107,11 @@ export function ConfirmDeleteDialog({
           </AlertDialogCancel>
           <AlertDialogAction
             className="bg-state-error text-text-primary hover:text-text-primary hover:bg-state-error"
-            onClick={onOk}
+            disabled={confirmLoading}
+            onClick={(event) => {
+              if (manualClose) event.preventDefault();
+              onOk?.(event);
+            }}
             data-testid={
               confirmButtonTestId ?? 'confirm-delete-dialog-confirm-btn'
             }

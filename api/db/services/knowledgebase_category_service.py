@@ -3,7 +3,7 @@ from peewee import fn
 from api.db.db_models import DB, Knowledgebase, KnowledgebaseCategory
 from api.db.services.common_service import CommonService
 from api.db.services.knowledgebase_service import KnowledgebaseService
-from api.db.services.user_service import TenantService
+from api.db.services.team_service import TeamMemberService
 from common.constants import StatusEnum
 
 
@@ -12,8 +12,7 @@ class KnowledgebaseCategoryService(CommonService):
 
     @classmethod
     def visible_tenant_ids(cls, user_id: str) -> list[str]:
-        joined = TenantService.get_joined_tenants_by_user_id(user_id)
-        return list(dict.fromkeys([user_id, *(item["tenant_id"] for item in joined)]))
+        return list(dict.fromkeys([user_id, *TeamMemberService.visible_owner_ids(user_id)]))
 
     @classmethod
     def resolve_owner_ids(cls, user_id: str, owner_ids: list[str] | None = None) -> list[str]:
@@ -38,7 +37,7 @@ class KnowledgebaseCategoryService(CommonService):
     @classmethod
     @DB.connection_context()
     def list_with_counts(cls, user_id: str, owner_ids: list[str] | None = None) -> dict:
-        joined_tenant_ids = cls.visible_tenant_ids(user_id)
+        active_team_ids = TeamMemberService.active_team_ids(user_id)
         tenant_ids = cls.resolve_owner_ids(user_id, owner_ids)
         if not tenant_ids:
             return {"categories": [], "total_count": 0, "uncategorized_count": 0}
@@ -52,7 +51,7 @@ class KnowledgebaseCategoryService(CommonService):
             .order_by(cls.model.create_time.asc(), cls.model.name.asc())
         )
 
-        visibility = KnowledgebaseService._visibility_and_status_filter(joined_tenant_ids, user_id)
+        visibility = KnowledgebaseService._visibility_and_status_filter(active_team_ids, user_id)
         base_query = Knowledgebase.select().where(visibility, Knowledgebase.tenant_id.in_(tenant_ids))
         grouped_counts = {
             row["category_id"]: row["count"]

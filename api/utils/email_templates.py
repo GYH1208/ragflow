@@ -27,6 +27,14 @@ Click the link below to complete your registration:
 If you did not request this, please ignore this email.
 """
 
+TEAM_INVITE_EMAIL_TMPL = """
+Hi {{email}},
+{{inviter}} has invited you to join the team {{team_name}} (ID: {{team_id}}).
+Open RAGFlow to accept or reject this invitation:
+{{invite_url}}
+If you did not expect this invitation, you can safely ignore this email.
+"""
+
 # Password reset code template
 RESET_CODE_EMAIL_TMPL = """
 Hello,
@@ -37,5 +45,6 @@ This code will expire in {{ ttl_min }} minutes.
 # Template registry
 EMAIL_TEMPLATES = {
     "invite": INVITE_EMAIL_TMPL,
+    "team_invite": TEAM_INVITE_EMAIL_TMPL,
     "reset_code": RESET_CODE_EMAIL_TMPL,
 }

@@ -43,6 +43,8 @@ export interface IDataset {
   tenant_avatar: string;
   tenant_embd_id: number;
   tenant_id: string;
+  team_id?: string | null;
+  team_name?: string | null;
   token_num: number;
   update_date: string;
   update_time: number;

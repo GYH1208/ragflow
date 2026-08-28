@@ -15,18 +15,19 @@
 #
 from datetime import datetime
 
-from peewee import fn, JOIN
+from peewee import JOIN, fn
 
-from api.db import TenantPermission
-from api.db.db_models import DB, Document, Knowledgebase, User, UserCanvas
-from api.db.services.common_service import CommonService
-from common.time_utils import current_timestamp, datetime_format
-from api.db.services import duplicate_name
-from api.db.services.user_service import TenantService
-from common.misc_utils import get_uuid
-from common.constants import StatusEnum
 from api.constants import DATASET_NAME_LIMIT
-from api.utils.api_utils import get_parser_config, get_data_error_result
+from api.db import TenantPermission
+from api.db.db_models import DB, Document, Knowledgebase, Team, User, UserCanvas
+from api.db.services import duplicate_name
+from api.db.services.common_service import CommonService
+from api.db.services.team_service import TeamAuthorizationService, select_for_update
+from api.db.services.user_service import TenantService
+from api.utils.api_utils import get_data_error_result, get_parser_config
+from common.constants import StatusEnum
+from common.misc_utils import get_uuid
+from common.time_utils import current_timestamp, datetime_format, get_format_time
 
 
 class KnowledgebaseService(CommonService):
@@ -49,19 +50,65 @@ class KnowledgebaseService(CommonService):
     model = Knowledgebase
 
     @classmethod
-    def _visibility_and_status_filter(cls, joined_tenant_ids, user_id):
+    def get_owned_for_update(cls, kb_id: str, owner_id: str) -> Knowledgebase | None:
+        """Read and lock one valid owned dataset inside the caller's transaction."""
+        query = cls.model.select().where(
+            cls.model.id == kb_id,
+            cls.model.tenant_id == owner_id,
+            cls.model.status == StatusEnum.VALID.value,
+        )
+        return select_for_update(query).get_or_none()
+
+    @classmethod
+    def save_in_transaction(cls, **kwargs):
+        """Insert a dataset without opening a second connection context."""
+        return cls.model(**kwargs).save(force_insert=True)
+
+    @classmethod
+    def adjust_document_counts_in_transaction(
+        cls,
+        kb_id: str,
+        *,
+        doc_num: int,
+        token_num: int = 0,
+        chunk_num: int = 0,
+    ) -> int:
+        """Adjust dataset counters on the caller's existing transaction."""
+        return (
+            cls.model.update(
+                doc_num=cls.model.doc_num + doc_num,
+                token_num=cls.model.token_num + token_num,
+                chunk_num=cls.model.chunk_num + chunk_num,
+                update_time=current_timestamp(),
+                update_date=get_format_time(),
+            )
+            .where(cls.model.id == kb_id)
+            .execute()
+        )
+
+    @classmethod
+    def _visibility_and_status_filter(cls, active_team_ids, user_id):
         """
         Build a Peewee filter expression representing knowledgebase visibility
         for a given user, combined with a valid-status constraint.
 
         Visibility rules:
-        - Team KBs (`permission == TenantPermission.TEAM`) owned by any tenant in `joined_tenant_ids`
+        - Team KBs assigned to one of the user's active teams
         - KBs owned by the current user (`tenant_id == user_id`)
         Always constrained to `StatusEnum.VALID`.
         """
+        valid_owned_team = Team.select(Team.id).where(
+            Team.id == cls.model.team_id,
+            Team.tenant_id == cls.model.tenant_id,
+            Team.status == StatusEnum.VALID.value,
+        )
         return (
             (
-                (cls.model.tenant_id.in_(joined_tenant_ids) & (cls.model.permission == TenantPermission.TEAM.value))
+                (
+                    cls.model.team_id.in_(active_team_ids or [])
+                    & (cls.model.permission == TenantPermission.TEAM.value)
+                    & fn.EXISTS(valid_owned_team)
+                )
                 | (cls.model.tenant_id == user_id)
             )
             & (cls.model.status == StatusEnum.VALID.value)
@@ -112,8 +159,8 @@ class KnowledgebaseService(CommonService):
         # Returns:
         #     If all documents are parsed successfully, returns (True, None)
         #     If any document is not fully parsed, returns (False, error_message)
-        from common.constants import TaskStatus
         from api.db.services.document_service import DocumentService
+        from common.constants import TaskStatus
 
         # Get dataset information
         kbs = cls.query(id=kb_id)
@@ -152,7 +199,7 @@ class KnowledgebaseService(CommonService):
 
     @classmethod
     @DB.connection_context()
-    def get_by_tenant_ids(cls, joined_tenant_ids, user_id,
+    def get_by_tenant_ids(cls, active_team_ids, user_id,
                           page_number, items_per_page,
                           orderby, desc, keywords,
                           parser_id=None
@@ -177,6 +224,7 @@ class KnowledgebaseService(CommonService):
             cls.model.description,
             cls.model.tenant_id,
             cls.model.permission,
+            cls.model.team_id,
             cls.model.doc_num,
             cls.model.token_num,
             cls.model.chunk_num,
@@ -188,12 +236,12 @@ class KnowledgebaseService(CommonService):
         ]
         if keywords:
             kbs = cls.model.select(*fields).join(User, on=(cls.model.tenant_id == User.id)).where(
-                cls._visibility_and_status_filter(joined_tenant_ids, user_id),
+                cls._visibility_and_status_filter(active_team_ids, user_id),
                 fn.LOWER(cls.model.name).contains(keywords.lower()),
             )
         else:
             kbs = cls.model.select(*fields).join(User, on=(cls.model.tenant_id == User.id)).where(
-                cls._visibility_and_status_filter(joined_tenant_ids, user_id),
+                cls._visibility_and_status_filter(active_team_ids, user_id),
             )
         if parser_id:
             kbs = kbs.where(cls.model.parser_id == parser_id)
@@ -211,13 +259,14 @@ class KnowledgebaseService(CommonService):
 
     @classmethod
     @DB.connection_context()
-    def get_all_kb_by_tenant_ids(cls, tenant_ids, user_id):
+    def get_all_kb_by_tenant_ids(cls, active_team_ids, user_id):
         # will get all permitted kb, be cautious.
         fields = [
             cls.model.name,
             cls.model.avatar,
             cls.model.language,
             cls.model.permission,
+            cls.model.team_id,
             cls.model.doc_num,
             cls.model.token_num,
             cls.model.chunk_num,
@@ -226,7 +275,7 @@ class KnowledgebaseService(CommonService):
             cls.model.update_date
         ]
         # find team kb and owned kb
-        kbs = cls.model.select(*fields).where(cls._visibility_and_status_filter(tenant_ids, user_id))
+        kbs = cls.model.select(*fields).where(cls._visibility_and_status_filter(active_team_ids, user_id))
         # sort by create_time asc
         kbs.order_by(cls.model.create_time.asc())
         # maybe cause slow query by deep paginate, optimize later.
@@ -272,6 +321,7 @@ class KnowledgebaseService(CommonService):
             cls.model.language,
             cls.model.description,
             cls.model.permission,
+            cls.model.team_id,
             cls.model.doc_num,
             cls.model.token_num,
             cls.model.chunk_num,
@@ -441,9 +491,9 @@ class KnowledgebaseService(CommonService):
 
     @classmethod
     @DB.connection_context()
-    def get_list(cls, joined_tenant_ids, user_id,
+    def get_list(cls, active_team_ids, user_id,
                  page_number, items_per_page, orderby, desc, id, name, keywords,
-                 parser_id=None, category_id=None, uncategorized=False):
+                 parser_id=None, category_id=None, uncategorized=False, owner_ids=None):
         # Get list of knowledge bases with filtering and pagination
         # Args:
         #     joined_tenant_ids: List of tenant IDs
@@ -472,8 +522,10 @@ class KnowledgebaseService(CommonService):
             kbs = kbs.where(cls.model.category_id.is_null(True))
         elif category_id:
             kbs = kbs.where(cls.model.category_id == category_id)
+        if owner_ids:
+            kbs = kbs.where(cls.model.tenant_id.in_(owner_ids))
 
-        kbs = kbs.where(cls._visibility_and_status_filter(joined_tenant_ids, user_id))
+        kbs = kbs.where(cls._visibility_and_status_filter(active_team_ids, user_id))
 
         if desc:
             kbs = kbs.order_by(cls.model.getter_by(orderby).desc())
@@ -498,17 +550,7 @@ class KnowledgebaseService(CommonService):
         if not e:
             return False
 
-        if kb.status != StatusEnum.VALID.value:
-            return False
-
-        if kb.tenant_id == user_id:
-            return True
-
-        if kb.permission != TenantPermission.TEAM.value:
-            return False
-
-        joined_tenants = TenantService.get_joined_tenants_by_user_id(user_id)
-        return any(tenant["tenant_id"] == kb.tenant_id for tenant in joined_tenants)
+        return TeamAuthorizationService.can_access_kb(user_id, kb)
 
     @classmethod
     @DB.connection_context()

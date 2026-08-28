@@ -14,21 +14,21 @@
 #  limitations under the License.
 #
 import logging
-from datetime import datetime
 import os
-from typing import Optional, Tuple, List
+from datetime import datetime
+from typing import List, Optional, Tuple
 
 from anthropic import BaseModel
 from peewee import SQL, fn
 
 from api.db import InputType
-from api.db.db_models import DB, Connector, SyncLogs, Connector2Kb, Knowledgebase
+from api.db.db_models import DB, Connector, Connector2Kb, Knowledgebase, SyncLogs
 from api.db.services.common_service import CommonService
-from api.db.services.document_service import DocumentService
-from api.db.services.document_service import DocMetadataService
+from api.db.services.document_service import DocMetadataService, DocumentService
+from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.utils.common import hash128
-from common.misc_utils import get_uuid
 from common.constants import ConnectorTaskType, TaskStatus
+from common.misc_utils import get_uuid
 from common.settings import TIMEZONE
 from common.time_utils import current_timestamp, timestamp_to_date
 
@@ -140,12 +140,17 @@ class ConnectorService(CommonService):
     @classmethod
     def rebuild(cls, kb_id:str, connector_id: str, tenant_id:str):
         from api.db.services.file_service import FileService
+        e, kb = KnowledgebaseService.get_by_id(kb_id)
+        if not e:
+            return "Dataset not found."
         e, conn = cls.get_by_id(connector_id)
         if not e:
-            return None
+            return "Connector not found."
+        if str(conn.tenant_id) != str(kb.tenant_id):
+            return "Connector owner does not match the dataset owner."
         SyncLogsService.filter_delete([SyncLogs.connector_id==connector_id, SyncLogs.kb_id==kb_id])
         docs = DocumentService.query(source_type=f"{conn.source}/{conn.id}", kb_id=kb_id)
-        err = FileService.delete_docs([d.id for d in docs], tenant_id)
+        err = FileService.delete_docs([d.id for d in docs], kb.tenant_id)
         SyncLogsService.schedule(connector_id, kb_id, reindex=True, task_type=ConnectorTaskType.SYNC)
         if (conn.config or {}).get("sync_deleted_files"):
             SyncLogsService.schedule(connector_id, kb_id, task_type=ConnectorTaskType.PRUNE)
@@ -170,6 +175,12 @@ class ConnectorService(CommonService):
         if not e:
             return 0, []
 
+        e, kb = KnowledgebaseService.get_by_id(kb_id)
+        if not e:
+            return 0, ["Dataset not found."]
+        if str(conn.tenant_id) != str(kb.tenant_id):
+            return 0, ["Connector owner does not match the dataset owner."]
+
         source_type = f"{conn.source}/{conn.id}"
         retain_doc_ids = {doc_id for file in file_list for doc_id in (hash128(f"{connector_id}:{file.id}"), hash128(f"{kb_id}:{connector_id}:{file.id}"))}
         existing_docs = DocumentService.list_doc_headers_by_kb_and_source_type(
@@ -187,7 +198,7 @@ class ConnectorService(CommonService):
         for offset in range(0, len(stale_doc_ids), delete_batch_size):
             err = FileService.delete_docs(
                 stale_doc_ids[offset : offset + delete_batch_size],
-                tenant_id,
+                kb.tenant_id,
             )
             if err:
                 errors.append(err)
@@ -444,7 +455,13 @@ class SyncLogsService(CommonService):
         errs = []
         files = [FileObj(id=d["id"], filename=d["semantic_identifier"]+(f"{d['extension']}" if d["semantic_identifier"][::-1].find(d['extension'][::-1])<0 else ""), blob=d["blob"], fingerprint=d.get("fingerprint")) for d in docs]
         doc_ids = []
-        err, doc_blob_pairs = FileService.upload_document(kb, files, tenant_id, src)
+        err, doc_blob_pairs = FileService.upload_document(
+            kb,
+            files,
+            kb.tenant_id,
+            created_by=tenant_id,
+            src=src,
+        )
         errs.extend(err)
 
         # Create a mapping from filename to metadata for later use
@@ -464,7 +481,7 @@ class SyncLogsService(CommonService):
             
             if not auto_parse or auto_parse == "0":
                 continue
-            DocumentService.run(tenant_id, doc, kb_table_num_map)
+            DocumentService.run(kb.tenant_id, doc, kb_table_num_map)
 
         return errs, doc_ids
 
@@ -484,6 +501,22 @@ class Connector2KbService(CommonService):
 
     @classmethod
     def link_connectors(cls, kb_id:str, connectors: list[dict], tenant_id:str):
+        found, kb = KnowledgebaseService.get_by_id(kb_id)
+        if not found:
+            return "Dataset not found."
+        if str(kb.tenant_id) != str(tenant_id):
+            return "Dataset owner context does not match the requested tenant."
+
+        resolved_connectors = {}
+        for connector in connectors:
+            connector_id = connector["id"]
+            found, full_connector = ConnectorService.get_by_id(connector_id)
+            if not found:
+                return f"Connector '{connector_id}' not found."
+            if str(full_connector.tenant_id) != str(kb.tenant_id):
+                return f"Connector '{connector_id}' owner does not match the dataset owner."
+            resolved_connectors[connector_id] = full_connector
+
         arr = cls.query(kb_id=kb_id)
         old_conn_ids = [a.connector_id for a in arr]
         connector_ids = []
@@ -500,8 +533,8 @@ class Connector2KbService(CommonService):
                 "auto_parse": conn.get("auto_parse", "1")
             })
             SyncLogsService.schedule(conn_id, kb_id, reindex=True, task_type=ConnectorTaskType.SYNC)
-            e, full_conn = ConnectorService.get_by_id(conn_id)
-            if e and (full_conn.config or {}).get("sync_deleted_files"):
+            full_conn = resolved_connectors[conn_id]
+            if (full_conn.config or {}).get("sync_deleted_files"):
                 SyncLogsService.schedule(conn_id, kb_id, task_type=ConnectorTaskType.PRUNE)
 
         errs = []

@@ -1,5 +1,7 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
 
+from api.apps.services import dataset_api_service
 from api.apps.services.dataset_api_service import (
     create_dataset,
     create_dataset_category,
@@ -12,6 +14,7 @@ from api.apps.services.dataset_api_service import (
 from api.db.services.connector_service import Connector2KbService
 from api.db.services.knowledgebase_category_service import KnowledgebaseCategoryService
 from api.db.services.knowledgebase_service import KnowledgebaseService
+from api.db.services.team_service import TeamMemberService
 from api.db.services.user_service import TenantService, UserService
 
 
@@ -75,10 +78,10 @@ def test_validate_category_assignment_accepts_none():
 
 def test_list_datasets_forwards_real_category_filter(monkeypatch):
     captured = {}
-    monkeypatch.setattr(TenantService, "get_joined_tenants_by_user_id", lambda _user_id: [])
+    monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda _user_id: [])
     monkeypatch.setattr(UserService, "get_by_ids", lambda _ids: [])
 
-    def fake_get_list(*args):
+    def fake_get_list(*args, **_kwargs):
         captured["args"] = args
         return [], 0
 
@@ -96,10 +99,10 @@ def test_list_datasets_forwards_real_category_filter(monkeypatch):
 
 def test_list_datasets_maps_uncategorized_filter(monkeypatch):
     captured = {}
-    monkeypatch.setattr(TenantService, "get_joined_tenants_by_user_id", lambda _user_id: [])
+    monkeypatch.setattr(TeamMemberService, "active_team_ids", lambda _user_id: [])
     monkeypatch.setattr(UserService, "get_by_ids", lambda _ids: [])
 
-    def fake_get_list(*args):
+    def fake_get_list(*args, **_kwargs):
         captured["args"] = args
         return [], 0
 
@@ -125,7 +128,8 @@ async def test_create_dataset_persists_category_id(monkeypatch):
         return True, {"id": "kb-1", "category_id": kwargs["category_id"], "embd_id": "embd-1"}
 
     monkeypatch.setattr(KnowledgebaseService, "create_with_name", fake_create_with_name)
-    monkeypatch.setattr(KnowledgebaseService, "save", lambda **_kwargs: True)
+    monkeypatch.setattr(dataset_api_service, "DB", SimpleNamespace(atomic=nullcontext))
+    monkeypatch.setattr(KnowledgebaseService, "save_in_transaction", lambda **_kwargs: 1)
     monkeypatch.setattr(
         KnowledgebaseService,
         "get_by_id",
@@ -157,6 +161,8 @@ async def test_update_dataset_can_move_to_uncategorized(monkeypatch):
         name="预算库",
         embd_id="embd-1",
         pagerank=0,
+        permission="me",
+        team_id=None,
     )
     updates = []
     monkeypatch.setattr(KnowledgebaseService, "get_or_none", lambda **_kwargs: kb)
