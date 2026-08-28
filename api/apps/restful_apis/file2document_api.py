@@ -19,8 +19,8 @@ from pathlib import Path
 
 from api.apps import current_user, login_required
 from api.common.check_team_permission import check_file_team_permission, check_kb_team_permission
-from api.db import FileType, TenantPermission
-from api.db.db_models import DB, Document, File, File2Document, Knowledgebase, Task
+from api.db import FileType, TeamMemberState, TenantPermission
+from api.db.db_models import DB, Document, File, File2Document, Knowledgebase, Task, TeamMember
 from api.db.services.document_service import DocumentService
 from api.db.services.file2document_service import File2DocumentService
 from api.db.services.file_service import FileService
@@ -58,6 +58,45 @@ def _authorize_existing_documents(file_ids, actor_id):
 def _ensure_same_owner(files, target_kbs):
     if any(file.tenant_id != kb.tenant_id for file in files for kb in target_kbs):
         raise PermissionError(CROSS_OWNER_ERROR)
+
+
+def _can_access_locked_kb(kb, actor_id, active_team_ids, owned_team_ids):
+    if kb.status != StatusEnum.VALID.value:
+        return False
+    if kb.tenant_id == actor_id:
+        return True
+    return (
+        kb.permission == TenantPermission.TEAM.value
+        and kb.team_id in active_team_ids
+        and kb.team_id in owned_team_ids
+    )
+
+
+def _authorize_locked_conversion(
+    files,
+    knowledge_bases,
+    links,
+    documents,
+    actor_id,
+    active_team_ids,
+    owned_team_ids,
+):
+    accessible_kb_ids = {
+        kb.id
+        for kb in knowledge_bases
+        if _can_access_locked_kb(kb, actor_id, active_team_ids, owned_team_ids)
+    }
+    if len(accessible_kb_ids) != len(knowledge_bases):
+        raise PermissionError("No authorization.")
+
+    documents_by_id = {document.id: document for document in documents}
+    accessible_file_ids = {
+        link.file_id
+        for link in links
+        if link.document_id in documents_by_id and documents_by_id[link.document_id].kb_id in accessible_kb_ids
+    }
+    if any(file.tenant_id != actor_id and file.id not in accessible_file_ids for file in files):
+        raise PermissionError("No authorization.")
 
 
 def _load_conversion_state(file_ids, kb_ids, actor_id):
@@ -149,9 +188,11 @@ def _replace_document_rows(files, target_kbs, existing_documents_by_file, actor_
                 if getattr(kb, "permission", None) == TenantPermission.TEAM.value and getattr(kb, "team_id", None)
             }
         )
+        owned_team_ids = set()
         for team_id, owner_id in team_owners:
             if TeamService.get_owned_team_for_update(team_id, owner_id) is None:
                 raise PermissionError("No authorization.")
+            owned_team_ids.add(team_id)
 
         locked_files = list(
             select_for_update(File.select().where(File.id.in_(file_ids))).order_by(File.id)
@@ -178,11 +219,23 @@ def _replace_document_rows(files, target_kbs, existing_documents_by_file, actor_
             raise RuntimeError("Dataset assignments changed concurrently.")
         ordered_files = [files_by_id[file_id] for file_id in file_ids]
         ordered_targets = [kbs_by_id[kb_id] for kb_id in target_kb_ids]
-        if any(not check_file_team_permission(file, actor_id) for file in ordered_files):
-            raise PermissionError("No authorization.")
-        if any(not check_kb_team_permission(kb, actor_id) for kb in locked_kbs):
-            raise PermissionError("No authorization.")
         _ensure_same_owner(ordered_files, ordered_targets)
+
+        team_ids = sorted({team_id for team_id, _owner_id in team_owners})
+        if team_ids:
+            locked_memberships = list(
+                select_for_update(
+                    TeamMember.select().where(
+                        TeamMember.team_id.in_(team_ids),
+                        TeamMember.user_id == actor_id,
+                        TeamMember.state == TeamMemberState.ACTIVE.value,
+                        TeamMember.status == StatusEnum.VALID.value,
+                    )
+                ).order_by(TeamMember.id)
+            )
+        else:
+            locked_memberships = []
+        active_team_ids = {membership.team_id for membership in locked_memberships}
 
         selected_links = list(
             select_for_update(File2Document.select().where(File2Document.file_id.in_(file_ids))).order_by(
@@ -206,6 +259,16 @@ def _replace_document_rows(files, target_kbs, existing_documents_by_file, actor_
             locked_documents = []
         if {document.id for document in locked_documents} != current_old_document_ids:
             raise RuntimeError("Documents changed concurrently.")
+
+        _authorize_locked_conversion(
+            ordered_files,
+            locked_kbs,
+            selected_links,
+            locked_documents,
+            actor_id,
+            active_team_ids,
+            owned_team_ids,
+        )
 
         staged = _stage_document_replacements(ordered_files, ordered_targets, actor_id)
         for file_id, document in staged:

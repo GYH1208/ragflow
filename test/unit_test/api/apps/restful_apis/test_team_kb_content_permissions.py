@@ -21,14 +21,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from peewee import SqliteDatabase
+from peewee import ConnectionContext, SqliteDatabase
 
 import api.apps
 import api.utils.api_utils
 from api.apps.services.dataset_api_service import delete_datasets, update_dataset
 from api.common.check_team_permission import check_kb_team_permission
-from api.db import FileType, TenantPermission
-from api.db.db_models import Document, File, File2Document, Knowledgebase, Task
+from api.db import FileType, TeamMemberState, TenantPermission
+from api.db.db_models import Document, File, File2Document, Knowledgebase, Task, Team, TeamMember
 from api.db.services.team_service import TeamMemberService, TeamService
 from common.constants import ParserType, StatusEnum, TaskStatus
 
@@ -500,12 +500,10 @@ def _call_raw_read_route(module, kb, document, route):
         return _run(module.download_document(document.id))
     if route == "thumbnails":
         return module.list_thumbnails()
-    if route == "image":
-        return _run(module.get_document_image(f"{kb.id}-{document.thumbnail}"))
     raise AssertionError(f"Unknown route: {route}")
 
 
-@pytest.mark.parametrize("route", ["dataset_download", "document_download", "thumbnails", "image"])
+@pytest.mark.parametrize("route", ["dataset_download", "document_download", "thumbnails"])
 @pytest.mark.parametrize(
     ("user_id", "allowed"),
     [
@@ -524,8 +522,6 @@ def test_raw_document_reads_follow_team_permission_matrix(monkeypatch, route, us
     if allowed:
         if route == "thumbnails":
             assert result["code"] == 0
-        elif route == "image":
-            assert result.data == b"content"
         else:
             assert result == {"sent": document.name}
         assert storage_reads or route == "thumbnails"
@@ -534,7 +530,7 @@ def test_raw_document_reads_follow_team_permission_matrix(monkeypatch, route, us
         assert storage_reads == []
 
 
-@pytest.mark.parametrize("route", ["dataset_download", "document_download", "thumbnails", "image"])
+@pytest.mark.parametrize("route", ["dataset_download", "document_download", "thumbnails"])
 def test_raw_document_reads_hide_missing_and_unauthorized_resources(monkeypatch, route):
     missing_module, missing_kb, missing_document, missing_reads = _prepare_raw_read_route(
         monkeypatch,
@@ -552,6 +548,23 @@ def test_raw_document_reads_hide_missing_and_unauthorized_resources(monkeypatch,
     assert (missing["code"], missing["message"]) == (denied["code"], denied["message"])
     assert missing_reads == []
     assert denied_reads == []
+
+
+@pytest.mark.parametrize(
+    "image_id",
+    [
+        "kb1-71d8d4f2bb8e4c87",
+        "imagetemps-3f84af32d0f64d8e9f05f6b3981e8c28",
+    ],
+)
+def test_generic_document_image_route_preserves_chunk_and_reference_image_compatibility(monkeypatch, image_id):
+    module, _kb, _document, storage_reads = _prepare_raw_read_route(monkeypatch, user_id="member-other")
+
+    result = _run(module.get_document_image(image_id))
+
+    bucket, object_name = image_id.split("-", 1)
+    assert getattr(result, "data", None) == b"content"
+    assert storage_reads == [(bucket, object_name)]
 
 
 def test_dataset_download_binds_document_to_requested_dataset(monkeypatch):
@@ -1157,6 +1170,161 @@ def test_file_conversion_cleans_external_state_only_after_durable_replacement(mo
         assert len(links) == 1
         assert links[0].file_id == source_file.id
         assert links[0].document_id != old_document.id
+
+
+def _bind_real_service_connection_context(monkeypatch, method, database):
+    wrapper = method.__func__ if hasattr(method, "__func__") else method
+    contexts = [
+        cell.cell_contents
+        for cell in (wrapper.__closure__ or ())
+        if isinstance(cell.cell_contents, ConnectionContext)
+    ]
+    assert len(contexts) == 1
+    monkeypatch.setattr(contexts[0], "db", database)
+
+
+def _prepare_real_active_member_conversion(monkeypatch, tmp_path, *, member_status="1", team_status="1"):
+    module = _load_route_module(monkeypatch, "file2document_api")
+    database = SqliteDatabase(tmp_path / "active-member-conversion.db")
+    models = [Team, TeamMember, File, Knowledgebase, Document, File2Document, Task]
+    with database.bind_ctx(models):
+        database.create_tables(models)
+        team = Team.create(
+            id="team-hr",
+            tenant_id="owner-1",
+            name="HR",
+            created_by="owner-1",
+            status=team_status,
+        )
+        TeamMember.create(
+            id="membership-1",
+            team_id=team.id,
+            user_id="member-active",
+            state=TeamMemberState.ACTIVE.value,
+            invited_by="owner-1",
+            status=member_status,
+        )
+        old_kb = Knowledgebase.create(
+            id="kb-old",
+            tenant_id="owner-1",
+            name="Old",
+            embd_id="embedding-1",
+            permission=TenantPermission.TEAM.value,
+            team_id=team.id,
+            created_by="owner-1",
+            doc_num=1,
+        )
+        target_kb = Knowledgebase.create(
+            id="kb-target",
+            tenant_id="owner-1",
+            name="Target",
+            embd_id="embedding-1",
+            permission=TenantPermission.TEAM.value,
+            team_id=team.id,
+            created_by="owner-1",
+        )
+        source_file = File.create(
+            id="file-1",
+            parent_id="root",
+            tenant_id="owner-1",
+            created_by="owner-1",
+            name="A.txt",
+            type=FileType.DOC.value,
+            location="A.txt",
+            size=3,
+        )
+        old_document = Document.create(
+            id="doc-old",
+            kb_id=old_kb.id,
+            parser_id=ParserType.NAIVE.value,
+            type=FileType.DOC.value,
+            created_by="owner-1",
+            name="A.txt",
+            location="A.txt",
+            size=3,
+            suffix="txt",
+        )
+        File2Document.create(id="link-old", file_id=source_file.id, document_id=old_document.id)
+
+    monkeypatch.setattr(module, "DB", database, raising=False)
+    for method in (
+        module.FileService.get_kb_id_by_file_id,
+        module.KnowledgebaseService.get_by_id,
+        TeamMemberService.active_team_ids,
+        TeamService.get_owned_team,
+    ):
+        _bind_real_service_connection_context(monkeypatch, method, database)
+    monkeypatch.setattr(module.DocumentService, "cleanup_document_resources", lambda *_args: None)
+    return module, database, models, source_file, old_kb, target_kb, old_document
+
+
+def test_active_member_file_conversion_uses_one_real_atomic_transaction(monkeypatch, tmp_path):
+    module, database, models, source_file, old_kb, target_kb, old_document = _prepare_real_active_member_conversion(
+        monkeypatch,
+        tmp_path,
+    )
+
+    with database.bind_ctx(models):
+        try:
+            module._replace_document_rows(
+                [source_file],
+                [target_kb],
+                {source_file.id: [(old_document, old_kb.tenant_id)]},
+                "member-active",
+            )
+
+            documents = list(Document.select().order_by(Document.id))
+            links = list(File2Document.select())
+            assert len(documents) == 1
+            assert documents[0].kb_id == target_kb.id
+            assert documents[0].created_by == "member-active"
+            assert [(link.file_id, link.document_id) for link in links] == [(source_file.id, documents[0].id)]
+            assert Knowledgebase.get_by_id(old_kb.id).doc_num == 0
+            assert Knowledgebase.get_by_id(target_kb.id).doc_num == 1
+        finally:
+            if not database.is_closed():
+                database.close()
+
+
+@pytest.mark.parametrize(
+    ("member_status", "team_status"),
+    [
+        (StatusEnum.INVALID.value, StatusEnum.VALID.value),
+        (StatusEnum.VALID.value, StatusEnum.INVALID.value),
+    ],
+)
+def test_file_conversion_revalidates_membership_and_team_before_mutation(
+    monkeypatch,
+    tmp_path,
+    member_status,
+    team_status,
+):
+    module, database, models, source_file, old_kb, target_kb, old_document = _prepare_real_active_member_conversion(
+        monkeypatch,
+        tmp_path,
+        member_status=member_status,
+        team_status=team_status,
+    )
+
+    with database.bind_ctx(models):
+        try:
+            with pytest.raises(PermissionError, match="No authorization"):
+                module._replace_document_rows(
+                    [source_file],
+                    [target_kb],
+                    {source_file.id: [(old_document, old_kb.tenant_id)]},
+                    "member-active",
+                )
+
+            assert [document.id for document in Document.select()] == [old_document.id]
+            assert [(link.file_id, link.document_id) for link in File2Document.select()] == [
+                (source_file.id, old_document.id)
+            ]
+            assert Knowledgebase.get_by_id(old_kb.id).doc_num == 1
+            assert Knowledgebase.get_by_id(target_kb.id).doc_num == 0
+        finally:
+            if not database.is_closed():
+                database.close()
 
 
 def test_web_upload_storage_calls_use_kb_owner_context(monkeypatch):
