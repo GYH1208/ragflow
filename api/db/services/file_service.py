@@ -539,6 +539,36 @@ class FileService(CommonService):
                 cls.delete(folder)
 
     @classmethod
+    def remove_empty_managed_folders(
+        cls,
+        folder_ids: set[str],
+        kb_root_id: str,
+        tenant_id: str,
+    ) -> set[str]:
+        """Delete tracked empty folders while preserving every untracked folder."""
+        remaining = set(folder_ids)
+        made_progress = True
+        while made_progress:
+            made_progress = False
+            for folder_id in sorted(remaining):
+                if folder_id == kb_root_id:
+                    continue
+                found, folder = cls.get_by_id(folder_id)
+                if not found:
+                    continue
+                if folder.type != FileType.FOLDER.value:
+                    continue
+                folder_tenant_id = getattr(folder, "tenant_id", tenant_id)
+                if str(folder_tenant_id) != str(tenant_id):
+                    continue
+                if cls.query(parent_id=folder_id):
+                    continue
+                cls.delete(folder)
+                remaining.remove(folder_id)
+                made_progress = True
+        return remaining
+
+    @classmethod
     @DB.connection_context()
     def upload_document(
         self,
@@ -552,6 +582,7 @@ class FileService(CommonService):
         parent_folder_id: str | None = None,
         parser_config_override: dict | None = None,
         relative_paths: list[str] | None = None,
+        managed_folder_ids: set[str] | None = None,
     ):
         if str(owner_tenant_id) != str(kb.tenant_id):
             raise PermissionError("Knowledge base owner context does not match the requested tenant.")
@@ -682,6 +713,8 @@ class FileService(CommonService):
                     created_by=created_by,
                 )
                 files.append((doc, blob))
+                if managed_folder_ids is not None:
+                    managed_folder_ids.update(created_folder_ids)
             except Exception as e:
                 self.remove_created_empty_kb_folders(created_folder_ids)
                 err.append(file.filename + ": " + str(e))

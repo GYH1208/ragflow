@@ -118,6 +118,10 @@ def _make_task():
     }
 
 
+def test_svn_is_registered_as_fingerprint_connector():
+    assert sync_data_source.func_factory[sync_data_source.FileSource.SVN] is sync_data_source.SVN
+
+
 def _patch_common_dependencies(monkeypatch):
     monkeypatch.setattr(
         sync_data_source.DocumentService,
@@ -175,6 +179,35 @@ async def test_run_task_logic_skips_multiple_empty_sync_batches(monkeypatch):
     )
 
     await _FakeSync(iter(([], [],)))._run_task_logic(_make_task())
+
+
+@pytest.mark.asyncio
+@pytest.mark.p2
+async def test_sync_passes_connector_relative_path_to_upload(monkeypatch):
+    _patch_common_dependencies(monkeypatch)
+    captured = {}
+    doc = _make_fake_doc("policy")
+    doc.relative_path = "1、一级文件/制度/A.docx"
+
+    monkeypatch.setattr(
+        sync_data_source.KnowledgebaseService,
+        "get_by_id",
+        lambda *_args, **_kwargs: (True, types.SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        sync_data_source.SyncLogsService,
+        "duplicate_and_parse",
+        lambda *args, **_kwargs: captured.update(docs=args[1]) or ([], ["doc-id"]),
+    )
+    monkeypatch.setattr(
+        sync_data_source.SyncLogsService,
+        "increase_docs",
+        lambda *_args, **_kwargs: None,
+    )
+
+    await _FakeSync(iter(([doc],)))._run_task_logic(_make_task())
+
+    assert captured["docs"][0]["relative_path"] == "1、一级文件/制度/A.docx"
 
 
 @pytest.mark.asyncio

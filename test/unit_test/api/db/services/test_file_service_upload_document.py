@@ -135,6 +135,141 @@ def test_connector_upload_call_uses_owner_context_and_audit_keyword(monkeypatch)
     assert run_tenants == ["kb-owner"]
 
 
+def test_connector_upload_supplies_ordered_relative_paths(monkeypatch):
+    from api.db.services.connector_service import SyncLogsService
+
+    kb = SimpleNamespace(id="kb-1", tenant_id="kb-owner")
+    captured = {}
+
+    def upload_document(
+        _kb,
+        files,
+        owner_tenant_id,
+        *,
+        created_by,
+        src,
+        relative_paths=None,
+        managed_folder_ids=None,
+    ):
+        captured.update(
+            filenames=[file.filename for file in files],
+            relative_paths=relative_paths,
+            owner_tenant_id=owner_tenant_id,
+            created_by=created_by,
+            src=src,
+            managed_folder_ids=managed_folder_ids,
+        )
+        return [], []
+
+    monkeypatch.setattr(FileService, "upload_document", upload_document)
+
+    errors, document_ids = SyncLogsService.duplicate_and_parse(
+        kb,
+        [
+            {
+                "id": "doc-1",
+                "semantic_identifier": "A",
+                "extension": ".docx",
+                "relative_path": "1、一级文件/制度/A.docx",
+                "blob": b"first",
+            },
+            {
+                "id": "doc-2",
+                "semantic_identifier": "B.doc",
+                "extension": ".doc",
+                "relative_path": "2、二级文件/流程/B.doc",
+                "blob": b"second",
+            },
+        ],
+        "connector-owner",
+        "svn/source-1",
+        auto_parse=False,
+    )
+
+    assert errors == []
+    assert document_ids == []
+    assert captured["filenames"] == ["A.docx", "B.doc"]
+    assert captured["relative_paths"] == [
+        "1、一级文件/制度/A.docx",
+        "2、二级文件/流程/B.doc",
+    ]
+
+
+def test_svn_connector_parse_supplies_content_fingerprint(monkeypatch):
+    from api.db.services.connector_service import SyncLogsService
+
+    kb = SimpleNamespace(id="kb-1", tenant_id="kb-owner")
+    parse_calls = []
+
+    def upload_document(_kb, files, owner_tenant_id, *, created_by, src, **_kwargs):
+        assert owner_tenant_id == "kb-owner"
+        assert created_by == "connector-owner"
+        assert src == "svn/source-1"
+        return [], [({"id": files[0].id, "name": files[0].filename, "content_hash": files[0].fingerprint}, files[0].blob)]
+
+    monkeypatch.setattr(FileService, "upload_document", upload_document)
+    monkeypatch.setattr(
+        "api.db.services.connector_service.DocumentService.run",
+        lambda *args, **kwargs: parse_calls.append((args, kwargs)),
+    )
+
+    SyncLogsService.duplicate_and_parse(
+        kb,
+        [
+            {
+                "id": "doc-1",
+                "semantic_identifier": "A.docx",
+                "extension": ".docx",
+                "blob": b"document",
+                "fingerprint": "new-fingerprint",
+            }
+        ],
+        "connector-owner",
+        "svn/source-1",
+        auto_parse=True,
+    )
+
+    assert parse_calls[0][1] == {"content_version": "new-fingerprint"}
+
+
+def test_svn_connector_records_only_folders_created_by_upload(monkeypatch):
+    from api.db.services.connector_service import Connector2KbService, SyncLogsService
+
+    kb = SimpleNamespace(id="kb-1", tenant_id="kb-owner")
+    recorded = []
+
+    def upload_document(_kb, files, _owner_tenant_id, *, managed_folder_ids=None, **_kwargs):
+        managed_folder_ids.update({"new-parent", "new-child"})
+        return [], [({"id": files[0].id, "name": files[0].filename}, files[0].blob)]
+
+    monkeypatch.setattr(FileService, "upload_document", upload_document)
+    monkeypatch.setattr(
+        Connector2KbService,
+        "add_managed_folder_ids",
+        classmethod(lambda cls, connector_id, kb_id, folder_ids: recorded.append((connector_id, kb_id, folder_ids))),
+        raising=False,
+    )
+
+    SyncLogsService.duplicate_and_parse(
+        kb,
+        [
+            {
+                "id": "doc-1",
+                "connector_id": "connector-1",
+                "semantic_identifier": "A.docx",
+                "extension": ".docx",
+                "relative_path": "1、一级文件/制度/A.docx",
+                "blob": b"document",
+            }
+        ],
+        "connector-owner",
+        "svn/connector-1",
+        auto_parse=False,
+    )
+
+    assert recorded == [("connector-1", "kb-1", {"new-parent", "new-child"})]
+
+
 def test_connector_link_rejects_owner_mismatch_before_persisting(monkeypatch):
     from api.db.services.connector_service import Connector2KbService, ConnectorService, SyncLogsService
     from api.db.services.knowledgebase_service import KnowledgebaseService
@@ -403,6 +538,7 @@ def test_upload_document_places_relative_folders_under_explicit_parent(monkeypat
     monkeypatch.setattr(file_service_module, "thumbnail_img", lambda *_args: b"thumbnail")
     storage = _Storage()
     monkeypatch.setattr(file_service_module.settings, "STORAGE_IMPL", storage)
+    managed_folder_ids = set()
 
     upload_kwargs = {
         "relative_paths": [
@@ -410,6 +546,7 @@ def test_upload_document_places_relative_folders_under_explicit_parent(monkeypat
             "2、二级文件/表单/A.txt",
         ],
         "parent_folder_id": "current-folder",
+        "managed_folder_ids": managed_folder_ids,
     }
     supported_kwargs = {
         key: value
@@ -446,6 +583,7 @@ def test_upload_document_places_relative_folders_under_explicit_parent(monkeypat
     assert storage.calls
     assert {call[-1] for call in storage.calls} == {"tenant-1"}
     assert len([call for call in storage.calls if call[0] == "put"]) == 4
+    assert managed_folder_ids == {"folder-1", "folder-2", "folder-3"}
 
 
 @pytest.mark.p2
@@ -527,6 +665,44 @@ def test_failed_upload_removes_only_request_created_empty_folders(monkeypatch):
     assert uploaded == []
     assert err == ["A.txt: broken upload"]
     assert set(folders) == {"kb-folder"}
+
+
+@pytest.mark.p2
+def test_remove_empty_managed_folders_preserves_nonempty_and_untracked(monkeypatch):
+    folders = {
+        "kb-root": SimpleNamespace(id="kb-root", type="folder"),
+        "managed-empty": SimpleNamespace(id="managed-empty", type="folder"),
+        "managed-nonempty": SimpleNamespace(id="managed-nonempty", type="folder"),
+        "untracked-empty": SimpleNamespace(id="untracked-empty", type="folder"),
+    }
+    children = {"managed-nonempty": [SimpleNamespace(id="user-file", type="doc")]}
+
+    monkeypatch.setattr(
+        FileService,
+        "get_by_id",
+        classmethod(lambda cls, file_id: (file_id in folders, folders.get(file_id))),
+    )
+    monkeypatch.setattr(
+        FileService,
+        "query",
+        classmethod(lambda cls, **kwargs: children.get(kwargs.get("parent_id"), [])),
+    )
+    monkeypatch.setattr(
+        FileService,
+        "delete",
+        classmethod(lambda cls, folder: folders.pop(folder.id, None)),
+    )
+
+    remaining = FileService.remove_empty_managed_folders(
+        {"managed-empty", "managed-nonempty"},
+        "kb-root",
+        "tenant-1",
+    )
+
+    assert "managed-empty" not in folders
+    assert "managed-nonempty" in folders
+    assert "untracked-empty" in folders
+    assert remaining == {"managed-nonempty"}
 
 
 @pytest.mark.p2

@@ -355,7 +355,34 @@ class TaskService(CommonService):
         return cls.model.delete().where(cls.model.doc_id.in_(doc_ids)).execute()
 
 
-def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
+def build_document_task_digest(
+    chunking_config: dict,
+    task: dict,
+    *,
+    content_version: str | None = None,
+) -> str:
+    """Build a parse-task digest, optionally scoped to a content version."""
+    hasher = xxhash.xxh64()
+    for field in sorted(chunking_config.keys()):
+        if field == "parser_config":
+            for key in ["raptor", "graphrag"]:
+                if key in chunking_config[field]:
+                    del chunking_config[field][key]
+        hasher.update(str(chunking_config[field]).encode("utf-8"))
+    if content_version is not None:
+        hasher.update(content_version.encode("utf-8"))
+    for field in ["doc_id", "from_page", "to_page"]:
+        hasher.update(str(task.get(field, "")).encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def queue_tasks(
+    doc: dict,
+    bucket: str,
+    name: str,
+    priority: int,
+    content_version: str | None = None,
+):
     """Create and queue document processing tasks.
 
     This function creates processing tasks for a document based on its type and configuration.
@@ -425,17 +452,11 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
 
     chunking_config = DocumentService.get_chunking_config(doc["id"])
     for task in parse_task_array:
-        hasher = xxhash.xxh64()
-        for field in sorted(chunking_config.keys()):
-            if field == "parser_config":
-                for k in ["raptor", "graphrag"]:
-                    if k in chunking_config[field]:
-                        del chunking_config[field][k]
-            hasher.update(str(chunking_config[field]).encode("utf-8"))
-        for field in ["doc_id", "from_page", "to_page"]:
-            hasher.update(str(task.get(field, "")).encode("utf-8"))
-        task_digest = hasher.hexdigest()
-        task["digest"] = task_digest
+        task["digest"] = build_document_task_digest(
+            chunking_config,
+            task,
+            content_version=content_version,
+        )
         task["progress"] = 0.0
         task["priority"] = priority
 

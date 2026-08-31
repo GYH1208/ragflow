@@ -4,6 +4,7 @@ import { useSetModalState } from '@/hooks/common-hooks';
 import { useGetPaginationWithRouter } from '@/hooks/logic-hooks';
 import dataSourceService, {
   dataSourceRebuild,
+  dataSourceSync,
   dataSourceUpdate,
   deleteDataSource,
   featchDataSourceDetail,
@@ -257,6 +258,22 @@ export const useDataSourceRebuild = () => {
     [id],
   );
   return { handleRebuild };
+};
+
+export const useDataSourceSync = () => {
+  const { id } = useParams();
+  const handleSync = useCallback(
+    async (param: { source_id: string }) => {
+      const { data } = await dataSourceSync(param.source_id, {
+        kb_id: id as string,
+      });
+      if (data.code === 0) {
+        message.success(t('knowledgeConfiguration.syncScheduled'));
+      }
+    },
+    [id],
+  );
+  return { handleSync };
 };
 
 export const useTestDataSource = () => {

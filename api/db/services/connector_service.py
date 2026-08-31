@@ -165,11 +165,15 @@ class ConnectorService(CommonService):
         tenant_id: str,
         file_list,
         delete_batch_size: int = 100,
+        snapshot_revision: str | None = None,
+        confirmation_scans: int = 1,
     ):
         from api.db.services.file_service import FileService
 
-        if not Connector2KbService.query(connector_id=connector_id, kb_id=kb_id):
+        links = Connector2KbService.query(connector_id=connector_id, kb_id=kb_id)
+        if not links:
             return 0, []
+        link = links[0]
 
         e, conn = cls.get_by_id(connector_id)
         if not e:
@@ -190,28 +194,73 @@ class ConnectorService(CommonService):
         stale_doc_ids = [
             doc["id"] for doc in existing_docs if doc["id"] not in retain_doc_ids
         ]
-        if not stale_doc_ids:
+
+        state = dict(getattr(link, "sync_state", None) or {})
+        previous_missing_counts = dict(state.get("missing_counts") or {})
+        missing_counts = {
+            doc_id: int(previous_missing_counts.get(doc_id, 0)) + 1
+            for doc_id in stale_doc_ids
+        }
+        confirmation_scans = max(1, int(confirmation_scans))
+        confirmed_stale_ids = [
+            doc_id
+            for doc_id in stale_doc_ids
+            if missing_counts[doc_id] >= confirmation_scans
+        ]
+
+        state["missing_counts"] = missing_counts
+        if snapshot_revision is not None:
+            state["last_successful_revision"] = str(snapshot_revision)
+
+        def persist_sync_state():
+            link_id = getattr(link, "id", None)
+            if link_id:
+                Connector2KbService.update_by_id(link_id, {"sync_state": state})
+
+        if not confirmed_stale_ids:
+            persist_sync_state()
             return 0, []
 
-        stale_doc_id_set = set(stale_doc_ids)
         errors = []
-        for offset in range(0, len(stale_doc_ids), delete_batch_size):
+        for offset in range(0, len(confirmed_stale_ids), delete_batch_size):
             err = FileService.delete_docs(
-                stale_doc_ids[offset : offset + delete_batch_size],
+                confirmed_stale_ids[offset : offset + delete_batch_size],
                 kb.tenant_id,
             )
             if err:
                 errors.append(err)
 
+        confirmed_stale_id_set = set(confirmed_stale_ids)
         remaining_doc_ids = {
             doc["id"]
             for doc in DocumentService.list_doc_headers_by_kb_and_source_type(
                 kb_id,
                 source_type,
             )
-            if doc["id"] in stale_doc_id_set
+            if doc["id"] in confirmed_stale_id_set
         }
-        removed_count = len(stale_doc_id_set) - len(remaining_doc_ids)
+        removed_doc_ids = confirmed_stale_id_set - remaining_doc_ids
+        for doc_id in removed_doc_ids:
+            missing_counts.pop(doc_id, None)
+        state["missing_counts"] = missing_counts
+
+        managed_folder_ids = set(state.get("managed_folder_ids") or [])
+        if managed_folder_ids:
+            kb_container = FileService.get_kb_folder(kb.tenant_id)
+            kb_root = FileService.new_a_file_from_kb(
+                kb.tenant_id,
+                kb.name,
+                kb_container["id"],
+            )
+            remaining_folder_ids = FileService.remove_empty_managed_folders(
+                managed_folder_ids,
+                kb_root["id"],
+                kb.tenant_id,
+            )
+            state["managed_folder_ids"] = sorted(remaining_folder_ids)
+        persist_sync_state()
+
+        removed_count = len(removed_doc_ids)
         SyncLogsService.increase_removed_docs(
             task_id,
             removed_count,
@@ -453,7 +502,27 @@ class SyncLogsService(CommonService):
                 return self.blob
 
         errs = []
-        files = [FileObj(id=d["id"], filename=d["semantic_identifier"]+(f"{d['extension']}" if d["semantic_identifier"][::-1].find(d['extension'][::-1])<0 else ""), blob=d["blob"], fingerprint=d.get("fingerprint")) for d in docs]
+        files = []
+        relative_paths = []
+        for d in docs:
+            filename = d["semantic_identifier"] + (
+                f"{d['extension']}" if d["semantic_identifier"][::-1].find(d["extension"][::-1]) < 0 else ""
+            )
+            files.append(
+                FileObj(
+                    id=d["id"],
+                    filename=filename,
+                    blob=d["blob"],
+                    fingerprint=d.get("fingerprint"),
+                )
+            )
+            relative_paths.append(d.get("relative_path"))
+
+        upload_kwargs = {"relative_paths": relative_paths} if all(relative_paths) else {}
+        managed_folder_ids = None
+        if src.startswith("svn/"):
+            managed_folder_ids = set()
+            upload_kwargs["managed_folder_ids"] = managed_folder_ids
         doc_ids = []
         err, doc_blob_pairs = FileService.upload_document(
             kb,
@@ -461,8 +530,15 @@ class SyncLogsService(CommonService):
             kb.tenant_id,
             created_by=tenant_id,
             src=src,
+            **upload_kwargs,
         )
         errs.extend(err)
+        if managed_folder_ids:
+            Connector2KbService.add_managed_folder_ids(
+                docs[0]["connector_id"],
+                kb.id,
+                managed_folder_ids,
+            )
 
         # Create a mapping from filename to metadata for later use
         metadata_map = {}
@@ -481,7 +557,15 @@ class SyncLogsService(CommonService):
             
             if not auto_parse or auto_parse == "0":
                 continue
-            DocumentService.run(kb.tenant_id, doc, kb_table_num_map)
+            if src.startswith("svn/"):
+                DocumentService.run(
+                    kb.tenant_id,
+                    doc,
+                    kb_table_num_map,
+                    content_version=doc.get("content_hash"),
+                )
+            else:
+                DocumentService.run(kb.tenant_id, doc, kb_table_num_map)
 
         return errs, doc_ids
 
@@ -498,6 +582,29 @@ class SyncLogsService(CommonService):
 
 class Connector2KbService(CommonService):
     model = Connector2Kb
+
+    @classmethod
+    @DB.connection_context()
+    def add_managed_folder_ids(cls, connector_id: str, kb_id: str, folder_ids: set[str]):
+        if not folder_ids:
+            return
+        with DB.atomic():
+            link = (
+                cls.model.select()
+                .where(
+                    cls.model.connector_id == connector_id,
+                    cls.model.kb_id == kb_id,
+                )
+                .for_update()
+                .first()
+            )
+            if link is None:
+                return
+            state = dict(link.sync_state or {})
+            managed_ids = set(state.get("managed_folder_ids") or [])
+            managed_ids.update(folder_ids)
+            state["managed_folder_ids"] = sorted(managed_ids)
+            cls.update_by_id(link.id, {"sync_state": state})
 
     @classmethod
     def link_connectors(cls, kb_id:str, connectors: list[dict], tenant_id:str):

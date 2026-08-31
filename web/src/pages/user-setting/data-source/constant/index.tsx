@@ -2,7 +2,7 @@ import { FormFieldConfig, FormFieldType } from '@/components/dynamic-form';
 import { IconFontFill } from '@/components/icon-font';
 import SvgIcon from '@/components/svg-icon';
 import { t, TFunction } from 'i18next';
-import { Mail, Rss } from 'lucide-react';
+import { FolderSync, Mail, Rss } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import BoxTokenField from '../component/box-token-field';
@@ -14,6 +14,7 @@ import { confluenceConstant } from './confluence-constant';
 import { jiraConstant } from './jira-constant';
 import { S3Constant } from './s3-constant';
 import { seafileConstant } from './seafile-constant';
+import { svnConstant } from './svn-constant';
 
 export enum DataSourceKey {
   CONFLUENCE = 'confluence',
@@ -50,6 +51,7 @@ export enum DataSourceKey {
   TEAMS = 'teams',
   SLACK = 'slack',
   SHAREPOINT = 'sharepoint',
+  SVN = 'svn',
 }
 
 type DataSourceFeatureVisibility = {
@@ -160,6 +162,9 @@ export const DataSourceFeatureVisibilityMap: Partial<
   [DataSourceKey.POSTGRESQL]: {
     syncDeletedFiles: true,
   },
+  [DataSourceKey.SVN]: {
+    syncDeletedFiles: true,
+  },
 };
 
 const isDataSourceFeatureVisible = (
@@ -179,6 +184,11 @@ export const generateDataSourceInfo = (t: TFunction) => {
       name: 'RSS',
       description: t(`setting.${DataSourceKey.RSS}Description`),
       icon: <Rss className="text-text-primary" size={22} />,
+    },
+    [DataSourceKey.SVN]: {
+      name: 'SVN',
+      description: t('setting.svnDescription'),
+      icon: <FolderSync className="text-text-primary" size={22} />,
     },
     [DataSourceKey.GOOGLE_CLOUD_STORAGE]: {
       name: 'Google Cloud Storage',
@@ -439,6 +449,7 @@ export const getCommonExtraDefaultValues = () => ({
 });
 
 export const DataSourceFormFields = {
+  [DataSourceKey.SVN]: svnConstant(t),
   [DataSourceKey.ONEDRIVE]: [
     {
       label: 'Tenant ID',
@@ -1766,6 +1777,26 @@ export const DataSourceFormFields = {
 };
 
 export const DataSourceFormDefaultValues = {
+  [DataSourceKey.SVN]: {
+    name: '',
+    source: DataSourceKey.SVN,
+    refresh_freq: 60,
+    prune_freq: 60,
+    config: {
+      repository_url: '',
+      base_path: '00_公用文件/00_体系文件',
+      include_roots: [
+        '1、一级文件',
+        '2、二级文件',
+        '3、三级文件',
+        '4、四级文件',
+      ],
+      exclude_name_contains: ['旧版'],
+      batch_size: 8,
+      sync_deleted_files: true,
+      credentials: { username: '', password: '' },
+    },
+  },
   [DataSourceKey.RSS]: {
     name: '',
     source: DataSourceKey.RSS,

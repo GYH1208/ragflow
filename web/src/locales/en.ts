@@ -681,6 +681,10 @@ Example: A 1 KB message with 1024-dim embedding uses ~9 KB. The 5 MB default lim
       autoParse: 'Auto parse',
       rebuildTip:
         'Re-downloads files from the linked data source and parses them again.',
+      syncNow: 'Sync now',
+      syncNowTip:
+        'Fetch new or revised SVN files now without deleting or rebuilding existing documents.',
+      syncScheduled: 'The sync task has been scheduled.',
       baseInfo: 'Basic',
       globalIndex: 'Global index',
       dataSource: 'Data source',
@@ -1224,6 +1228,15 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
       configureModelTitle: 'Configure model',
       connectorNameTip: 'A descriptive name for the connector',
       syncDeletedFiles: 'Sync deleted files',
+      svnDescription:
+        'Connect to SVN in read-only mode and sync committed controlled documents with their folder hierarchy.',
+      svnRepositoryUrl: 'SVN repository URL',
+      svnBasePath: 'Controlled-document base path',
+      svnIncludeRoots: 'Included roots',
+      svnExcludeTerms: 'Excluded name terms',
+      svnUsername: 'Read-only username',
+      svnPassword: 'Password',
+      svnBatchSize: 'Download batch size',
       confluenceIsCloudTip:
         'Check if this is a Confluence Cloud instance, uncheck for Confluence Server/Data Center',
       confluenceWikiBaseUrlTip:

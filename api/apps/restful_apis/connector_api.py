@@ -25,10 +25,10 @@ from quart import request, make_response
 from google_auth_oauthlib.flow import Flow
 
 from api.db import InputType
-from api.db.services.connector_service import ConnectorService, SyncLogsService
+from api.db.services.connector_service import Connector2KbService, ConnectorService, SyncLogsService
 from api.utils.api_utils import get_data_error_result, get_json_result, get_request_json, validate_request
 from api.utils.pagination_utils import validate_rest_api_page_size
-from common.constants import RetCode, TaskStatus
+from common.constants import ConnectorTaskType, RetCode, TaskStatus
 from common.data_source.config import GOOGLE_DRIVE_WEB_OAUTH_REDIRECT_URI, GMAIL_WEB_OAUTH_REDIRECT_URI, BOX_WEB_OAUTH_REDIRECT_URI, DocumentSource
 from common.data_source.google_util.constant import WEB_OAUTH_POPUP_TEMPLATE, GOOGLE_SCOPES
 from common.misc_utils import get_uuid
@@ -166,6 +166,25 @@ async def rebuild(connector_id):
     return get_json_result(data=True)
 
 
+@manager.route("/connectors/<connector_id>/sync", methods=["POST"])  # noqa: F821
+@login_required
+async def sync_connector(connector_id):
+    """Schedule a non-destructive sync for one linked knowledge base."""
+    if not ConnectorService.accessible(connector_id, current_user.id):
+        return _connector_auth_error(connector_id, current_user.id)
+
+    req = await get_request_json()
+    kb_id = req.get("kb_id") if isinstance(req, dict) else None
+    if not kb_id:
+        return get_json_result(code=RetCode.ARGUMENT_ERROR, message="required argument is missing: kb_id")
+    if not Connector2KbService.query(connector_id=connector_id, kb_id=kb_id):
+        return get_json_result(code=RetCode.ARGUMENT_ERROR, message="Connector is not linked to this dataset.", data=False)
+
+    SyncLogsService.schedule(connector_id, kb_id, task_type=ConnectorTaskType.SYNC)
+    SyncLogsService.schedule(connector_id, kb_id, task_type=ConnectorTaskType.PRUNE)
+    return get_json_result(data=True)
+
+
 @manager.route("/connectors/<connector_id>", methods=["DELETE"])  # noqa: F821
 @login_required
 def rm_connector(connector_id):
@@ -189,44 +208,50 @@ async def test_connector(connector_id):
     if not ConnectorService.accessible(connector_id, current_user.id):
         return _connector_auth_error(connector_id, current_user.id)
 
-    from common.data_source.rest_api_connector import RestAPIConnector
     from common.data_source.exceptions import ConnectorMissingCredentialError, ConnectorValidationError
 
     ok, conn = ConnectorService.get_by_id(connector_id)
     if not ok:
         return get_data_error_result(message="Can't find this Connector!")
 
-    if conn.source != DocumentSource.REST_API:
+    if conn.source not in {DocumentSource.REST_API, DocumentSource.SVN}:
         return get_json_result(
             code=RetCode.ARGUMENT_ERROR,
-            message="Test endpoint currently supports only REST API connectors.",
+            message="Test endpoint currently supports REST API and SVN connectors.",
             data=False,
         )
 
     config = conn.config or {}
-    credentials = config.get("credentials") or {}
-
     try:
-        await asyncio.to_thread(
-            RestAPIConnector.validate_config,
-            config=config,
-            credentials=credentials,
-        )
+        if conn.source == DocumentSource.SVN:
+            from common.data_source.svn_connector import SVNConnector
+
+            result = await asyncio.to_thread(SVNConnector(config).validate_connector_settings)
+        else:
+            from common.data_source.rest_api_connector import RestAPIConnector
+
+            credentials = config.get("credentials") or {}
+            await asyncio.to_thread(
+                RestAPIConnector.validate_config,
+                config=config,
+                credentials=credentials,
+            )
+            result = True
     except (ConnectorValidationError, ConnectorMissingCredentialError) as exc:
         return get_json_result(
             code=RetCode.DATA_ERROR,
             message=str(exc),
             data=False,
         )
-    except Exception as exc:
-        logging.exception("REST API connector validation failed: %s", exc)
+    except Exception:
+        LOGGER.exception("Connector validation failed.")
         return get_json_result(
             code=RetCode.SERVER_ERROR,
-            message="REST API connector validation failed, please check logs.",
+            message="Connector validation failed, please check logs.",
             data=False,
         )
 
-    return get_json_result(data=True)
+    return get_json_result(data=result)
 
 
 WEB_FLOW_TTL_SECS = 15 * 60

@@ -221,8 +221,18 @@ def _load_connector_app(monkeypatch):
         def list_sync_tasks(*_args, **_kwargs):
             return [], 0
 
+        @staticmethod
+        def schedule(*_args, **_kwargs):
+            return True
+
+    class _StubConnector2KbService:
+        @staticmethod
+        def query(**_kwargs):
+            return []
+
     connector_service_mod.ConnectorService = _StubConnectorService
     connector_service_mod.SyncLogsService = _StubSyncLogsService
+    connector_service_mod.Connector2KbService = _StubConnector2KbService
     monkeypatch.setitem(sys.modules, "api.db.services.connector_service", connector_service_mod)
 
     api_utils_mod = ModuleType("api.utils.api_utils")
@@ -247,6 +257,7 @@ def _load_connector_app(monkeypatch):
     constants_mod = ModuleType("common.constants")
     constants_mod.RetCode = SimpleNamespace(
         ARGUMENT_ERROR=101,
+        DATA_ERROR=400,
         SERVER_ERROR=500,
         RUNNING=102,
         PERMISSION_ERROR=403,
@@ -257,14 +268,36 @@ def _load_connector_app(monkeypatch):
         SCHEDULE="schedule",
         CANCEL="cancel",
     )
+    constants_mod.ConnectorTaskType = SimpleNamespace(SYNC="sync", PRUNE="prune")
     monkeypatch.setitem(sys.modules, "common.constants", constants_mod)
+
+    data_source_pkg = ModuleType("common.data_source")
+    data_source_pkg.__path__ = [str(repo_root / "common" / "data_source")]
+    monkeypatch.setitem(sys.modules, "common.data_source", data_source_pkg)
 
     config_mod = ModuleType("common.data_source.config")
     config_mod.GOOGLE_DRIVE_WEB_OAUTH_REDIRECT_URI = "https://example.com/drive"
     config_mod.GMAIL_WEB_OAUTH_REDIRECT_URI = "https://example.com/gmail"
     config_mod.BOX_WEB_OAUTH_REDIRECT_URI = "https://example.com/box"
-    config_mod.DocumentSource = SimpleNamespace(GMAIL="gmail", GOOGLE_DRIVE="google-drive")
+    config_mod.DocumentSource = SimpleNamespace(
+        GMAIL="gmail",
+        GOOGLE_DRIVE="google-drive",
+        REST_API="rest_api",
+        SVN="svn",
+    )
     monkeypatch.setitem(sys.modules, "common.data_source.config", config_mod)
+
+    exceptions_mod = ModuleType("common.data_source.exceptions")
+
+    class _ConnectorValidationError(Exception):
+        pass
+
+    class _ConnectorMissingCredentialError(Exception):
+        pass
+
+    exceptions_mod.ConnectorValidationError = _ConnectorValidationError
+    exceptions_mod.ConnectorMissingCredentialError = _ConnectorMissingCredentialError
+    monkeypatch.setitem(sys.modules, "common.data_source.exceptions", exceptions_mod)
 
     google_constants_mod = ModuleType("common.data_source.google_util.constant")
     google_constants_mod.WEB_OAUTH_POPUP_TEMPLATE = (
@@ -280,6 +313,18 @@ def _load_connector_app(monkeypatch):
     misc_mod = ModuleType("common.misc_utils")
     misc_mod.get_uuid = lambda: "uuid-from-helper"
     monkeypatch.setitem(sys.modules, "common.misc_utils", misc_mod)
+
+    svn_connector_mod = ModuleType("common.data_source.svn_connector")
+
+    class _StubSVNConnector:
+        def __init__(self, config):
+            self.config = config
+
+        def validate_connector_settings(self):
+            return {"repository_uuid": "uuid-1", "revision": "72089", "roots": 4, "documents": 7}
+
+    svn_connector_mod.SVNConnector = _StubSVNConnector
+    monkeypatch.setitem(sys.modules, "common.data_source.svn_connector", svn_connector_mod)
 
     rag_pkg = ModuleType("rag")
     rag_pkg.__path__ = [str(repo_root / "rag")]
@@ -455,6 +500,51 @@ def test_connector_by_id_routes_reject_cross_tenant_access(monkeypatch):
     assert all(res["message"] == "No authorization." for res in responses)
     assert all(res["data"] is False for res in responses)
     assert touched == []
+
+
+@pytest.mark.p2
+def test_svn_connection_test_returns_snapshot_without_credentials(monkeypatch):
+    module = _load_connector_app(monkeypatch)
+    connector = SimpleNamespace(
+        id="svn-1",
+        source="svn",
+        config={"credentials": {"username": "reader", "password": "top-secret"}},
+    )
+    monkeypatch.setattr(module.ConnectorService, "get_by_id", lambda _cid: (True, connector))
+
+    response = _run(module.test_connector("svn-1"))
+
+    assert response["code"] == 0
+    assert response["data"] == {
+        "repository_uuid": "uuid-1",
+        "revision": "72089",
+        "roots": 4,
+        "documents": 7,
+    }
+    assert "top-secret" not in json.dumps(response)
+
+
+@pytest.mark.p2
+def test_manual_sync_schedules_sync_and_prune_without_rebuild(monkeypatch):
+    module = _load_connector_app(monkeypatch)
+    scheduled = []
+    monkeypatch.setattr(module, "get_request_json", lambda: _AwaitableValue({"kb_id": "kb-1"}))
+    monkeypatch.setattr(module.Connector2KbService, "query", lambda **_kwargs: [SimpleNamespace()])
+    monkeypatch.setattr(
+        module.SyncLogsService,
+        "schedule",
+        lambda *args, **kwargs: scheduled.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        module.ConnectorService,
+        "rebuild",
+        lambda *_args: pytest.fail("manual sync must not rebuild or delete documents"),
+    )
+
+    response = _run(module.sync_connector("svn-1"))
+
+    assert response["code"] == 0
+    assert [call[1]["task_type"] for call in scheduled] == ["sync", "prune"]
 
 
 @pytest.mark.p2

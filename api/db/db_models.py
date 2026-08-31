@@ -1281,6 +1281,7 @@ class Connector2Kb(DataBaseModel):
     connector_id = CharField(max_length=32, null=False, index=True)
     kb_id = CharField(max_length=32, null=False, index=True)
     auto_parse = CharField(max_length=1, null=False, default="1", index=False)
+    sync_state = JSONField(null=False, default=dict)
 
     class Meta:
         db_table = "connector2kb"
@@ -1792,6 +1793,7 @@ def migrate_db():
     alter_db_column_type(migrator, "tenant_llm", "api_key", TextField(null=True, help_text="API KEY"))
     alter_db_add_column(migrator, "tenant_llm", "status", CharField(max_length=1, null=False, help_text="is it validate(0: wasted, 1: validate)", default="1", index=True))
     alter_db_add_column(migrator, "connector2kb", "auto_parse", CharField(max_length=1, null=False, default="1", index=False))
+    alter_db_add_column(migrator, "connector2kb", "sync_state", JSONField(null=False, default=dict))
     alter_db_add_column(migrator, "llm_factories", "rank", IntegerField(default=0, index=False))
     alter_db_add_column(migrator, "api_4_conversation", "name", CharField(max_length=255, null=True, help_text="conversation name", index=False))
     alter_db_add_column(migrator, "api_4_conversation", "exp_user_id", CharField(max_length=255, null=True, help_text="exp_user_id", index=True))
