@@ -120,7 +120,12 @@ class SVNConnector:
         if not _is_safe_config_path(raw_base_path) or any(not _is_safe_config_path(root) for root in raw_include_roots):
             raise ConnectorValidationError("SVN configured paths must be safe relative paths.")
         include_roots = [root.rstrip("/") for root in raw_include_roots]
-        if len(include_roots) != len(APPROVED_INCLUDE_ROOTS) or set(include_roots) != set(APPROVED_INCLUDE_ROOTS):
+        include_root_set = set(include_roots)
+        if (
+            not include_roots
+            or len(include_root_set) != len(include_roots)
+            or not include_root_set.issubset(APPROVED_INCLUDE_ROOTS)
+        ):
             raise ConnectorValidationError("SVN include roots must match the approved hierarchy roots.")
 
         self.repository_url = repository_url

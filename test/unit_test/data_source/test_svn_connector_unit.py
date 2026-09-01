@@ -196,6 +196,16 @@ def test_connector_rejects_roots_outside_the_approved_four():
         svn_connector.SVNConnector(config, runner=_UnexpectedRunner())
 
 
+def test_connector_accepts_non_empty_subset_of_approved_roots():
+    svn_connector = _load_svn_module()
+    config = _config()
+    config["include_roots"] = ["1、一级文件", "2、二级文件"]
+
+    connector = svn_connector.SVNConnector(config, runner=_UnexpectedRunner())
+
+    assert connector.include_roots == ["1、一级文件", "2、二级文件"]
+
+
 @pytest.mark.parametrize(
     ("field", "unsafe_value"),
     [
