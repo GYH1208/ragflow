@@ -83,7 +83,7 @@ class _DummyUploadFile:
 
 
 def _unwrapped_upload_document():
-    return FileService.upload_document.__func__.__wrapped__
+    return inspect.unwrap(FileService.upload_document.__func__)
 
 
 def _mock_folder_parent_lock(monkeypatch, folders):
@@ -95,6 +95,12 @@ def _mock_folder_parent_lock(monkeypatch, folders):
         yield parent
 
     monkeypatch.setattr(FileService, "_locked_kb_folder_parent", classmethod(locked_parent))
+
+
+def test_upload_document_does_not_hold_connection_across_nested_folder_transactions():
+    upload_function = FileService.upload_document.__func__
+
+    assert not hasattr(upload_function, "__wrapped__")
 
 
 def test_connector_upload_call_uses_owner_context_and_audit_keyword(monkeypatch):

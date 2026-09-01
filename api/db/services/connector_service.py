@@ -304,11 +304,7 @@ class SyncLogsService(CommonService):
         if connector_id:
             query = query.where(cls.model.connector_id == connector_id)
         else:
-            database_type = os.getenv("DB_TYPE", "mysql")
-            if "postgres" in database_type.lower():
-                expr = SQL(f"NOW() AT TIME ZONE '{TIMEZONE}' - make_interval(mins => t2.refresh_freq)")
-            else:
-                expr = SQL("NOW() - INTERVAL `t2`.`refresh_freq` MINUTE")
+            expr = cls._due_task_cutoff_sql("refresh_freq")
             query = query.where(
                 Connector.input_type == InputType.POLL,
                 Connector.status == TaskStatus.SCHEDULE,
@@ -343,6 +339,17 @@ class SyncLogsService(CommonService):
             if bool((task.get("config") or {}).get("sync_deleted_files"))
             and int(task.get("prune_freq") or 0) > 0
         ]
+
+    @classmethod
+    def _due_task_cutoff_sql(cls, freq_field: str):
+        if freq_field not in {"refresh_freq", "prune_freq"}:
+            raise ValueError(f"Unsupported connector frequency field: {freq_field}")
+        database_type = os.getenv("DB_TYPE", "mysql")
+        if "postgres" in database_type.lower():
+            return SQL(
+                f"NOW() AT TIME ZONE '{TIMEZONE}' - make_interval(mins => t2.{freq_field})"
+            )
+        return SQL(f"UTC_TIMESTAMP() - INTERVAL `t2`.`{freq_field}` MINUTE")
 
     @classmethod
     def _list_due_tasks_for_freq(cls, task_type: str, freq_field: str) -> List[dict]:
@@ -386,13 +393,7 @@ class SyncLogsService(CommonService):
             cls.model.task_type == task_type,
         )
 
-        database_type = os.getenv("DB_TYPE", "mysql")
-        if "postgres" in database_type.lower():
-            expr = SQL(
-                f"NOW() AT TIME ZONE '{TIMEZONE}' - make_interval(mins => t2.{freq_field})"
-            )
-        else:
-            expr = SQL(f"NOW() - INTERVAL `t2`.`{freq_field}` MINUTE")
+        expr = cls._due_task_cutoff_sql(freq_field)
         query = query.where(cls.model.update_date < expr)
 
         return list(query.distinct().order_by(cls.model.update_time.desc()).dicts())

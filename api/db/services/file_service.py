@@ -569,7 +569,6 @@ class FileService(CommonService):
         return remaining
 
     @classmethod
-    @DB.connection_context()
     def upload_document(
         self,
         kb,

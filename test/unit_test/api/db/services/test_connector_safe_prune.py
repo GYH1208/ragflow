@@ -41,6 +41,17 @@ def _install_optional_dependency_stubs():
 _install_optional_dependency_stubs()
 
 
+@pytest.mark.parametrize("freq_field", ["refresh_freq", "prune_freq"])
+def test_mysql_due_task_cutoff_uses_utc_clock(monkeypatch, freq_field):
+    from api.db.services.connector_service import SyncLogsService
+
+    monkeypatch.setenv("DB_TYPE", "mysql")
+
+    cutoff = SyncLogsService._due_task_cutoff_sql(freq_field)
+
+    assert cutoff.sql == f"UTC_TIMESTAMP() - INTERVAL `t2`.`{freq_field}` MINUTE"
+
+
 @pytest.fixture
 def prune_fixture(monkeypatch):
     from api.db.services.connector_service import Connector2KbService, ConnectorService, SyncLogsService
