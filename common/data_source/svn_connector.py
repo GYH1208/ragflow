@@ -1,10 +1,12 @@
 """Read-only SVN connector primitives."""
 
+import csv
+import io
 import subprocess
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -22,6 +24,7 @@ APPROVED_INCLUDE_ROOTS = (
     "3、三级文件",
     "4、四级文件",
 )
+SVN_FILE_INDEX_NAME = "SVN文件索引.csv"
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,8 @@ def select_formal_documents(
         if not path.parts or path.parts[0] not in include_roots:
             continue
         if any(term and term in part for part in path.parts for term in excluded_terms):
+            continue
+        if path.name.startswith("~$"):
             continue
         if path.suffix.lower() not in {".doc", ".docx", ".pdf"}:
             continue
@@ -121,14 +126,12 @@ class SVNConnector:
             raise ConnectorValidationError("SVN configured paths must be safe relative paths.")
         include_roots = [root.rstrip("/") for root in raw_include_roots]
         include_root_set = set(include_roots)
-        if (
-            not include_roots
-            or len(include_root_set) != len(include_roots)
-            or not include_root_set.issubset(APPROVED_INCLUDE_ROOTS)
-        ):
+        if not include_roots or len(include_root_set) != len(include_roots) or not include_root_set.issubset(APPROVED_INCLUDE_ROOTS):
             raise ConnectorValidationError("SVN include roots must match the approved hierarchy roots.")
 
+        file_url_base = str(config.get("file_url_base") or "").strip().rstrip("/")
         self.repository_url = repository_url
+        self.file_url_base = file_url_base or repository_url
         self.base_path = raw_base_path.rstrip("/")
         self.include_roots = include_roots
         self.excluded_terms = tuple(str(term) for term in config.get("exclude_name_contains") or [])
@@ -139,14 +142,20 @@ class SVNConnector:
             raise ConnectorMissingCredentialError("SVN")
         self.timeout = int(config.get("timeout") or 60)
         self.batch_size = max(1, int(config.get("batch_size") or 8))
+        self.generate_file_index = config.get("generate_file_index") is True
         self.runner = runner or SVNCommandRunner()
         self.repository_uuid: str | None = None
         self.snapshot_revision: str | None = None
         self._listing_cache: dict[str, SVNEntry] = {}
+        self._generated_documents: dict[str, Document] = {}
 
     def _url_for(self, *segments: str) -> str:
         suffix = "/".join(segment.strip("/") for segment in segments if segment)
         return f"{self.repository_url}/{suffix}" if suffix else self.repository_url
+
+    def _file_url_for(self, *segments: str) -> str:
+        suffix = "/".join(segment.strip("/") for segment in segments if segment)
+        return f"{self.file_url_base}/{suffix}" if suffix else self.file_url_base
 
     def _run(self, args: list[str]) -> bytes:
         return self.runner.run(
@@ -204,6 +213,7 @@ class SVNConnector:
         self.repository_uuid = repository_uuid
         self.snapshot_revision = revision
         self._listing_cache = {}
+        self._generated_documents = {}
 
         entries: list[SVNEntry] = []
         for include_root in self.include_roots:
@@ -230,7 +240,37 @@ class SVNConnector:
             self._listing_cache[key] = entry
             yield KeyRecord(key=key, fingerprint=fingerprint)
 
+        if self.generate_file_index:
+            output = io.StringIO(newline="")
+            writer = csv.writer(output)
+            writer.writerow(["文件名", "SVN完整路径"])
+            for entry in selected:
+                writer.writerow(
+                    [
+                        PurePosixPath(entry.relative_path).name,
+                        self._file_url_for(self.base_path, entry.relative_path),
+                    ]
+                )
+            blob = output.getvalue().encode("utf-8")
+            key = f"{repository_uuid}:{SVN_FILE_INDEX_NAME}"
+            fingerprint = xxhash.xxh128(blob).hexdigest()
+            self._generated_documents[key] = Document(
+                id=key,
+                source=DocumentSource.SVN,
+                semantic_identifier=SVN_FILE_INDEX_NAME,
+                extension=".csv",
+                blob=blob,
+                doc_updated_at=datetime.now(UTC),
+                size_bytes=len(blob),
+                relative_path=SVN_FILE_INDEX_NAME,
+                fingerprint=fingerprint,
+            )
+            yield KeyRecord(key=key, fingerprint=fingerprint)
+
     def get_value(self, key: str) -> Document:
+        if key in self._generated_documents:
+            return self._generated_documents[key]
+
         entry = self._listing_cache.get(key)
         if entry is None or self.repository_uuid is None or self.snapshot_revision is None:
             raise KeyError(f"get_value({key!r}) called before list_keys() yielded the key, or after a subsequent list_keys() reset the cache")

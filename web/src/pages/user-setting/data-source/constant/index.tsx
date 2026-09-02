@@ -1784,6 +1784,7 @@ export const DataSourceFormDefaultValues = {
     prune_freq: 60,
     config: {
       repository_url: '',
+      file_url_base: '',
       base_path: '00_公用文件/00_体系文件',
       include_roots: [
         '1、一级文件',
@@ -1793,6 +1794,7 @@ export const DataSourceFormDefaultValues = {
       ],
       exclude_name_contains: ['旧版'],
       batch_size: 8,
+      generate_file_index: false,
       sync_deleted_files: true,
       credentials: { username: '', password: '' },
     },

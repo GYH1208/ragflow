@@ -1219,11 +1219,15 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取实体和关系
       syncDeletedFiles: '同步删除文件',
       svnDescription: '以只读方式连接 SVN，同步已提交的体系文件及目录结构。',
       svnRepositoryUrl: 'SVN 仓库地址',
+      svnFileUrlBase: '文件访问地址',
+      svnFileUrlBaseTip:
+        '可选。生成文件索引时返回给用户的地址；留空则使用 SVN 仓库地址。',
       svnBasePath: '体系文件根路径',
       svnIncludeRoots: '同步目录',
       svnExcludeTerms: '排除名称',
       svnUsername: '只读用户名',
       svnPassword: '密码',
+      svnGenerateFileIndex: '生成 SVN 文件索引表',
       svnBatchSize: '下载批量大小',
       githubDescription:
         '连接 GitHub，可同步 Pull Request 与 Issue 内容用于检索。',

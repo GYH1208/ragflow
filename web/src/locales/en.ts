@@ -1231,11 +1231,15 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
       svnDescription:
         'Connect to SVN in read-only mode and sync committed controlled documents with their folder hierarchy.',
       svnRepositoryUrl: 'SVN repository URL',
+      svnFileUrlBase: 'File access URL',
+      svnFileUrlBaseTip:
+        'Optional. The user-facing base URL written to the file index; leave blank to use the SVN repository URL.',
       svnBasePath: 'Controlled-document base path',
       svnIncludeRoots: 'Included roots',
       svnExcludeTerms: 'Excluded name terms',
       svnUsername: 'Read-only username',
       svnPassword: 'Password',
+      svnGenerateFileIndex: 'Generate SVN file index',
       svnBatchSize: 'Download batch size',
       confluenceIsCloudTip:
         'Check if this is a Confluence Cloud instance, uncheck for Confluence Server/Data Center',

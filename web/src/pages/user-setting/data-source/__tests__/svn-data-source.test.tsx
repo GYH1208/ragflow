@@ -27,6 +27,12 @@ describe('SVN data source', () => {
     const password = fields.find(
       (field) => field.name === 'config.credentials.password',
     );
+    const generateFileIndex = fields.find(
+      (field) => field.name === 'config.generate_file_index',
+    );
+    const fileUrlBase = fields.find(
+      (field) => field.name === 'config.file_url_base',
+    );
 
     expect(values.refresh_freq).toBe(60);
     expect(values.prune_freq).toBe(60);
@@ -37,6 +43,10 @@ describe('SVN data source', () => {
       '4、四级文件',
     ]);
     expect(values.config.exclude_name_contains).toEqual(['旧版']);
+    expect(values.config.generate_file_index).toBe(false);
+    expect(values.config.file_url_base).toBe('');
     expect(password?.type).toBe(FormFieldType.Password);
+    expect(generateFileIndex?.type).toBe(FormFieldType.Checkbox);
+    expect(fileUrlBase?.type).toBe(FormFieldType.Text);
   });
 });

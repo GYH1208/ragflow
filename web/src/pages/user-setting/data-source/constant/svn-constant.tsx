@@ -10,6 +10,14 @@ export const svnConstant = (t: TFunction) => [
     placeholder: 'https://svn.example.com/svn/company',
   },
   {
+    label: t('setting.svnFileUrlBase'),
+    name: 'config.file_url_base',
+    type: FormFieldType.Text,
+    required: false,
+    placeholder: 'https://svn-browser.example.com/svn/company',
+    tooltip: t('setting.svnFileUrlBaseTip'),
+  },
+  {
     label: t('setting.svnBasePath'),
     name: 'config.base_path',
     type: FormFieldType.Text,
@@ -38,6 +46,12 @@ export const svnConstant = (t: TFunction) => [
     name: 'config.credentials.password',
     type: FormFieldType.Password,
     required: true,
+  },
+  {
+    label: t('setting.svnGenerateFileIndex'),
+    name: 'config.generate_file_index',
+    type: FormFieldType.Checkbox,
+    required: false,
   },
   {
     label: t('setting.svnBatchSize'),

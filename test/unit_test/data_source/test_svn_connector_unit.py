@@ -14,7 +14,9 @@
 #  limitations under the License.
 #
 
+import csv
 import importlib
+import io
 import subprocess
 
 import pytest
@@ -263,6 +265,78 @@ def test_get_value_downloads_selected_file_at_snapshot_revision():
     assert document.fingerprint == key_record.fingerprint
 
 
+def test_enabled_file_index_contains_names_and_full_svn_paths_without_cat():
+    svn_connector = _load_svn_module()
+    runner = _SnapshotRunner()
+    config = _config()
+    config["generate_file_index"] = True
+    connector = svn_connector.SVNConnector(config, runner=runner)
+
+    keys = list(connector.list_keys())
+    index_key = next(key_record for key_record in keys if key_record.key == "repository-uuid:SVN文件索引.csv")
+    document = connector.get_value(index_key.key)
+
+    assert not [call for call in runner.calls if call["args"][0] == "cat"]
+    assert document.semantic_identifier == "SVN文件索引.csv"
+    assert document.extension == ".csv"
+    assert document.relative_path == "SVN文件索引.csv"
+    assert document.fingerprint == index_key.fingerprint
+    assert list(csv.DictReader(io.StringIO(document.blob.decode("utf-8")))) == [
+        {
+            "文件名": "1、一级文件.docx",
+            "SVN完整路径": "https://svn.example.test/svn/company/00_公用文件/00_体系文件/1、一级文件/A/1、一级文件.docx",
+        },
+        {
+            "文件名": "2、二级文件.docx",
+            "SVN完整路径": "https://svn.example.test/svn/company/00_公用文件/00_体系文件/2、二级文件/A/2、二级文件.docx",
+        },
+        {
+            "文件名": "3、三级文件.docx",
+            "SVN完整路径": "https://svn.example.test/svn/company/00_公用文件/00_体系文件/3、三级文件/A/3、三级文件.docx",
+        },
+        {
+            "文件名": "4、四级文件.docx",
+            "SVN完整路径": "https://svn.example.test/svn/company/00_公用文件/00_体系文件/4、四级文件/A/4、四级文件.docx",
+        },
+    ]
+
+
+def test_file_index_uses_browser_url_without_changing_svn_connection_url():
+    svn_connector = _load_svn_module()
+    runner = _SnapshotRunner()
+    config = _config(repository_url="https://internal-svn.example.test/svn/company")
+    config["generate_file_index"] = True
+    config["file_url_base"] = "https://svn-browser.example.test/svn/company"
+    connector = svn_connector.SVNConnector(config, runner=runner)
+
+    keys = list(connector.list_keys())
+    index_key = next(key_record for key_record in keys if key_record.key == "repository-uuid:SVN文件索引.csv")
+    document = connector.get_value(index_key.key)
+    rows = list(csv.DictReader(io.StringIO(document.blob.decode("utf-8"))))
+
+    assert runner.calls[0]["args"][-1].startswith("https://internal-svn.example.test/")
+    assert rows[0] == {
+        "文件名": "1、一级文件.docx",
+        "SVN完整路径": "https://svn-browser.example.test/svn/company/00_公用文件/00_体系文件/1、一级文件/A/1、一级文件.docx",
+    }
+
+
+def test_file_index_blank_browser_url_falls_back_to_repository_url():
+    svn_connector = _load_svn_module()
+    runner = _SnapshotRunner()
+    config = _config()
+    config["generate_file_index"] = True
+    config["file_url_base"] = "   "
+    connector = svn_connector.SVNConnector(config, runner=runner)
+
+    keys = list(connector.list_keys())
+    index_key = next(key_record for key_record in keys if key_record.key == "repository-uuid:SVN文件索引.csv")
+    document = connector.get_value(index_key.key)
+    rows = list(csv.DictReader(io.StringIO(document.blob.decode("utf-8"))))
+
+    assert rows[0]["SVN完整路径"].startswith("https://svn.example.test/svn/company/")
+
+
 def test_slim_snapshot_lists_selected_ids_without_downloading_content():
     svn_connector = _load_svn_module()
     runner = _SnapshotRunner()
@@ -340,6 +414,25 @@ def test_formal_document_selection_applies_scope_exclusions_and_word_preference(
         "2、二级文件/C/C.doc",
         "2、二级文件/C/C.docx",
     ]
+
+
+def test_formal_document_selection_ignores_office_lock_files_before_word_preference():
+    svn_connector = _load_svn_module()
+    entries = _entries(
+        svn_connector,
+        [
+            "1、一级文件/A/~$A.docx",
+            "1、一级文件/A/A.pdf",
+        ],
+    )
+
+    selected = svn_connector.select_formal_documents(
+        entries,
+        include_roots={"1、一级文件", "2、二级文件", "3、三级文件", "4、四级文件"},
+        excluded_terms=("旧版",),
+    )
+
+    assert [entry.relative_path for entry in selected] == ["1、一级文件/A/A.pdf"]
 
 
 @pytest.mark.parametrize(
