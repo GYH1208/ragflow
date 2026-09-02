@@ -535,11 +535,16 @@ class SyncLogsService(CommonService):
         )
         errs.extend(err)
         if managed_folder_ids:
-            Connector2KbService.add_managed_folder_ids(
-                docs[0]["connector_id"],
-                kb.id,
-                managed_folder_ids,
-            )
+            try:
+                Connector2KbService.add_managed_folder_ids(
+                    docs[0]["connector_id"],
+                    kb.id,
+                    managed_folder_ids,
+                )
+            except Exception as exc:
+                msg = f"Failed to record SVN managed folders: {exc}"
+                LOGGER.exception(msg)
+                errs.append(msg)
 
         # Create a mapping from filename to metadata for later use
         metadata_map = {}
@@ -605,7 +610,7 @@ class Connector2KbService(CommonService):
             managed_ids = set(state.get("managed_folder_ids") or [])
             managed_ids.update(folder_ids)
             state["managed_folder_ids"] = sorted(managed_ids)
-            cls.update_by_id(link.id, {"sync_state": state})
+            cls.update_by_id_in_transaction(link.id, {"sync_state": state})
 
     @classmethod
     def link_connectors(cls, kb_id:str, connectors: list[dict], tenant_id:str):
