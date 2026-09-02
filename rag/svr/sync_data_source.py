@@ -71,6 +71,7 @@ from common.data_source import (
 )
 from common.data_source.models import ConnectorFailure, SeafileSyncScope
 from common.data_source.webdav_connector import WebDAVConnector
+from common.data_source.svn_connector import SVNConnector
 from common.data_source.confluence_connector import ConfluenceConnector
 from common.data_source.gmail_connector import GmailConnector
 from common.data_source.box_connector import BoxConnector
@@ -246,6 +247,8 @@ class SyncBase:
                 }
                 if doc.metadata:
                     d["metadata"] = doc.metadata
+                if getattr(doc, "relative_path", None):
+                    d["relative_path"] = doc.relative_path
                 if getattr(doc, "fingerprint", None):
                     d["fingerprint"] = doc.fingerprint
                 docs.append(d)
@@ -326,6 +329,7 @@ class SyncBase:
             task["kb_id"],
             task["tenant_id"],
             file_list,
+            **self._get_prune_cleanup_kwargs(task),
         )
         logging.info(
             "%s prune summary: deleted=%s, errors=%s",
@@ -345,6 +349,9 @@ class SyncBase:
         await self._generate(task)
 
     def _get_prune_snapshot_kwargs(self, task: dict) -> dict[str, Any]:
+        return {}
+
+    def _get_prune_cleanup_kwargs(self, task: dict) -> dict[str, Any]:
         return {}
 
     def _collect_prune_snapshot(self, task: dict):
@@ -490,6 +497,25 @@ class _BlobLikeBase(SyncBase):
 class S3(_BlobLikeBase):
     SOURCE_NAME: str = FileSource.S3
     DEFAULT_BUCKET_TYPE: str = "s3"
+
+
+class SVN(_BlobLikeBase):
+    SOURCE_NAME: str = FileSource.SVN
+
+    async def _generate(self, task: dict):
+        self.connector = SVNConnector(self.conf)
+        self.log_connection(
+            "SVN",
+            f"{self.connector.repository_url}/{self.connector.base_path}",
+            task,
+        )
+        return self._fingerprint_filtered_generator(task)
+
+    def _get_prune_cleanup_kwargs(self, task: dict) -> dict[str, Any]:
+        return {
+            "snapshot_revision": self.connector.snapshot_revision,
+            "confirmation_scans": 2,
+        }
 
 
 class R2(_BlobLikeBase):
@@ -2143,6 +2169,7 @@ class REST_API(SyncBase):
 func_factory = {
     FileSource.RSS: RSS,
     FileSource.S3: S3,
+    FileSource.SVN: SVN,
     FileSource.R2: R2,
     FileSource.OCI_STORAGE: OCI_STORAGE,
     FileSource.GOOGLE_CLOUD_STORAGE: GOOGLE_CLOUD_STORAGE,

@@ -95,6 +95,7 @@ export default {
   dataSourceList: `${restAPIv1}/connectors`,
   dataSourceDel: (id: string) => `${restAPIv1}/connectors/${id}`,
   dataSourceRebuild: (id: string) => `${restAPIv1}/connectors/${id}/rebuild`,
+  dataSourceSync: (id: string) => `${restAPIv1}/connectors/${id}/sync`,
   dataSourceLogs: (id: string) => `${restAPIv1}/connectors/${id}/logs`,
   dataSourceDetail: (id: string) => `${restAPIv1}/connectors/${id}`,
   dataSourceTest: (id: string) => `${restAPIv1}/connectors/${id}/test`,

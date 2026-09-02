@@ -25,6 +25,10 @@ export const dataSourceRebuild = (id: string, data: { kb_id: string }) => {
   return request.post(api.dataSourceRebuild(id), { data });
 };
 
+export const dataSourceSync = (id: string, data: { kb_id: string }) => {
+  return request.post(api.dataSourceSync(id), { data });
+};
+
 export const dataSourceUpdate = (id: string, data: Record<string, any>) => {
   return request.patch(api.dataSourceUpdate(id), { data });
 };

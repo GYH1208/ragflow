@@ -9,10 +9,16 @@ import {
 import { useNavigatePage } from '@/hooks/logic-hooks/navigate-hooks';
 import { IConnector } from '@/interfaces/database/dataset';
 import { delSourceModal } from '@/pages/user-setting/data-source/component/delete-source-modal';
-import { useDataSourceInfo } from '@/pages/user-setting/data-source/constant';
-import { useDataSourceRebuild } from '@/pages/user-setting/data-source/hooks';
+import {
+  DataSourceKey,
+  useDataSourceInfo,
+} from '@/pages/user-setting/data-source/constant';
+import {
+  useDataSourceRebuild,
+  useDataSourceSync,
+} from '@/pages/user-setting/data-source/hooks';
 import { IDataSourceBase } from '@/pages/user-setting/data-source/interface';
-import { Link, Settings, Unlink } from 'lucide-react';
+import { Link, RefreshCw, Settings, Unlink } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import LinkDataSourceModal from './link-data-source-modal';
@@ -48,6 +54,7 @@ const DataSourceItem = (props: DataSourceItemProps) => {
 
   const { navigateToDataSourceDetail } = useNavigatePage();
   const { handleRebuild } = useDataSourceRebuild();
+  const { handleSync } = useDataSourceSync();
   const toDetail = (id: string) => {
     navigateToDataSourceDetail(id);
   };
@@ -92,6 +99,24 @@ const DataSourceItem = (props: DataSourceItemProps) => {
             {t('knowledgeConfiguration.rebuildTip')}
           </TooltipContent>
         </Tooltip>
+        {source === DataSourceKey.SVN && (
+          <Tooltip>
+            <TooltipTrigger>
+              <Button
+                variant={'transparent'}
+                className="border-none hidden group-hover:block"
+                type="button"
+                aria-label={t('knowledgeConfiguration.syncNow')}
+                onClick={() => handleSync({ source_id: id })}
+              >
+                <RefreshCw className="size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {t('knowledgeConfiguration.syncNowTip')}
+            </TooltipContent>
+          </Tooltip>
+        )}
         <Button
           variant={'transparent'}
           className="border-none hidden group-hover:block"
