@@ -86,8 +86,7 @@ def service_fixture(monkeypatch):
     kb._documents = documents
     kb._links = links
 
-    monkeypatch.setattr(FileService, "get_kb_folder", classmethod(lambda cls, _tenant_id: {"id": "kb-parent"}))
-    monkeypatch.setattr(FileService, "new_a_file_from_kb", classmethod(lambda cls, *_args: {"id": root.id}))
+    monkeypatch.setattr(FileService, "get_or_create_kb_root", classmethod(lambda cls, *_args: {"id": root.id}))
     monkeypatch.setattr(FileService, "get_by_id", classmethod(lambda cls, entry_id: (entry_id in entries, entries.get(entry_id))))
     monkeypatch.setattr(FileService, "get_by_ids", classmethod(lambda cls, ids, cols=None: [entries[item_id] for item_id in ids if item_id in entries]))
     monkeypatch.setattr(

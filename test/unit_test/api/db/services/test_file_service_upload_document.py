@@ -477,8 +477,7 @@ def test_upload_document_rejects_mismatched_owner_context_before_resource_lookup
         classmethod(lambda cls, owner_id: resource_lookups.append(owner_id) or {"id": "root"}),
     )
     monkeypatch.setattr(FileService, "init_knowledgebase_docs", classmethod(lambda cls, *_args: None))
-    monkeypatch.setattr(FileService, "get_kb_folder", classmethod(lambda cls, *_args: {"id": "kb-root"}))
-    monkeypatch.setattr(FileService, "new_a_file_from_kb", classmethod(lambda cls, *_args: {"id": "kb-folder"}))
+    monkeypatch.setattr(FileService, "get_or_create_kb_root", classmethod(lambda cls, *_args: {"id": "kb-folder"}))
 
     with pytest.raises(PermissionError, match="owner"):
         _unwrapped_upload_document()(
@@ -512,12 +511,7 @@ def test_upload_document_skips_cross_kb_document_id_collision(monkeypatch):
 
     monkeypatch.setattr(FileService, "get_root_folder", classmethod(lambda cls, _uid: {"id": "root"}))
     monkeypatch.setattr(FileService, "init_knowledgebase_docs", classmethod(lambda cls, _pf_id, _uid: None))
-    monkeypatch.setattr(FileService, "get_kb_folder", classmethod(lambda cls, _uid: {"id": "kb-root"}))
-    monkeypatch.setattr(
-        FileService,
-        "new_a_file_from_kb",
-        classmethod(lambda cls, _tenant_id, _name, _parent_id: {"id": "kb-folder"}),
-    )
+    monkeypatch.setattr(FileService, "get_or_create_kb_root", classmethod(lambda cls, *_args: {"id": "kb-folder"}))
     monkeypatch.setattr(file_service_module.DocumentService, "get_by_id", lambda _doc_id: (True, existing_doc))
 
     err, files = _unwrapped_upload_document()(
@@ -622,12 +616,7 @@ def test_upload_document_places_relative_folders_under_explicit_parent(monkeypat
 
     monkeypatch.setattr(FileService, "get_root_folder", classmethod(lambda cls, _uid: {"id": "root"}))
     monkeypatch.setattr(FileService, "init_knowledgebase_docs", classmethod(lambda cls, _pf_id, _uid: None))
-    monkeypatch.setattr(FileService, "get_kb_folder", classmethod(lambda cls, _uid: {"id": "kb-root"}))
-    monkeypatch.setattr(
-        FileService,
-        "new_a_file_from_kb",
-        classmethod(lambda cls, _tenant_id, _name, _parent_id: {"id": "kb-folder"}),
-    )
+    monkeypatch.setattr(FileService, "get_or_create_kb_root", classmethod(lambda cls, *_args: {"id": "kb-folder"}))
     monkeypatch.setattr(FileService, "get_by_id", classmethod(lambda cls, file_id: (file_id in folders, folders.get(file_id))))
     _mock_folder_parent_lock(monkeypatch, folders)
     monkeypatch.setattr(FileService, "query", classmethod(lambda cls, **kwargs: query_files(**kwargs)))
@@ -753,8 +742,7 @@ def test_failed_upload_removes_only_request_created_empty_folders(monkeypatch):
 
     monkeypatch.setattr(FileService, "get_root_folder", classmethod(lambda cls, _uid: {"id": "root"}))
     monkeypatch.setattr(FileService, "init_knowledgebase_docs", classmethod(lambda cls, _pf_id, _uid: None))
-    monkeypatch.setattr(FileService, "get_kb_folder", classmethod(lambda cls, _uid: {"id": "kb-root"}))
-    monkeypatch.setattr(FileService, "new_a_file_from_kb", classmethod(lambda cls, *_args: {"id": "kb-folder"}))
+    monkeypatch.setattr(FileService, "get_or_create_kb_root", classmethod(lambda cls, *_args: {"id": "kb-folder"}))
     monkeypatch.setattr(FileService, "get_by_id", classmethod(lambda cls, file_id: (file_id in folders, folders.get(file_id))))
     _mock_folder_parent_lock(monkeypatch, folders)
     monkeypatch.setattr(FileService, "query", classmethod(lambda cls, **kwargs: query_files(**kwargs)))

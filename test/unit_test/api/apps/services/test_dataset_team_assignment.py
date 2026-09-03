@@ -13,7 +13,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -23,6 +23,7 @@ from api.apps.services.dataset_api_service import create_dataset, get_dataset, l
 from api.db import TenantPermission
 from api.db.services.connector_service import Connector2KbService
 from api.db.services.document_service import DocumentService
+from api.db.services.file_service import FileService
 from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.team_service import TeamAuthorizationService, TeamMemberService, TeamService
 from api.db.services.user_service import TenantService, UserService
@@ -60,6 +61,7 @@ def _dataset(
         "team_id": dataset.team_id,
         "status": dataset.status,
     }
+    dataset.root_folder_name = dataset.name
     return dataset
 
 
@@ -129,10 +131,22 @@ def _stub_create(monkeypatch, *, admin, owned_team_ids=(), team_names=None):
     return saved, team_calls
 
 
-def _stub_update(monkeypatch, dataset, *, admin, owned_team_ids=(), team_names=None):
+def _stub_update(
+    monkeypatch,
+    dataset,
+    *,
+    admin,
+    owned_team_ids=(),
+    team_names=None,
+    root_rename_error=None,
+    update_result=1,
+):
     updates = []
+    dataset.root_rename_calls = 0
 
     def update_by_id(_dataset_id, payload):
+        if update_result != 1:
+            return update_result
         updates.append(dict(payload))
         for key, value in payload.items():
             setattr(dataset, key, value)
@@ -150,8 +164,23 @@ def _stub_update(monkeypatch, dataset, *, admin, owned_team_ids=(), team_names=N
         lambda team_id, owner_id: SimpleNamespace(id=team_id, tenant_id=owner_id) if team_id in owned_team_ids else None,
         raising=False,
     )
-    monkeypatch.setattr(dataset_api_service, "DB", SimpleNamespace(atomic=nullcontext), raising=False)
-    monkeypatch.setattr(KnowledgebaseService, "get_or_none", lambda **kwargs: dataset if kwargs.get("tenant_id") == dataset.tenant_id else None)
+    @contextmanager
+    def atomic():
+        original_name = dataset.name
+        original_root_name = dataset.root_folder_name
+        try:
+            yield
+        except Exception:
+            dataset.name = original_name
+            dataset.root_folder_name = original_root_name
+            raise
+
+    monkeypatch.setattr(dataset_api_service, "DB", SimpleNamespace(atomic=atomic), raising=False)
+    monkeypatch.setattr(
+        KnowledgebaseService,
+        "get_or_none",
+        lambda **kwargs: dataset if kwargs.get("id") == dataset.id and kwargs.get("tenant_id") == dataset.tenant_id else None,
+    )
     monkeypatch.setattr(KnowledgebaseService, "update_by_id", update_by_id)
     monkeypatch.setattr(KnowledgebaseService, "update_by_id_in_transaction", update_by_id)
     monkeypatch.setattr(
@@ -162,6 +191,27 @@ def _stub_update(monkeypatch, dataset, *, admin, owned_team_ids=(), team_names=N
     )
     monkeypatch.setattr(KnowledgebaseService, "get_by_id", lambda _dataset_id: (True, dataset))
     monkeypatch.setattr(Connector2KbService, "link_connectors", lambda *_args: [])
+
+    def rename_kb_root(_cls, _tenant_id, old_name, new_name):
+        dataset.root_rename_calls += 1
+        if root_rename_error:
+            return root_rename_error
+        if dataset.root_folder_name == old_name:
+            dataset.root_folder_name = new_name
+        return None
+
+    monkeypatch.setattr(
+        FileService,
+        "rename_kb_root_in_transaction",
+        classmethod(rename_kb_root),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        FileService,
+        "lock_tenant_file_tree_in_transaction",
+        classmethod(lambda cls, tenant_id: dataset if tenant_id == dataset.tenant_id else None),
+        raising=False,
+    )
     team_calls = _stub_team_queries(monkeypatch, team_names)
     return updates, team_calls
 
@@ -271,6 +321,132 @@ async def test_ordinary_owner_can_update_without_changing_private_tuple(monkeypa
     assert updates == [{"description": "updated", "permission": TenantPermission.ME.value}]
     assert result["team_id"] is None
     assert result["team_name"] is None
+
+
+async def test_renaming_dataset_keeps_knowledge_root_folder_in_sync(monkeypatch):
+    dataset = _dataset()
+    updates, _ = _stub_update(monkeypatch, dataset, admin=False)
+
+    ok, result = await update_dataset(
+        "owner-1",
+        "kb-1",
+        {"name": "售后报价单"},
+    )
+
+    assert ok is True
+    assert updates == [{"name": "售后报价单"}]
+    assert result["name"] == "售后报价单"
+    assert dataset.root_folder_name == "售后报价单"
+
+
+async def test_dataset_rename_stops_when_knowledge_root_name_conflicts(monkeypatch):
+    dataset = _dataset()
+    updates, _ = _stub_update(
+        monkeypatch,
+        dataset,
+        admin=False,
+        root_rename_error="A knowledge base folder with the target name already exists.",
+    )
+
+    result = await update_dataset(
+        "owner-1",
+        "kb-1",
+        {"name": "售后报价单"},
+    )
+
+    assert result == (
+        False,
+        "A knowledge base folder with the target name already exists.",
+    )
+    assert updates == []
+    assert dataset.name == "kb-1"
+    assert dataset.root_folder_name == "kb-1"
+
+
+async def test_dataset_rename_rolls_back_root_when_dataset_update_fails(monkeypatch):
+    dataset = _dataset()
+    updates, _ = _stub_update(
+        monkeypatch,
+        dataset,
+        admin=False,
+        update_result=0,
+    )
+
+    result = await update_dataset(
+        "owner-1",
+        "kb-1",
+        {"name": "售后报价单"},
+    )
+
+    assert result == (False, "Update dataset error.(Database error)")
+    assert updates == []
+    assert dataset.name == "kb-1"
+    assert dataset.root_folder_name == "kb-1"
+
+
+async def test_non_name_update_does_not_touch_knowledge_root_folder(monkeypatch):
+    dataset = _dataset()
+    updates, _ = _stub_update(monkeypatch, dataset, admin=False)
+
+    ok, _result = await update_dataset(
+        "owner-1",
+        "kb-1",
+        {"description": "updated"},
+    )
+
+    assert ok is True
+    assert updates == [{"description": "updated"}]
+    assert dataset.root_folder_name == "kb-1"
+    assert dataset.root_rename_calls == 0
+
+
+async def test_team_assignment_and_name_update_rename_the_root_folder(monkeypatch):
+    dataset = _dataset(permission=TenantPermission.TEAM.value, team_id="team-old")
+    updates, _ = _stub_update(
+        monkeypatch,
+        dataset,
+        admin=True,
+        owned_team_ids={"team-old", "team-new"},
+    )
+
+    ok, result = await update_dataset(
+        "owner-1",
+        "kb-1",
+        {"name": "售后报价单", "team_id": "team-new"},
+    )
+
+    assert ok is True
+    assert updates == [{"name": "售后报价单", "team_id": "team-new"}]
+    assert result["name"] == "售后报价单"
+    assert result["team_id"] == "team-new"
+    assert dataset.root_folder_name == "售后报价单"
+
+
+async def test_team_update_does_not_overwrite_a_concurrent_dataset_rename(monkeypatch):
+    dataset = _dataset(permission=TenantPermission.TEAM.value, team_id="team-old")
+    updates, _ = _stub_update(
+        monkeypatch,
+        dataset,
+        admin=True,
+        owned_team_ids={"team-old", "team-new"},
+    )
+    locked_dataset = _dataset(permission=TenantPermission.TEAM.value, team_id="team-old")
+    locked_dataset.name = "并发新名称"
+    monkeypatch.setattr(
+        KnowledgebaseService,
+        "get_owned_for_update",
+        lambda dataset_id, owner_id: locked_dataset if (dataset_id, owner_id) == (dataset.id, dataset.tenant_id) else None,
+    )
+
+    result = await update_dataset(
+        "owner-1",
+        "kb-1",
+        {"name": dataset.name, "team_id": "team-new"},
+    )
+
+    assert result == (False, "Dataset name changed concurrently.")
+    assert updates == []
+    assert locked_dataset.name == "并发新名称"
 
 
 async def test_ordinary_owner_cannot_change_team_assignment(monkeypatch):

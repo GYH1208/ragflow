@@ -51,6 +51,11 @@ _INDEX_TYPE_TO_TASK_ID_FIELD = {
     "mindmap": "mindmap_task_id",
 }
 
+
+class _DatasetUpdateRollback(Exception):
+    """Abort a dataset update transaction while preserving its API error."""
+
+
 _INDEX_TYPE_TO_DISPLAY_NAME = {
     "graph": "Graph",
     "raptor": "RAPTOR",
@@ -88,23 +93,76 @@ def _update_dataset_with_locked_assignment(
     target_permission: str,
     target_team_id: str | None,
 ) -> tuple[bool, str | None]:
-    with DB.atomic():
-        if not _lock_owned_assignment_teams(
-            actor_id,
-            snapshot.team_id if snapshot.permission == TenantPermission.TEAM.value else None,
-            target_team_id if target_permission == TenantPermission.TEAM.value else None,
-        ):
-            return False, "The team and dataset must have the same owner."
+    try:
+        with DB.atomic():
+            if "name" in values:
+                if FileService.lock_tenant_file_tree_in_transaction(snapshot.tenant_id) is None:
+                    return False, "Cannot find the tenant that owns the dataset."
+            if not _lock_owned_assignment_teams(
+                actor_id,
+                snapshot.team_id if snapshot.permission == TenantPermission.TEAM.value else None,
+                target_team_id if target_permission == TenantPermission.TEAM.value else None,
+            ):
+                return False, "The team and dataset must have the same owner."
 
-        locked_kb = KnowledgebaseService.get_owned_for_update(snapshot.id, actor_id)
-        if locked_kb is None:
-            return False, f"User '{actor_id}' lacks permission for dataset '{snapshot.id}'"
-        if (locked_kb.permission, locked_kb.team_id) != (snapshot.permission, snapshot.team_id):
-            return False, "Dataset assignment changed concurrently."
+            locked_kb = KnowledgebaseService.get_owned_for_update(snapshot.id, actor_id)
+            if locked_kb is None:
+                return False, f"User '{actor_id}' lacks permission for dataset '{snapshot.id}'"
+            if "name" in values and locked_kb.name != snapshot.name:
+                return False, "Dataset name changed concurrently."
+            if (locked_kb.permission, locked_kb.team_id) != (snapshot.permission, snapshot.team_id):
+                return False, "Dataset assignment changed concurrently."
 
-        affected = KnowledgebaseService.update_by_id_in_transaction(locked_kb.id, values)
-        if affected != 1:
-            return False, "Update dataset error.(Database error)"
+            rename_error = _rename_dataset_root_in_transaction(locked_kb, values)
+            if rename_error:
+                return False, rename_error
+
+            affected = KnowledgebaseService.update_by_id_in_transaction(locked_kb.id, values)
+            if affected != 1:
+                raise _DatasetUpdateRollback("Update dataset error.(Database error)")
+    except _DatasetUpdateRollback as error:
+        return False, str(error)
+    return True, None
+
+
+def _rename_dataset_root_in_transaction(kb, values: dict) -> str | None:
+    new_name = values.get("name")
+    if not new_name or new_name == kb.name:
+        return None
+    return FileService.rename_kb_root_in_transaction(
+        kb.tenant_id,
+        kb.name,
+        new_name,
+    )
+
+
+def _update_dataset_with_locked_root(
+    actor_id: str,
+    snapshot,
+    values: dict,
+) -> tuple[bool, str | None]:
+    try:
+        with DB.atomic():
+            if FileService.lock_tenant_file_tree_in_transaction(snapshot.tenant_id) is None:
+                return False, "Cannot find the tenant that owns the dataset."
+            locked_kb = KnowledgebaseService.get_owned_for_update(snapshot.id, actor_id)
+            if locked_kb is None:
+                return False, f"User '{actor_id}' lacks permission for dataset '{snapshot.id}'"
+            if locked_kb.name != snapshot.name:
+                return False, "Dataset name changed concurrently."
+
+            rename_error = _rename_dataset_root_in_transaction(locked_kb, values)
+            if rename_error:
+                return False, rename_error
+
+            affected = KnowledgebaseService.update_by_id_in_transaction(
+                locked_kb.id,
+                values,
+            )
+            if affected != 1:
+                raise _DatasetUpdateRollback("Update dataset error.(Database error)")
+    except _DatasetUpdateRollback as error:
+        return False, str(error)
     return True, None
 
 
@@ -532,6 +590,14 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
             req,
             target_permission,
             target_team_id,
+        )
+        if not updated:
+            return False, update_error
+    elif req.get("name") and req["name"] != kb.name:
+        updated, update_error = _update_dataset_with_locked_root(
+            tenant_id,
+            kb,
+            req,
         )
         if not updated:
             return False, update_error

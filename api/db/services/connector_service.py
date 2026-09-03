@@ -246,12 +246,7 @@ class ConnectorService(CommonService):
 
         managed_folder_ids = set(state.get("managed_folder_ids") or [])
         if managed_folder_ids:
-            kb_container = FileService.get_kb_folder(kb.tenant_id)
-            kb_root = FileService.new_a_file_from_kb(
-                kb.tenant_id,
-                kb.name,
-                kb_container["id"],
-            )
+            kb_root = FileService.get_or_create_kb_root(kb.id, kb.tenant_id)
             remaining_folder_ids = FileService.remove_empty_managed_folders(
                 managed_folder_ids,
                 kb_root["id"],

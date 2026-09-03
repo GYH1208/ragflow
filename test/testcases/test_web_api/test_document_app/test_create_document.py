@@ -162,12 +162,15 @@ class TestDocumentCreateUnit:
         assert res["code"] == 102
         assert "Duplicated document name" in res["message"]
 
-    def test_root_folder_missing(self, document_rest_api_module, monkeypatch):
+    def test_kb_root_creation_failure(self, document_rest_api_module, monkeypatch):
         module = document_rest_api_module
         kb = _StubKBRecord(id="kb1", tenant_id="tenant1", name="kb", parser_id="parser", pipeline_id="pipe", parser_config={})
         monkeypatch.setattr(module.KnowledgebaseService, "get_by_id", lambda _kb_id: (True, kb))
         monkeypatch.setattr(module.DocumentService, "query", lambda **_kwargs: [])
-        monkeypatch.setattr(module.FileService, "get_kb_folder", lambda *_args, **_kwargs: None)
+        def fail_kb_root_creation(*_args, **_kwargs):
+            raise RuntimeError("Cannot create the knowledge base root folder.")
+
+        monkeypatch.setattr(module.FileService, "get_or_create_kb_root", fail_kb_root_creation)
 
         async def fake_request_json():
             return {"name": "doc.txt"}
@@ -175,16 +178,15 @@ class TestDocumentCreateUnit:
         monkeypatch.setattr(module, "get_request_json", fake_request_json)
         monkeypatch.setattr(module, "request", SimpleNamespace(args={"type": "empty"}))
         res = _run(module.upload_document(dataset_id="kb1"))
-        assert res["code"] == 102
-        assert res["message"] == "Cannot find the root folder."
+        assert res["code"] == 100
+        assert "Cannot create the knowledge base root folder." in res["message"]
 
     def test_kb_folder_missing(self, document_rest_api_module, monkeypatch):
         module = document_rest_api_module
         kb = _StubKBRecord(id="kb1", tenant_id="tenant1", name="kb", parser_id="parser", pipeline_id="pipe", parser_config={})
         monkeypatch.setattr(module.KnowledgebaseService, "get_by_id", lambda _kb_id: (True, kb))
         monkeypatch.setattr(module.DocumentService, "query", lambda **_kwargs: [])
-        monkeypatch.setattr(module.FileService, "get_kb_folder", lambda *_args, **_kwargs: {"id": "root"})
-        monkeypatch.setattr(module.FileService, "new_a_file_from_kb", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(module.FileService, "get_or_create_kb_root", lambda *_args, **_kwargs: None)
 
         async def fake_request_json():
             return {"name": "doc.txt"}
@@ -200,8 +202,7 @@ class TestDocumentCreateUnit:
         kb = _StubKBRecord(id="kb1", tenant_id="tenant1", name="kb", parser_id="parser", pipeline_id="pipe", parser_config={})
         monkeypatch.setattr(module.KnowledgebaseService, "get_by_id", lambda _kb_id: (True, kb))
         monkeypatch.setattr(module.DocumentService, "query", lambda **_kwargs: [])
-        monkeypatch.setattr(module.FileService, "get_kb_folder", lambda *_args, **_kwargs: {"id": "root"})
-        monkeypatch.setattr(module.FileService, "new_a_file_from_kb", lambda *_args, **_kwargs: {"id": "folder"})
+        monkeypatch.setattr(module.FileService, "get_or_create_kb_root", lambda *_args, **_kwargs: {"id": "folder"})
 
         class _Doc:
             def __init__(self, doc_id):

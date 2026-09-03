@@ -501,8 +501,7 @@ async def _upload_web_document(dataset_id, kb, actor_id):
     owner_tenant_id = kb.tenant_id
     root_folder = FileService.get_root_folder(owner_tenant_id)
     FileService.init_knowledgebase_docs(root_folder["id"], owner_tenant_id)
-    kb_root_folder = FileService.get_kb_folder(owner_tenant_id)
-    kb_folder = FileService.new_a_file_from_kb(owner_tenant_id, kb.name, kb_root_folder["id"])
+    kb_folder = FileService.get_or_create_kb_root(kb.id, owner_tenant_id)
 
     try:
         filename = duplicate_name(DocumentService.query, name=f"{name}.pdf", kb_id=kb.id)
@@ -560,10 +559,7 @@ async def _upload_empty_document(dataset_id, kb, actor_id):
         return get_error_data_result(message="Duplicated document name in the same dataset.")
 
     try:
-        kb_root_folder = FileService.get_kb_folder(kb.tenant_id)
-        if not kb_root_folder:
-            return get_error_data_result(message="Cannot find the root folder.")
-        kb_folder = FileService.new_a_file_from_kb(kb.tenant_id, kb.name, kb_root_folder["id"])
+        kb_folder = FileService.get_or_create_kb_root(kb.id, kb.tenant_id)
         if not kb_folder:
             return get_error_data_result(message="Cannot find the kb folder for this file.")
 

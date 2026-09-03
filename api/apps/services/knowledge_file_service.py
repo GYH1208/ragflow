@@ -52,11 +52,7 @@ class KnowledgeFileService:
     @classmethod
     def get_kb_root(cls, kb, owner_tenant_id):
         owner_tenant_id = cls._require_owner_context(kb, owner_tenant_id)
-        kb_parent = FileService.get_kb_folder(owner_tenant_id)
-        if not kb_parent:
-            raise RuntimeError("Cannot find the knowledge base root folder.")
-        kb_parent_id = kb_parent["id"] if isinstance(kb_parent, dict) else kb_parent.id
-        root_data = FileService.new_a_file_from_kb(owner_tenant_id, kb.name, kb_parent_id)
+        root_data = FileService.get_or_create_kb_root(kb.id, owner_tenant_id)
         root_id = root_data["id"] if isinstance(root_data, dict) else root_data.id
         found, root = FileService.get_by_id(root_id)
         if not found:

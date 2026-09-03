@@ -31,7 +31,7 @@ import xxhash
 from peewee import fn
 
 from api.db import KNOWLEDGEBASE_FOLDER_NAME, SKILLS_FOLDER_NAME, FileType
-from api.db.db_models import DB, Document, File, File2Document, Knowledgebase, Task
+from api.db.db_models import DB, Document, File, File2Document, Knowledgebase, Task, Tenant
 from api.db.services import duplicate_name
 from api.db.services.common_service import CommonService
 from api.db.services.document_service import DocumentService
@@ -47,7 +47,7 @@ from api.utils.file_utils import (
     validate_knowledge_upload_paths,
 )
 from common import settings
-from common.constants import MAXIMUM_PAGE_NUMBER, FileSource, ParserType, TaskStatus
+from common.constants import MAXIMUM_PAGE_NUMBER, FileSource, ParserType, StatusEnum, TaskStatus
 from common.misc_utils import get_uuid
 from common.ssrf_guard import assert_url_is_safe
 from rag.llm.cv_model import GptV4
@@ -57,6 +57,152 @@ class FileService(CommonService):
     # Service class for managing file operations and storage
     model = File
     _kb_folder_creation_locks = tuple(threading.Lock() for _ in range(64))
+
+    @classmethod
+    def lock_tenant_file_tree_in_transaction(cls, tenant_id):
+        """Serialize file-tree initialization for every knowledge base in a tenant."""
+        from api.db.services.team_service import select_for_update
+
+        return select_for_update(
+            Tenant.select().where(
+                Tenant.id == tenant_id,
+                Tenant.status == StatusEnum.VALID.value,
+            )
+        ).get_or_none()
+
+    @classmethod
+    def _get_or_create_tenant_root_in_transaction(cls, tenant_id):
+        roots = list(
+            cls.model.select().where(
+                cls.model.tenant_id == tenant_id,
+                cls.model.parent_id == cls.model.id,
+                cls.model.type == FileType.FOLDER.value,
+            )
+        )
+        if len(roots) > 1:
+            raise RuntimeError("Multiple tenant root folders already exist.")
+        if roots:
+            return roots[0]
+
+        root_id = get_uuid()
+        return cls.model.create(
+            id=root_id,
+            parent_id=root_id,
+            tenant_id=tenant_id,
+            created_by=tenant_id,
+            name="/",
+            type=FileType.FOLDER.value,
+            size=0,
+            location="",
+        )
+
+    @classmethod
+    def rename_kb_root_in_transaction(cls, tenant_id, old_name, new_name):
+        """Rename an initialized knowledge-base root inside the caller's transaction."""
+        from api.db.services.team_service import select_for_update
+
+        if cls.lock_tenant_file_tree_in_transaction(tenant_id) is None:
+            return "Cannot find the tenant that owns the knowledge base folder."
+
+        tenant_roots = list(
+            cls.model.select().where(
+                cls.model.tenant_id == tenant_id,
+                cls.model.parent_id == cls.model.id,
+                cls.model.type == FileType.FOLDER.value,
+            )
+        )
+        if not tenant_roots:
+            return None
+        if len(tenant_roots) != 1:
+            return "Multiple tenant root folders already exist."
+        tenant_root = tenant_roots[0]
+
+        kb_parents = list(
+            select_for_update(
+                cls.model.select().where(
+                    cls.model.tenant_id == tenant_id,
+                    cls.model.parent_id == tenant_root.id,
+                    cls.model.name == KNOWLEDGEBASE_FOLDER_NAME,
+                    cls.model.type == FileType.FOLDER.value,
+                )
+            )
+        )
+        if not kb_parents:
+            return None
+        if len(kb_parents) != 1:
+            return "Multiple knowledge base container folders already exist."
+        kb_parent = kb_parents[0]
+
+        children = list(
+            cls.model.select().where(
+                cls.model.tenant_id == tenant_id,
+                cls.model.parent_id == kb_parent.id,
+            )
+        )
+        source_matches = [
+            entry
+            for entry in children
+            if entry.name == old_name and entry.type == FileType.FOLDER.value
+        ]
+        if not source_matches:
+            return None
+        if len(source_matches) != 1:
+            return "Multiple knowledge base folders match the current dataset name."
+
+        source = source_matches[0]
+        if any(entry.id != source.id and entry.name.casefold() == new_name.casefold() for entry in children):
+            return "A knowledge base folder with the target name already exists."
+
+        if cls.update_by_id_in_transaction(source.id, {"name": new_name}) != 1:
+            return "Database error (Knowledge base folder rename)!"
+        return None
+
+    @classmethod
+    def _get_or_create_folder_in_transaction(cls, tenant_id, parent_id, name):
+        siblings = cls.model.select().where(
+            cls.model.tenant_id == tenant_id,
+            cls.model.parent_id == parent_id,
+        )
+        matches = [entry for entry in siblings if entry.name.casefold() == name.casefold()]
+        if len(matches) == 1 and matches[0].name == name and matches[0].type == FileType.FOLDER.value:
+            return matches[0]
+        if matches:
+            raise RuntimeError("An entry with the knowledge base folder name already exists.")
+        return cls.model.create(
+            id=get_uuid(),
+            parent_id=parent_id,
+            tenant_id=tenant_id,
+            created_by=tenant_id,
+            name=name,
+            type=FileType.FOLDER.value,
+            size=0,
+            location="",
+            source_type=FileSource.KNOWLEDGEBASE,
+        )
+
+    @classmethod
+    def get_or_create_kb_root(cls, kb_id, owner_tenant_id):
+        """Create or load a KB root using its name read under the KB row lock."""
+        with DB.atomic():
+            if cls.lock_tenant_file_tree_in_transaction(owner_tenant_id) is None:
+                raise PermissionError("Cannot find the tenant that owns the knowledge base.")
+            kb = KnowledgebaseService.get_owned_for_update(kb_id, owner_tenant_id)
+            if kb is None:
+                raise PermissionError("Cannot find an owned knowledge base.")
+
+            tenant_root = cls._get_or_create_tenant_root_in_transaction(owner_tenant_id)
+
+            kb_parent = cls._get_or_create_folder_in_transaction(
+                owner_tenant_id,
+                tenant_root.id,
+                KNOWLEDGEBASE_FOLDER_NAME,
+            )
+            kb_root = cls._get_or_create_folder_in_transaction(
+                owner_tenant_id,
+                kb_parent.id,
+                kb.name,
+            )
+            return kb_root.to_dict()
 
     @classmethod
     @DB.connection_context()
@@ -242,22 +388,10 @@ class FileService(CommonService):
         #     tenant_id: Tenant ID
         # Returns:
         #     Root folder dictionary
-        for file in cls.model.select().where((cls.model.tenant_id == tenant_id), (cls.model.parent_id == cls.model.id)):
-            return file.to_dict()
-
-        file_id = get_uuid()
-        file = {
-            "id": file_id,
-            "parent_id": file_id,
-            "tenant_id": tenant_id,
-            "created_by": tenant_id,
-            "name": "/",
-            "type": FileType.FOLDER.value,
-            "size": 0,
-            "location": "",
-        }
-        cls.save(**file)
-        return file
+        with DB.atomic():
+            if cls.lock_tenant_file_tree_in_transaction(tenant_id) is None:
+                raise PermissionError("Cannot find the tenant that owns the file tree.")
+            return cls._get_or_create_tenant_root_in_transaction(tenant_id).to_dict()
 
     @classmethod
     @DB.connection_context()
@@ -267,13 +401,15 @@ class FileService(CommonService):
         #     tenant_id: Tenant ID
         # Returns:
         #     Knowledge base folder dictionary
-        root_folder = cls.get_root_folder(tenant_id)
-        root_id = root_folder["id"]
-        kb_folder = cls.model.select().where((cls.model.tenant_id == tenant_id), (cls.model.parent_id == root_id), (cls.model.name == KNOWLEDGEBASE_FOLDER_NAME)).first()
-        if not kb_folder:
-            kb_folder = cls.new_a_file_from_kb(tenant_id, KNOWLEDGEBASE_FOLDER_NAME, root_id)
-            return kb_folder
-        return kb_folder.to_dict()
+        with DB.atomic():
+            if cls.lock_tenant_file_tree_in_transaction(tenant_id) is None:
+                raise PermissionError("Cannot find the tenant that owns the file tree.")
+            root_folder = cls._get_or_create_tenant_root_in_transaction(tenant_id)
+            return cls._get_or_create_folder_in_transaction(
+                tenant_id,
+                root_folder.id,
+                KNOWLEDGEBASE_FOLDER_NAME,
+            ).to_dict()
 
     @classmethod
     @DB.connection_context()
@@ -333,14 +469,46 @@ class FileService(CommonService):
         # Args:
         #     root_id: Root folder ID
         #     tenant_id: Tenant ID
-        for _ in cls.model.select().where((cls.model.name == KNOWLEDGEBASE_FOLDER_NAME) & (cls.model.parent_id == root_id)):
-            return
-        folder = cls.new_a_file_from_kb(tenant_id, KNOWLEDGEBASE_FOLDER_NAME, root_id)
+        with DB.atomic():
+            if cls.lock_tenant_file_tree_in_transaction(tenant_id) is None:
+                raise PermissionError("Cannot find the tenant that owns the file tree.")
+            tenant_root = cls._get_or_create_tenant_root_in_transaction(tenant_id)
+            if tenant_root.id != root_id:
+                raise RuntimeError("The supplied root folder does not match the tenant file tree.")
+            existing_kb_parent = list(
+                cls.model.select().where(
+                    cls.model.tenant_id == tenant_id,
+                    cls.model.parent_id == tenant_root.id,
+                    cls.model.name == KNOWLEDGEBASE_FOLDER_NAME,
+                )
+            )
+            if existing_kb_parent:
+                cls._get_or_create_folder_in_transaction(
+                    tenant_id,
+                    tenant_root.id,
+                    KNOWLEDGEBASE_FOLDER_NAME,
+                )
+                return
+            kb_parent = cls._get_or_create_folder_in_transaction(
+                tenant_id,
+                tenant_root.id,
+                KNOWLEDGEBASE_FOLDER_NAME,
+            )
 
-        for kb in Knowledgebase.select(*[Knowledgebase.id, Knowledgebase.name]).where(Knowledgebase.tenant_id == tenant_id):
-            kb_folder = cls.new_a_file_from_kb(tenant_id, kb.name, folder["id"])
-            for doc in DocumentService.query(kb_id=kb.id):
-                FileService.add_file_from_kb(doc.to_dict(), kb_folder["id"], tenant_id)
+            for kb in Knowledgebase.select(Knowledgebase.id).where(
+                Knowledgebase.tenant_id == tenant_id,
+                Knowledgebase.status == StatusEnum.VALID.value,
+            ):
+                locked_kb = KnowledgebaseService.get_owned_for_update(kb.id, tenant_id)
+                if locked_kb is None:
+                    continue
+                kb_folder = cls._get_or_create_folder_in_transaction(
+                    tenant_id,
+                    kb_parent.id,
+                    locked_kb.name,
+                )
+                for doc in DocumentService.query(kb_id=kb.id):
+                    FileService.add_file_from_kb(doc.to_dict(), kb_folder.id, tenant_id)
 
     @classmethod
     @DB.connection_context()
@@ -588,8 +756,7 @@ class FileService(CommonService):
         root_folder = self.get_root_folder(owner_tenant_id)
         pf_id = root_folder["id"]
         self.init_knowledgebase_docs(pf_id, owner_tenant_id)
-        kb_root_folder = self.get_kb_folder(owner_tenant_id)
-        kb_folder = self.new_a_file_from_kb(owner_tenant_id, kb.name, kb_root_folder["id"])
+        kb_folder = self.get_or_create_kb_root(kb.id, owner_tenant_id)
         upload_root_folder_id = parent_folder_id or kb_folder["id"]
 
         safe_parent_path = sanitize_path(parent_path)
