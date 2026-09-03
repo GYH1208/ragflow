@@ -90,7 +90,10 @@ class RAGFlowExcelParser:
         df = RAGFlowExcelParser._clean_dataframe(df)
         wb = Workbook()
         ws = wb.active
-        ws.title = "Data"
+        # This is an implicit sheet created while converting a CSV/DataFrame.
+        # Keep the conventional "Sheet" prefix so __call__ does not expose a
+        # synthetic sheet name (for example "——Data") in every parsed row.
+        ws.title = "Sheet1"
         RAGFlowExcelParser._fill_worksheet_from_dataframe(ws, df)
         return wb
 

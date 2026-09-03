@@ -533,6 +533,49 @@ DOCUMENT_IDENTIFIER_PATTERN = re.compile(
     r"(?![A-Z0-9])",
     flags=re.IGNORECASE,
 )
+SVN_PATH_EXPLICIT_PHRASES = (
+    "svn路径",
+    "svn地址",
+    "文件路径",
+    "文档路径",
+    "完整路径",
+    "存放路径",
+    "文件地址",
+    "文件链接",
+    "下载地址",
+    "下载链接",
+)
+SVN_PATH_LOCATION_PHRASES = (
+    "在哪里",
+    "在哪儿",
+    "在哪",
+    "哪里",
+    "放哪",
+    "存哪",
+    "哪个目录",
+    "怎么找",
+    "如何找到",
+    "从哪里下载",
+    "从哪下载",
+    "从哪里获取",
+    "从哪获取",
+)
+SVN_PATH_DOCUMENT_TERMS = (
+    "文件",
+    "文档",
+    "手册",
+    "制度",
+    "规范",
+    "说明书",
+    "记录表",
+    "表格",
+)
+CONTENT_ADDRESS_PATTERN = re.compile(
+    r"(?:文中|正文|文件中|文档中|手册中).{0,12}"
+    r"(?:系统|服务器|接口|网站|访问|ip).{0,8}(?:地址|路径|链接)",
+    flags=re.IGNORECASE,
+)
+DEFAULT_SVN_PATH_INDEX_DOCUMENT = "SVN文件索引.csv"
 DEFAULT_NO_EVIDENCE_RESPONSE = (
     "知识库中未找到明确依据。请确认文件已上传并完成解析，"
     "或补充文件名、文件编号、版本号或具体业务场景。"
@@ -649,6 +692,68 @@ def _extract_document_identifiers(question: str) -> list[str]:
 
 def _normalize_document_identifier(value: str) -> str:
     return re.sub(r"[_\s-]+", "-", (value or "").upper())
+
+
+def _is_svn_path_question(question: str) -> bool:
+    normalized = re.sub(
+        r"\s+",
+        "",
+        unicodedata.normalize("NFKC", question or "").casefold(),
+    )
+    refers_to_file_itself = any(
+        phrase in normalized
+        for phrase in ("文件本身", "该文件本身", "这个文件本身")
+    )
+    if CONTENT_ADDRESS_PATTERN.search(normalized) and not refers_to_file_itself:
+        return False
+    if any(phrase in normalized for phrase in SVN_PATH_EXPLICIT_PHRASES):
+        return True
+
+    has_document_term = any(
+        term in normalized for term in SVN_PATH_DOCUMENT_TERMS
+    )
+    has_location_phrase = any(
+        phrase in normalized for phrase in SVN_PATH_LOCATION_PHRASES
+    )
+    if has_document_term and has_location_phrase:
+        return True
+
+    identifiers = _extract_document_identifiers(normalized)
+    return bool(identifiers) and any(
+        term in normalized
+        for term in ("路径", "位置", "目录", "存放", "下载", "归档")
+    )
+
+
+def _resolve_named_document_scope(
+    document_name: str,
+    kb_ids: list[str],
+) -> list[str]:
+    target_name = re.split(r"[/\\]", document_name.strip())[-1].casefold()
+    documents = DocumentService.get_ready_by_name_keyword(kb_ids, document_name)
+    document_ids = []
+    for document in documents:
+        candidate_name = re.split(
+            r"[/\\]",
+            str(document.get("name") or ""),
+        )[-1].casefold()
+        document_id = document.get("id")
+        if candidate_name == target_name and document_id not in document_ids:
+            document_ids.append(document_id)
+    return document_ids
+
+
+def _get_svn_path_index_document(prompt_config: dict) -> str:
+    configured_name = str(
+        prompt_config.get("svn_path_index_document") or ""
+    ).strip()
+    if configured_name:
+        return configured_name
+
+    system_prompt = str(prompt_config.get("system") or "")
+    if DEFAULT_SVN_PATH_INDEX_DOCUMENT in system_prompt:
+        return DEFAULT_SVN_PATH_INDEX_DOCUMENT
+    return ""
 
 
 def _resolve_document_code_scope(
@@ -886,10 +991,18 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
 
     exact_identifiers, exact_document_ids = [], None
     if attachments is None:
-        exact_identifiers, exact_document_ids = _resolve_document_code_scope(
-            generation_question,
-            dialog.kb_ids,
-        )
+        path_index_document = _get_svn_path_index_document(prompt_config)
+        if path_index_document and _is_svn_path_question(generation_question):
+            exact_identifiers = [path_index_document]
+            exact_document_ids = _resolve_named_document_scope(
+                path_index_document,
+                dialog.kb_ids,
+            )
+        else:
+            exact_identifiers, exact_document_ids = _resolve_document_code_scope(
+                generation_question,
+                dialog.kb_ids,
+            )
         if exact_document_ids is not None:
             attachments = exact_document_ids
     if exact_identifiers and exact_document_ids == []:

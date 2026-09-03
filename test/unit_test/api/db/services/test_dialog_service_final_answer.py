@@ -424,6 +424,7 @@ def _run_reference_async_chat(
     field_map=None,
     sql_answer=None,
     dialog_llm_setting=None,
+    prompt_config_overrides=None,
     async_chat_kwargs=None,
 ):
     chat_mdl = _RecordingChatModel(answer)
@@ -525,6 +526,8 @@ def _run_reference_async_chat(
     dialog = _make_dialog(chat_mdl)
     if dialog_llm_setting is not None:
         dialog.llm_setting = dialog_llm_setting
+    if prompt_config_overrides:
+        dialog.prompt_config.update(prompt_config_overrides)
     dialog.prompt_config["refine_multiturn"] = refine_multiturn
     events = _collect(
         dialog_service.async_chat(
@@ -1705,6 +1708,143 @@ def test_exact_document_identifier_scopes_retrieval_to_ready_documents(
     assert retriever.retrieval_calls[-1][1]["doc_ids"] == [
         "ready-document-id",
     ]
+
+
+@pytest.mark.p2
+def test_svn_path_question_scopes_retrieval_to_configured_index_document(
+    monkeypatch,
+):
+    def fake_get_ready_by_name_keyword(_kb_ids, keyword):
+        if keyword == "SVN文件索引.csv":
+            return [{"id": "svn-index-id", "name": "SVN文件索引.csv"}]
+        if keyword == "BDWI-YF-069":
+            return [
+                {
+                    "id": "source-document-id",
+                    "name": "BDWI-YF-069_V1.0_硬件开发流程说明书.docx",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(
+        dialog_service.DocumentService,
+        "get_ready_by_name_keyword",
+        fake_get_ready_by_name_keyword,
+    )
+
+    _, _, retriever = _run_reference_async_chat(
+        monkeypatch,
+        answer="文件名：硬件开发流程说明书\nSVN路径：https://svn.example/file",
+        kbinfos=_make_reference_kbinfos(),
+        messages=[
+            {
+                "role": "user",
+                "content": "BDWI-YF-069_V1.0_硬件开发流程说明书的文件路径是什么？",
+            }
+        ],
+        prompt_config_overrides={"svn_path_index_document": "SVN文件索引.csv"},
+    )
+
+    assert retriever.retrieval_calls[-1][1]["doc_ids"] == ["svn-index-id"]
+
+
+@pytest.mark.p2
+def test_svn_path_question_uses_index_named_in_system_prompt(
+    monkeypatch,
+):
+    def fake_get_ready_by_name_keyword(_kb_ids, keyword):
+        if keyword == "SVN文件索引.csv":
+            return [{"id": "svn-index-id", "name": "SVN文件索引.csv"}]
+        if keyword == "BDWI-YF-069":
+            return [
+                {
+                    "id": "source-document-id",
+                    "name": "BDWI-YF-069_V1.0_硬件开发流程说明书.docx",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(
+        dialog_service.DocumentService,
+        "get_ready_by_name_keyword",
+        fake_get_ready_by_name_keyword,
+    )
+
+    _, _, retriever = _run_reference_async_chat(
+        monkeypatch,
+        answer="文件名：硬件开发流程说明书\nSVN路径：https://svn.example/file",
+        kbinfos=_make_reference_kbinfos(),
+        messages=[
+            {
+                "role": "user",
+                "content": "BDWI-YF-069_V1.0_硬件开发流程说明书的文件路径是什么？",
+            }
+        ],
+        prompt_config_overrides={
+            "system": "查询文件位置时，只使用《SVN文件索引.csv》回答。"
+        },
+    )
+
+    assert retriever.retrieval_calls[-1][1]["doc_ids"] == ["svn-index-id"]
+
+
+@pytest.mark.p2
+def test_svn_path_routing_keeps_content_question_on_exact_source_document(
+    monkeypatch,
+):
+    def fake_get_ready_by_name_keyword(_kb_ids, keyword):
+        if keyword == "SVN文件索引.csv":
+            return [{"id": "svn-index-id", "name": "SVN文件索引.csv"}]
+        if keyword == "BDWI-YF-069":
+            return [
+                {
+                    "id": "source-document-id",
+                    "name": "BDWI-YF-069_V1.0_硬件开发流程说明书.docx",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(
+        dialog_service.DocumentService,
+        "get_ready_by_name_keyword",
+        fake_get_ready_by_name_keyword,
+    )
+
+    _, _, retriever = _run_reference_async_chat(
+        monkeypatch,
+        answer="文件规定了硬件开发流程。",
+        kbinfos=_make_reference_kbinfos(),
+        messages=[
+            {
+                "role": "user",
+                "content": "BDWI-YF-069_V1.0 规定了哪些流程？",
+            }
+        ],
+        prompt_config_overrides={"svn_path_index_document": "SVN文件索引.csv"},
+    )
+
+    assert retriever.retrieval_calls[-1][1]["doc_ids"] == [
+        "source-document-id"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("BDWI-YF-069 的 SVN 路径是什么？", True),
+        ("这个文件存放在哪里？", True),
+        ("请把软件管理手册的完整路径发给我", True),
+        ("从哪里下载这份说明书？", True),
+        ("BDWI-YF-069 规定了哪些流程？", False),
+        ("文件中提到的系统访问地址是什么？", False),
+        ("文档对存放管理有什么规定？", False),
+    ],
+)
+def test_detect_svn_path_question_without_misrouting_content_questions(
+    question,
+    expected,
+):
+    assert dialog_service._is_svn_path_question(question) is expected
 
 
 @pytest.mark.p2

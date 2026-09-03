@@ -50,6 +50,24 @@ _spec.loader.exec_module(_mod)
 RAGFlowExcelParser = _mod.RAGFlowExcelParser
 
 
+@pytest.mark.p2
+def test_dataframe_workbook_uses_implicit_sheet_name_without_row_suffix(
+    monkeypatch,
+):
+    dataframe = mock.MagicMock()
+    dataframe.columns = ["文件名", "SVN完整路径"]
+    dataframe.values = [["example.docx", "https://svn.example/example.docx"]]
+    monkeypatch.setattr(
+        RAGFlowExcelParser,
+        "_clean_dataframe",
+        lambda value: value,
+    )
+
+    workbook = RAGFlowExcelParser._dataframe_to_workbook(dataframe)
+
+    assert workbook.active.title == "Sheet1"
+
+
 def _make_xlsx(n_data_rows):
     from openpyxl import Workbook
 
