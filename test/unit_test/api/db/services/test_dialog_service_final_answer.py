@@ -1148,6 +1148,59 @@ def test_normalize_answer_citations(
     )
 
 
+def test_repair_bad_citation_formats_wraps_standalone_bare_ids():
+    kbinfos = {"chunks": [{}, {}, {}, {}]}
+    cited = set()
+
+    answer, cited = dialog_service.repair_bad_citation_formats(
+        "上述研究中，除ID:3外，另一项结论见 ID：١。",
+        kbinfos,
+        cited,
+    )
+
+    assert answer == "上述研究中，除[ID:3]外，另一项结论见 [ID:١]。"
+    assert cited == {1, 3}
+
+
+def test_repair_bad_citation_formats_does_not_rewrite_embedded_business_id():
+    kbinfos = {"chunks": [{}, {}, {}, {}]}
+
+    answer, cited = dialog_service.repair_bad_citation_formats(
+        "设备deviceID:3，证据ID:2。",
+        kbinfos,
+        set(),
+    )
+
+    assert answer == "设备deviceID:3，证据[ID:2]。"
+    assert cited == {2}
+
+
+def test_bare_out_of_range_citation_is_removed_during_normalization():
+    kbinfos = {"chunks": [{}, {}]}
+
+    repaired, cited = dialog_service.repair_bad_citation_formats(
+        "有效 ID:1，无效 ID:42。",
+        kbinfos,
+        set(),
+    )
+    normalized = dialog_service._normalize_answer_citations(
+        repaired,
+        len(kbinfos["chunks"]),
+    )
+
+    assert repaired == "有效 [ID:1]，无效 [ID:42]。"
+    assert cited == {1}
+    assert normalized == ("有效 [ID:1]，无效 。", {1}, [42], 2)
+
+
+def test_citation_prompt_requires_named_sources_and_synthesis_check():
+    prompt = dialog_service.citation_prompt()
+
+    assert "Never use `ID:i` as a document name" in prompt
+    assert "conclusion must not contradict an earlier evidence table" in prompt
+    assert 'words such as "all", "only", "none", or' in prompt
+
+
 def test_build_cited_doc_aggs_deduplicates_by_doc_id():
     chunks = [
         {
@@ -1253,6 +1306,22 @@ def test_async_chat_uses_only_auto_inserted_citation_docs(monkeypatch):
     assert "[ID:2]" in final["answer"]
     assert [doc["doc_id"] for doc in final["reference"]["doc_aggs"]] == [
         "doc-2",
+    ]
+
+
+@pytest.mark.p2
+def test_async_chat_bare_citation_skips_auto_insertion(monkeypatch):
+    final, _, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="已有裸引用 ID:1。",
+        kbinfos=_make_reference_kbinfos(),
+        inserted_indices={2},
+    )
+
+    assert final["answer"] == "已有裸引用 [ID:1]。"
+    assert "[ID:2]" not in final["answer"]
+    assert [doc["doc_id"] for doc in final["reference"]["doc_aggs"]] == [
+        "doc-1",
     ]
 
 
@@ -1551,6 +1620,36 @@ def test_exact_faq_answer_ignores_source_citation_markers(monkeypatch):
     assert final["answer"].startswith("余李")
     assert "ID:9" not in final["answer"]
     assert final["reference"]["doc_aggs"][0]["doc_id"] == "faq-doc"
+    assert chat_mdl.chat_calls == []
+
+
+@pytest.mark.p2
+@pytest.mark.parametrize("quote", [False, True])
+def test_exact_faq_stream_removes_bare_source_citation_markers(
+    monkeypatch,
+    quote,
+):
+    kbinfos = _make_faq_kbinfos()
+    kbinfos["chunks"][0]["content_with_weight"] = (
+        "问题：云文档的相关问题可以找谁咨询呢？；回答：余李 ID:9"
+    )
+
+    events, chat_mdl, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="错误联系人：IT-陶正浩",
+        kbinfos=kbinfos,
+        messages=[
+            {
+                "role": "user",
+                "content": "云文档的相关问题可以找谁咨询呢？",
+            }
+        ],
+        stream=True,
+        quote=quote,
+    )
+
+    assert all("ID:9" not in event["answer"] for event in events)
+    assert events[0]["answer"] == "余李"
     assert chat_mdl.chat_calls == []
 
 

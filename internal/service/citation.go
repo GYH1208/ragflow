@@ -19,7 +19,9 @@ package service
 import (
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // sentenceSplitRE splits text on Chinese / English / Arabic sentence-ending
@@ -44,6 +46,8 @@ var badCitationPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`【\s*ID\s*[:： ]*\s*([0-9\x{0660}-\x{0669}\x{06F0}-\x{06F9}]+)\s*】`),   // 【ID: 12】
 	regexp.MustCompile(`(?i)\bref\s*([0-9\x{0660}-\x{0669}\x{06F0}-\x{06F9}]+)\b`),           // ref12
 }
+
+var bareCitationPattern = regexp.MustCompile(`(?i)ID\s*[:：]\s*([0-9\x{0660}-\x{0669}\x{06F0}-\x{06F9}]+)`)
 
 // InsertCitations decorates answer with [ID:n] citation markers.
 //
@@ -294,12 +298,79 @@ func normalizeArabicDigits(s string) string {
 	return b.String()
 }
 
-// HasCitationMarkers reports whether answer already contains canonical citation markers.
+func isASCIIWordRune(r rune) bool {
+	return r == '_' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z'
+}
+
+func isStandaloneBareCitation(answer string, start, end int) bool {
+	if start > 0 {
+		previous, _ := utf8.DecodeLastRuneInString(answer[:start])
+		if isASCIIWordRune(previous) || strings.ContainsRune("[（(【", previous) {
+			return false
+		}
+	}
+	if end < len(answer) {
+		next, _ := utf8.DecodeRuneInString(answer[end:])
+		if isASCIIWordRune(next) || strings.ContainsRune("]）)】", next) {
+			return false
+		}
+	}
+	return true
+}
+
+func bareCitationMatches(answer string) [][]int {
+	var matches [][]int
+	for _, match := range bareCitationPattern.FindAllStringSubmatchIndex(answer, -1) {
+		if isStandaloneBareCitation(answer, match[0], match[1]) {
+			matches = append(matches, match)
+		}
+	}
+	return matches
+}
+
+// HasCitationMarkers reports whether answer already contains canonical or
+// repairable standalone citation markers.
 func HasCitationMarkers(answer string) bool {
 	if answer == "" {
 		return false
 	}
-	return CitationMarkerPattern.MatchString(normalizeArabicDigits(answer))
+	return CitationMarkerPattern.MatchString(normalizeArabicDigits(answer)) || len(bareCitationMatches(answer)) > 0
+}
+
+// NormalizeAnswerCitations removes out-of-range canonical markers and returns
+// the valid and invalid indices in first-seen order.
+func NormalizeAnswerCitations(answer string, maxIndex int) (string, []int, []int, int) {
+	validSeen := make(map[int]struct{})
+	invalidSeen := make(map[int]struct{})
+	var valid []int
+	var invalid []int
+	count := 0
+
+	cleaned := CitationMarkerPattern.ReplaceAllStringFunc(answer, func(marker string) string {
+		count++
+		match := CitationMarkerPattern.FindStringSubmatch(normalizeArabicDigits(marker))
+		if len(match) < 2 {
+			return ""
+		}
+		index, err := strconv.Atoi(match[1])
+		if err != nil {
+			return ""
+		}
+		if index >= 0 && index < maxIndex {
+			if _, exists := validSeen[index]; !exists {
+				validSeen[index] = struct{}{}
+				valid = append(valid, index)
+			}
+			return marker
+		}
+		if _, exists := invalidSeen[index]; !exists {
+			invalidSeen[index] = struct{}{}
+			invalid = append(invalid, index)
+		}
+		return ""
+	})
+
+	return cleaned, valid, invalid, count
 }
 
 // ExtractCitationMarkers returns chunk indices from citation markers within [0, maxIndex).
@@ -355,6 +426,23 @@ func RepairBadCitationFormats(answer string) string {
 			b.WriteString(digits)
 			b.WriteString("]")
 			last = m[1]
+		}
+		b.WriteString(working[last:])
+		working = b.String()
+	}
+
+	matches := bareCitationMatches(working)
+	if len(matches) > 0 {
+		var b strings.Builder
+		b.Grow(len(working))
+		last := 0
+		for _, match := range matches {
+			b.WriteString(working[last:match[0]])
+			digits := normalizeArabicDigits(working[match[2]:match[3]])
+			b.WriteString("[ID:")
+			b.WriteString(digits)
+			b.WriteString("]")
+			last = match[1]
 		}
 		b.WriteString(working[last:])
 		working = b.String()

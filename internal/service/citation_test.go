@@ -19,6 +19,7 @@ package service
 import (
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -289,6 +290,46 @@ func TestInsertCitations_EncodeEmpty(t *testing.T) {
 	c, _ := InsertCitations("Hello world.", []SourcedChunk{{ID: "c1"}}, &fakeEmbedder{vecs: [][]float64{}}, [][]float64{{1, 0}})
 	if c != "Hello world." {
 		t.Errorf("empty encode result should return original: %q", c)
+	}
+}
+
+func TestHasCitationMarkers_RecognizesStandaloneBareMarker(t *testing.T) {
+	for _, answer := range []string{
+		"evidence ID:3",
+		"证据 ID：١。",
+	} {
+		if !HasCitationMarkers(answer) {
+			t.Errorf("HasCitationMarkers(%q) = false, want true", answer)
+		}
+	}
+
+	if HasCitationMarkers("deviceID:3") {
+		t.Error("embedded business identifier must not be treated as a citation")
+	}
+}
+
+func TestRepairBadCitationFormats_RepairsBareMarkerOnly(t *testing.T) {
+	answer := RepairBadCitationFormats("设备deviceID:3，证据 ID：١。")
+	if answer != "设备deviceID:3，证据 [ID:1]。" {
+		t.Errorf("unexpected repaired answer: %q", answer)
+	}
+}
+
+func TestNormalizeAnswerCitations_RemovesOutOfRangeBareMarker(t *testing.T) {
+	repaired := RepairBadCitationFormats("有效 ID:1，无效 ID:42。")
+	answer, valid, invalid, count := NormalizeAnswerCitations(repaired, 2)
+
+	if answer != "有效 [ID:1]，无效 。" {
+		t.Errorf("unexpected normalized answer: %q", answer)
+	}
+	if !reflect.DeepEqual(valid, []int{1}) {
+		t.Errorf("valid indices = %v, want [1]", valid)
+	}
+	if !reflect.DeepEqual(invalid, []int{42}) {
+		t.Errorf("invalid indices = %v, want [42]", invalid)
+	}
+	if count != 2 {
+		t.Errorf("citation count = %d, want 2", count)
 	}
 }
 

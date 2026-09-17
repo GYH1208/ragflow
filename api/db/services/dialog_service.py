@@ -518,6 +518,12 @@ BAD_CITATION_PATTERNS = [
     re.compile(r"【\s*ID\s*[: ]*\s*(\d+)\s*】"),  # 【ID: 12】
     re.compile(r"ref\s*(\d+)", flags=re.IGNORECASE),  # ref12、REF 12
 ]
+BARE_CITATION_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_\[（(【])"
+    r"ID\s*[:：]\s*([0-9\u0660-\u0669\u06F0-\u06F9]+)"
+    r"(?![A-Za-z0-9_\]）)】])",
+    flags=re.IGNORECASE,
+)
 CITATION_MARKER_PATTERN = re.compile(r"\[(?:ID:)?([0-9\u0660-\u0669\u06F0-\u06F9]+)\]")
 FAQ_PAIR_PATTERN = re.compile(
     r"问题\s*[:：]\s*(?P<question>.*?)\s*[;；]\s*"
@@ -602,6 +608,7 @@ def _sanitize_exact_faq_answer(answer: str) -> str:
     sanitized = answer or ""
     for pattern in BAD_CITATION_PATTERNS:
         sanitized = pattern.sub("", sanitized)
+    sanitized = BARE_CITATION_PATTERN.sub("", sanitized)
     sanitized = CITATION_MARKER_PATTERN.sub("", sanitized)
     return re.sub(r"[ \t]+", " ", sanitized).strip()
 
@@ -805,7 +812,12 @@ def repair_bad_citation_formats(answer: str, kbinfos: dict, idx: set):
             return True
         return False
 
-    def find_and_replace(pattern, group_index=1, repl=lambda digits: f"ID:{digits}"):
+    def find_and_replace(
+        pattern,
+        group_index=1,
+        repl=lambda digits: f"ID:{digits}",
+        wrap_out_of_range=False,
+    ):
         nonlocal answer
         nonlocal normalized_answer
 
@@ -824,7 +836,7 @@ def repair_bad_citation_formats(answer: str, kbinfos: dict, idx: set):
                 last_idx = match.end()
                 continue
 
-            if safe_add(i):
+            if safe_add(i) or wrap_out_of_range:
                 digit_start, digit_end = match.span(group_index)
                 digits_original = answer[digit_start:digit_end]
                 parts.append(f"[{repl(digits_original)}]")
@@ -838,6 +850,12 @@ def repair_bad_citation_formats(answer: str, kbinfos: dict, idx: set):
 
     for pattern in BAD_CITATION_PATTERNS:
         find_and_replace(pattern)
+    # Models occasionally omit the brackets required by the citation contract,
+    # for example: "除ID:3外".  Only treat a standalone ID marker as a citation;
+    # embedded business identifiers such as "deviceID:3" remain untouched.
+    # Wrapping out-of-range values lets _normalize_answer_citations remove them
+    # instead of leaking an invalid internal evidence index to the user.
+    find_and_replace(BARE_CITATION_PATTERN, wrap_out_of_range=True)
 
     return answer, idx
 
@@ -1178,11 +1196,15 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         if include_references:
             candidate_doc_count = len(kbinfos.get("doc_aggs", []))
             chunks = kbinfos.get("chunks", [])
+            idx: set[int] = set()
+            # Canonicalize repairable model citations before deciding whether
+            # semantic citation insertion is needed. Otherwise a bare `ID:n`
+            # is mistaken for an uncited answer and receives extra references.
+            answer, idx = repair_bad_citation_formats(answer, kbinfos, idx)
             had_explicit_citations = bool(
                 CITATION_MARKER_PATTERN.search(answer or "")
             )
             reference_mode = "explicit" if had_explicit_citations else "none"
-            idx: set[int] = set()
             if embd_mdl and not had_explicit_citations:
                 # Main retrieval no longer ships chunk vectors back from ES.
                 # Pull them on demand for the chunks we are about to cite.
@@ -1203,7 +1225,6 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
                 if idx:
                     reference_mode = "auto_inserted"
 
-            answer, idx = repair_bad_citation_formats(answer, kbinfos, idx)
             answer, parsed_idx, invalid_idx, explicit_count = (
                 _normalize_answer_citations(answer, len(chunks))
             )

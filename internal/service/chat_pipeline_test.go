@@ -26,7 +26,25 @@ import (
 	"ragflow/internal/common"
 	"ragflow/internal/engine"
 	"ragflow/internal/entity"
+	modelModule "ragflow/internal/entity/models"
 )
+
+type fixedCitationEmbeddingDriver struct {
+	modelModule.ModelDriver
+}
+
+func (d *fixedCitationEmbeddingDriver) Embed(
+	_ *string,
+	texts []string,
+	_ *modelModule.APIConfig,
+	_ *modelModule.EmbeddingConfig,
+) ([]modelModule.EmbeddingData, error) {
+	result := make([]modelModule.EmbeddingData, len(texts))
+	for i := range texts {
+		result[i] = modelModule.EmbeddingData{Embedding: []float64{0, 0, 1}, Index: i}
+	}
+	return result, nil
+}
 
 // dialForTest builds a minimal *entity.Chat suitable for the
 // guard-clause tests. KBs are empty so AsyncChat goes through
@@ -270,7 +288,7 @@ func TestDecorateAnswer_RepairRunsWhenQuote(t *testing.T) {
 	}
 	result := s.decorateAnswer(
 		context.Background(),
-		"see (ID: 12) for details",
+		"see (ID: 0) for details",
 		kb,
 		"system prompt",
 		[]string{"q"},
@@ -284,8 +302,265 @@ func TestDecorateAnswer_RepairRunsWhenQuote(t *testing.T) {
 		nil,
 		true,
 	)
-	if !strings.Contains(result.Answer, "[ID:12]") {
-		t.Errorf("quote=true must repair to [ID:12], got %q", result.Answer)
+	if !strings.Contains(result.Answer, "[ID:0]") {
+		t.Errorf("quote=true must repair to [ID:0], got %q", result.Answer)
+	}
+}
+
+func TestDecorateAnswer_RemovesOutOfRangeBareCitation(t *testing.T) {
+	s := &ChatPipelineService{}
+	timer, _ := newTimerAndPrompt()
+	result := s.decorateAnswer(
+		context.Background(),
+		"valid ID:0, invalid ID:42",
+		map[string]interface{}{
+			"chunks": []map[string]interface{}{
+				{
+					"chunk_id":            "c1",
+					"content_with_weight": "hello world",
+					"doc_id":              "d1",
+				},
+			},
+			"doc_aggs": []interface{}{},
+		},
+		"system prompt",
+		[]string{"q"},
+		0,
+		timer,
+		nil, 0.0, true,
+		nil,
+		"",
+		nil,
+		"",
+		nil,
+		true,
+	)
+
+	if result.Answer != "valid [ID:0], invalid " {
+		t.Errorf("unexpected normalized answer: %q", result.Answer)
+	}
+}
+
+func TestDecorateAnswer_BareCitationSkipsAutomaticInsertion(t *testing.T) {
+	s := &ChatPipelineService{}
+	timer, _ := newTimerAndPrompt()
+	modelName := "test-embedding"
+	embModel := modelModule.NewEmbeddingModel(
+		&fixedCitationEmbeddingDriver{},
+		&modelName,
+		&modelModule.APIConfig{},
+		8192,
+	)
+	result := s.decorateAnswer(
+		context.Background(),
+		"已有裸引用 ID:1。",
+		map[string]interface{}{
+			"chunks": []map[string]interface{}{
+				{"chunk_id": "c0", "content_with_weight": "zero", "doc_id": "d0", "vector": []float64{1, 0, 0}},
+				{"chunk_id": "c1", "content_with_weight": "one", "doc_id": "d1", "vector": []float64{0, 1, 0}},
+				{"chunk_id": "c2", "content_with_weight": "two", "doc_id": "d2", "vector": []float64{0, 0, 1}},
+			},
+			"doc_aggs": []interface{}{
+				map[string]interface{}{"doc_id": "d0"},
+				map[string]interface{}{"doc_id": "d1"},
+				map[string]interface{}{"doc_id": "d2"},
+			},
+		},
+		"system prompt",
+		[]string{"q"},
+		0,
+		timer,
+		embModel, 0.0, true,
+		nil,
+		"",
+		nil,
+		"",
+		nil,
+		true,
+	)
+
+	if result.Answer != "已有裸引用 [ID:1]。" {
+		t.Errorf("bare citation must prevent automatic insertion, got %q", result.Answer)
+	}
+}
+
+func TestDecorateAnswer_MalformedCitationSkipsAutomaticInsertion(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		answer   string
+		expected string
+	}{
+		{name: "parentheses", answer: "已有括号引用 (ID:1)。", expected: "已有括号引用 [ID:1]。"},
+		{name: "cjk brackets", answer: "已有中文括号引用 【ID:1】。", expected: "已有中文括号引用 [ID:1]。"},
+		{name: "ref shorthand", answer: "已有简写引用 ref1。", expected: "已有简写引用 [ID:1]。"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &ChatPipelineService{}
+			timer, _ := newTimerAndPrompt()
+			modelName := "test-embedding"
+			embModel := modelModule.NewEmbeddingModel(
+				&fixedCitationEmbeddingDriver{},
+				&modelName,
+				&modelModule.APIConfig{},
+				8192,
+			)
+			result := s.decorateAnswer(
+				context.Background(),
+				tc.answer,
+				map[string]interface{}{
+					"chunks": []map[string]interface{}{
+						{"chunk_id": "c0", "content_with_weight": "zero", "doc_id": "d0", "vector": []float64{1, 0, 0}},
+						{"chunk_id": "c1", "content_with_weight": "one", "doc_id": "d1", "vector": []float64{0, 1, 0}},
+						{"chunk_id": "c2", "content_with_weight": "two", "doc_id": "d2", "vector": []float64{0, 0, 1}},
+					},
+					"doc_aggs": []interface{}{
+						map[string]interface{}{"doc_id": "d0"},
+						map[string]interface{}{"doc_id": "d1"},
+						map[string]interface{}{"doc_id": "d2"},
+					},
+				},
+				"system prompt",
+				[]string{"q"},
+				0,
+				timer,
+				embModel, 0.0, true,
+				nil,
+				"",
+				nil,
+				"",
+				nil,
+				true,
+			)
+
+			if result.Answer != tc.expected {
+				t.Errorf("malformed citation must be repaired before insertion: want %q, got %q", tc.expected, result.Answer)
+			}
+			if strings.Contains(result.Answer, "[ID:2]") {
+				t.Errorf("malformed citation must prevent automatic insertion, got %q", result.Answer)
+			}
+		})
+	}
+}
+
+func TestDecorateAnswer_AutomaticInsertionKeepsCitedDocument(t *testing.T) {
+	s := &ChatPipelineService{}
+	timer, _ := newTimerAndPrompt()
+	modelName := "test-embedding"
+	embModel := modelModule.NewEmbeddingModel(
+		&fixedCitationEmbeddingDriver{},
+		&modelName,
+		&modelModule.APIConfig{},
+		8192,
+	)
+	result := s.decorateAnswer(
+		context.Background(),
+		"这是一个需要自动添加来源的完整回答。",
+		map[string]interface{}{
+			"chunks": []map[string]interface{}{
+				{"chunk_id": "c0", "content_with_weight": "zero", "doc_id": "d0", "vector": []float64{1, 0, 0}},
+				{"chunk_id": "c1", "content_with_weight": "one", "doc_id": "d1", "vector": []float64{0, 1, 0}},
+				{"chunk_id": "c2", "content_with_weight": "two", "doc_id": "d2", "vector": []float64{0, 0, 1}},
+			},
+			"doc_aggs": []interface{}{
+				map[string]interface{}{"doc_id": "d0"},
+				map[string]interface{}{"doc_id": "d1"},
+				map[string]interface{}{"doc_id": "d2"},
+			},
+		},
+		"system prompt",
+		[]string{"q"},
+		0,
+		timer,
+		embModel, 0.0, true,
+		nil,
+		"",
+		nil,
+		"",
+		nil,
+		true,
+	)
+
+	if !strings.Contains(result.Answer, "[ID:c2]") {
+		t.Fatalf("expected automatic chunk citation [ID:c2], got %q", result.Answer)
+	}
+	docAggs, ok := result.Reference["doc_aggs"].([]interface{})
+	if !ok || len(docAggs) != 1 {
+		t.Fatalf("expected one cited document, got %#v", result.Reference["doc_aggs"])
+	}
+	doc, ok := docAggs[0].(map[string]interface{})
+	if !ok || doc["doc_id"] != "d2" {
+		t.Fatalf("expected cited document d2, got %#v", docAggs)
+	}
+}
+
+func TestDecorateAnswer_InvalidOnlyCitationUsesFallbackAndClearsDocAggs(t *testing.T) {
+	s := &ChatPipelineService{}
+	timer, _ := newTimerAndPrompt()
+	const fallback = "当前资料无法支持该回答。"
+	result := s.decorateAnswer(
+		context.Background(),
+		"无法验证的说法 [ID:42]。",
+		map[string]interface{}{
+			"chunks": []map[string]interface{}{
+				{"chunk_id": "c0", "content_with_weight": "zero", "doc_id": "d0"},
+			},
+			"doc_aggs": []interface{}{
+				map[string]interface{}{"doc_id": "d0"},
+			},
+		},
+		"system prompt",
+		[]string{"q"},
+		0,
+		timer,
+		nil, 0.0, true,
+		nil,
+		"",
+		nil,
+		"",
+		nil,
+		true,
+		fallback,
+	)
+
+	if result.Answer != fallback {
+		t.Fatalf("invalid-only citation should use fallback %q, got %q", fallback, result.Answer)
+	}
+	docAggs, ok := result.Reference["doc_aggs"].([]interface{})
+	if !ok {
+		t.Fatalf("doc_aggs has unexpected type: %T", result.Reference["doc_aggs"])
+	}
+	if len(docAggs) != 0 {
+		t.Fatalf("invalid-only citation should clear doc_aggs, got %#v", docAggs)
+	}
+}
+
+func TestDecorateAnswer_InvalidOnlyCitationUsesDefaultFallbackAndClearsThink(t *testing.T) {
+	s := &ChatPipelineService{}
+	timer, _ := newTimerAndPrompt()
+	result := s.decorateAnswer(
+		context.Background(),
+		"<think>unsupported reasoning</think>无法验证 [ID:42]。",
+		map[string]interface{}{
+			"chunks": []map[string]interface{}{
+				{"chunk_id": "c0", "content_with_weight": "zero", "doc_id": "d0"},
+			},
+			"doc_aggs": []interface{}{map[string]interface{}{"doc_id": "d0"}},
+		},
+		"system prompt",
+		[]string{"q"},
+		0,
+		timer,
+		nil, 0.0, true,
+		nil,
+		"",
+		nil,
+		"",
+		nil,
+		true,
+	)
+
+	if result.Answer != defaultNoEvidenceResponse {
+		t.Fatalf("invalid-only citation should clear think and use default fallback, got %q", result.Answer)
 	}
 }
 

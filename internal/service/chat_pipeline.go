@@ -1181,7 +1181,7 @@ func (s *ChatPipelineService) AsyncChat(
 			visibleAnswer := s.extractVisibleAnswer(fullReasoning + fullAnswer)
 
 			// Pass nil for ttsModel — audio was already produced per-delta.
-			final := s.decorateAnswer(ctx, visibleAnswer, kbinfos, prompt, questions, usedTokenCount, timer, embModel, chat.VectorSimilarityWeight, quote, nil, langfuseTraceID, llmModelConfig, chat.TenantID, kbTenantIDStrings(kbs), len(knowledges) > 0)
+			final := s.decorateAnswer(ctx, visibleAnswer, kbinfos, prompt, questions, usedTokenCount, timer, embModel, chat.VectorSimilarityWeight, quote, nil, langfuseTraceID, llmModelConfig, chat.TenantID, kbTenantIDStrings(kbs), len(knowledges) > 0, configuredEmptyResponse(promptConfig))
 			final.Final = true
 			final.AudioBinary = nil
 			timer.Exit(common.PhaseGenerateAnswer)
@@ -1224,7 +1224,7 @@ func (s *ChatPipelineService) AsyncChat(
 			common.Debug("User: " + userContent + "|Assistant: " + answer)
 
 			// Synthesize TTS for the full answer (non-stream, one-shot).
-			final := s.decorateAnswer(ctx, answer, kbinfos, prompt, questions, usedTokenCount, timer, embModel, chat.VectorSimilarityWeight, quote, ttsModel, langfuseTraceID, llmModelConfig, chat.TenantID, kbTenantIDStrings(kbs), len(knowledges) > 0)
+			final := s.decorateAnswer(ctx, answer, kbinfos, prompt, questions, usedTokenCount, timer, embModel, chat.VectorSimilarityWeight, quote, ttsModel, langfuseTraceID, llmModelConfig, chat.TenantID, kbTenantIDStrings(kbs), len(knowledges) > 0, configuredEmptyResponse(promptConfig))
 			final.Final = true
 			timer.Exit(common.PhaseGenerateAnswer)
 			out <- final
@@ -2527,6 +2527,24 @@ func (e *embeddingModelEmbedder) Encode(texts []string) ([][]float64, error) {
 	return vecs, nil
 }
 
+const defaultNoEvidenceResponse = "知识库中未找到明确依据。请确认文件已上传并完成解析，或补充文件名、文件编号、版本号或具体业务场景。"
+
+func configuredEmptyResponse(promptConfig map[string]interface{}) string {
+	if response, ok := promptConfig["empty_response"].(string); ok {
+		return strings.TrimSpace(response)
+	}
+	return ""
+}
+
+func noEvidenceResponse(configured []string) string {
+	if len(configured) > 0 {
+		if response := strings.TrimSpace(configured[0]); response != "" {
+			return response
+		}
+	}
+	return defaultNoEvidenceResponse
+}
+
 // decorateAnswer applies citation insertion, reference construction,
 // timing stats, token accounting, TTS, and Langfuse generation end to
 // the final answer.
@@ -2551,6 +2569,7 @@ func (s *ChatPipelineService) decorateAnswer(
 	tenantID string,
 	tenantIDs []string,
 	hasKnowledges bool,
+	emptyResponses ...string,
 ) AsyncChatResult {
 
 	// Handle think markers: split on </think>.
@@ -2575,19 +2594,26 @@ func (s *ChatPipelineService) decorateAnswer(
 	// dialog_service.py:790-802.
 	if hasKnowledges && quote {
 		chunksRaw, ok := kbinfos["chunks"].([]map[string]interface{})
-		if ok && len(chunksRaw) > 0 {
+		if ok {
+			// Canonicalize every supported malformed shape before deciding
+			// whether semantic insertion is needed. Otherwise forms such as
+			// `(ID:1)`, `【ID:1】`, and `ref1` look uncited and receive an
+			// unrelated extra citation.
+			ans = RepairBadCitationFormats(ans)
+			hadExplicitCitations := HasCitationMarkers(ans)
+
 			// P7 — _hydrate_chunk_vectors. Mirrors
 			// dialog_service.py:794. If any chunk lacks a `vector`
 			// field (true for the ES path; Infinity ships vectors
 			// inline), fetch them in one batched engine call. We only
 			// need this when we'll actually call insertCitations
 			// (i.e., the LLM didn't already emit markers).
-			if embModel != nil && !HasCitationMarkers(ans) {
+			if len(chunksRaw) > 0 && embModel != nil && !hadExplicitCitations {
 				if _, err := HydrateChunkVectors(ctx, kbinfos, tenantIDs, nil, engine.Get()); err != nil {
 					common.Warn("hydrate chunk vectors failed", zap.Error(err))
 				}
 			}
-			if embModel != nil && !HasCitationMarkers(ans) {
+			if len(chunksRaw) > 0 && embModel != nil && !hadExplicitCitations {
 				// Build chunkVectors aligned with chunksRaw.
 				chunkVectors := make([][]float64, len(chunksRaw))
 				allVec := len(chunksRaw) > 0
@@ -2608,60 +2634,52 @@ func (s *ChatPipelineService) decorateAnswer(
 						}
 					}
 				}
-			} else {
-				// P0.11 pre-check matched: collect indices from existing
-				// markers instead of calling insertCitations.
-				for _, ci := range ExtractCitationMarkers(ans, len(chunksRaw)) {
-					if citationIdx == nil {
-						citationIdx = make(map[int]struct{})
-					}
-					citationIdx[ci] = struct{}{}
-				}
 			}
-		}
 
-		// repair_bad_citation_formats — runs even when chunks are empty.
-		// Mirrors dialog_service.py:818.
-		if ok {
-			ans = RepairBadCitationFormats(ans)
-			for _, ci := range ExtractCitationMarkers(ans, len(chunksRaw)) {
-				if citationIdx == nil {
-					citationIdx = make(map[int]struct{})
-				}
+			var normalizedIdx, invalidIdx []int
+			var explicitCount int
+			ans, normalizedIdx, invalidIdx, explicitCount = NormalizeAnswerCitations(ans, len(chunksRaw))
+			if citationIdx == nil {
+				citationIdx = make(map[int]struct{}, len(normalizedIdx))
+			}
+			for _, ci := range normalizedIdx {
 				citationIdx[ci] = struct{}{}
 			}
-		}
 
-		// Map cited chunk indices to doc_ids and filter doc_aggs.
-		// Mirrors dialog_service.py:820-824.
-		if len(citationIdx) > 0 {
+			// Map valid cited chunk indices to doc_ids and always replace
+			// candidate doc_aggs with the cited subset. An invalid-only answer
+			// must not expose unrelated retrieval candidates as references.
 			citedDocIDs := make(map[string]struct{})
-			if chunksRaw, ok := kbinfos["chunks"].([]map[string]interface{}); ok {
-				for ci := range citationIdx {
-					if ci >= 0 && ci < len(chunksRaw) {
-						cm := chunksRaw[ci]
-						if docID, ok := cm["doc_id"].(string); ok && docID != "" {
-							citedDocIDs[docID] = struct{}{}
-						}
+			for ci := range citationIdx {
+				if ci >= 0 && ci < len(chunksRaw) {
+					cm := chunksRaw[ci]
+					if docID, ok := cm["doc_id"].(string); ok && docID != "" {
+						citedDocIDs[docID] = struct{}{}
 					}
 				}
 			}
-			if len(citedDocIDs) > 0 {
-				if docAggsRaw, ok := kbinfos["doc_aggs"].([]interface{}); ok && len(docAggsRaw) > 0 {
-					var filtered []interface{}
-					for _, da := range docAggsRaw {
-						if dam, ok := da.(map[string]interface{}); ok {
-							if docID, ok := dam["doc_id"].(string); ok {
-								if _, cited := citedDocIDs[docID]; cited {
-									filtered = append(filtered, da)
-								}
+			filtered := make([]interface{}, 0, len(citedDocIDs))
+			if docAggsRaw, ok := kbinfos["doc_aggs"].([]interface{}); ok {
+				for _, da := range docAggsRaw {
+					if dam, ok := da.(map[string]interface{}); ok {
+						if docID, ok := dam["doc_id"].(string); ok {
+							if _, cited := citedDocIDs[docID]; cited {
+								filtered = append(filtered, da)
 							}
 						}
 					}
-					if len(filtered) > 0 {
-						kbinfos["doc_aggs"] = filtered
-					}
 				}
+			}
+			kbinfos["doc_aggs"] = filtered
+
+			if len(invalidIdx) > 0 {
+				common.Warn("invalid chat citations removed",
+					zap.Ints("invalid_citation_ids", invalidIdx),
+					zap.Int("valid_citation_count", len(citationIdx)))
+			}
+			if explicitCount > 0 && len(citationIdx) == 0 {
+				ans = noEvidenceResponse(emptyResponses)
+				think = ""
 			}
 		}
 	}
