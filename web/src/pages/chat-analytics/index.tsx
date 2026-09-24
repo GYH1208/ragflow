@@ -1,3 +1,4 @@
+import { Button } from '@/components/ui/button';
 import { DatePickerWithRange } from '@/components/ui/range-picker';
 import {
   Select,
@@ -6,14 +7,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Button } from '@/components/ui/button';
 import { useChatAnalytics } from '@/hooks/use-chat-analytics';
 import { ChatAnalyticsGranularity } from '@/interfaces/chat-analytics';
 import { format, startOfDay, subDays } from 'date-fns';
 import { useMemo, useState } from 'react';
 import { DateRange } from 'react-day-picker';
 import { useTranslation } from 'react-i18next';
-import { AssistantTable } from './assistant-table';
+import { AssistantDonutChart } from './assistant-donut-chart';
 import { SummaryCards } from './summary-cards';
 import { TrendChart } from './trend-chart';
 
@@ -60,7 +60,11 @@ export default function ChatAnalyticsPage() {
             <p className="text-text-secondary">
               {t('chatAnalytics.loadError')}
             </p>
-            <Button type="button" variant="accent" onClick={() => query.refetch()}>
+            <Button
+              type="button"
+              variant="accent"
+              onClick={() => query.refetch()}
+            >
               {t('chatAnalytics.retry')}
             </Button>
           </section>
@@ -73,7 +77,10 @@ export default function ChatAnalyticsPage() {
             />
 
             <section className="flex flex-wrap items-center gap-3 rounded-lg border-0.5 border-border-button bg-bg-input px-4 py-3 shadow-sm">
-              <label className="text-sm font-medium text-text-primary" htmlFor="chat-analytics-assistant">
+              <label
+                className="text-sm font-medium text-text-primary"
+                htmlFor="chat-analytics-assistant"
+              >
                 {t('chatAnalytics.assistant')}
               </label>
               <Select
@@ -111,7 +118,7 @@ export default function ChatAnalyticsPage() {
               />
             </section>
 
-            <AssistantTable assistants={query.data.assistants} />
+            <AssistantDonutChart assistants={query.data.assistants} />
           </>
         )}
       </div>

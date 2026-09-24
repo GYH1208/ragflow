@@ -36,10 +36,15 @@ jest.mock('react-i18next', () => ({
   }),
 }));
 jest.mock('recharts', () => ({
+  Cell: () => null,
   CartesianGrid: () => null,
   Line: () => null,
   LineChart: ({ children }: { children: any }) => (
     <div data-testid="trend-chart">{children}</div>
+  ),
+  Pie: ({ children }: { children: any }) => <div>{children}</div>,
+  PieChart: ({ children }: { children: any }) => (
+    <div data-testid="assistant-donut">{children}</div>
   ),
   ResponsiveContainer: ({ children }: { children: any }) => (
     <div>{children}</div>
@@ -82,19 +87,21 @@ beforeEach(() => {
   });
 });
 
-it('renders summary, trend, and one total column per assistant', () => {
+it('renders summary, trend, and assistant distribution', () => {
   renderDashboard();
 
-  expect(screen.getByText('1,149')).toBeInTheDocument();
+  expect(screen.getAllByText('1,149')).toHaveLength(2);
   expect(screen.getByText('546')).toBeInTheDocument();
   expect(screen.getByText('21')).toBeInTheDocument();
   expect(screen.getByTestId('trend-chart')).toBeInTheDocument();
-  expect(
-    screen.getByRole('columnheader', { name: 'Chat assistant' }),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByRole('columnheader', { name: 'Total Q&As' }),
-  ).toBeInTheDocument();
+  expect(screen.getByTestId('assistant-donut')).toBeInTheDocument();
+  expect(screen.getByText('聊天助理问答分布')).toBeInTheDocument();
+  expect(screen.getByText('问答总量')).toBeInTheDocument();
+  expect(screen.getByText('Support assistant')).toBeInTheDocument();
+  expect(screen.getByText('Sales assistant')).toBeInTheDocument();
+  expect(screen.getByText('70%')).toBeInTheDocument();
+  expect(screen.getByText('30%')).toBeInTheDocument();
+  expect(screen.queryByRole('columnheader')).not.toBeInTheDocument();
   expect(screen.queryByText(/source/i)).not.toBeInTheDocument();
 });
 
@@ -129,8 +136,8 @@ it('renders zero and empty states without crashing', () => {
 
   renderDashboard();
 
-  expect(screen.getAllByText('0')).toHaveLength(3);
-  expect(screen.getByText('No data available')).toBeInTheDocument();
+  expect(screen.getAllByText('0')).toHaveLength(4);
+  expect(screen.getByText('暂无数据')).toBeInTheDocument();
 });
 
 it('shows loading placeholders while data is being fetched', () => {
