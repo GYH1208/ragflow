@@ -287,6 +287,8 @@ async def test_handler_history_follows_multiturn_switch(
         )
     )
 
+    current_message = captured_histories[0][-1]
+    assert isinstance(current_message.pop("created_at", None), (int, float))
     assert captured_histories == [expected_history]
 
 

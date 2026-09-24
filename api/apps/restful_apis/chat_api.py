@@ -27,9 +27,7 @@ from quart import Response, request
 
 from api.apps import current_user, login_required
 from api.apps.restful_apis._generation_params import merge_generation_config, pop_generation_config
-from api.db.joint_services.tenant_model_service import (
-    get_tenant_default_model_by_type, get_model_config_from_provider_instance, get_api_key, split_model_name
-)
+from api.db.joint_services.tenant_model_service import get_api_key, get_model_config_from_provider_instance, get_tenant_default_model_by_type, split_model_name
 from api.db.services.chunk_feedback_service import ChunkFeedbackService
 from api.db.services.conversation_service import ConversationService, structure_answer
 from api.db.services.dialog_service import DialogService, async_chat, gen_mindmap
@@ -45,12 +43,14 @@ from api.utils.api_utils import (
     server_error_response,
     validate_request,
 )
+from api.utils.chat_message_utils import stamp_user_message
 from api.utils.pagination_utils import validate_rest_api_page_size
-from common.constants import LLMType, RetCode, StatusEnum
 from common import settings
+from common.constants import LLMType, RetCode, StatusEnum
 from common.misc_utils import get_uuid, thread_pool_exec
 from rag.prompts.generator import chunks_format
 from rag.prompts.template import load_prompt
+
 
 def _sanitize_json_floats(obj):
     """Replace NaN/Infinity floats with None so the result is RFC 8259 JSON.
@@ -268,7 +268,10 @@ def _normalize_completion_messages(req):
     if not msg[-1].get("id"):
         msg[-1]["id"] = get_uuid()
 
-    # till now, message and msg are sharing the same copy
+    current_message = stamp_user_message(msg[-1])
+    messages[-1] = current_message
+    msg[-1] = current_message
+
     return (messages, msg), None
 
 

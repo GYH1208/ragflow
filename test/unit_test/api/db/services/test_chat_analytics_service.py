@@ -67,7 +67,7 @@ def test_normalize_message_time_accepts_seconds_milliseconds_and_iso():
     assert normalize_message_time("2026-09-01T00:00:00Z", fallback) == expected
 
 
-def test_iter_user_questions_counts_only_valid_user_messages_and_falls_back():
+def test_iter_user_questions_keeps_legacy_questions_without_inventing_a_time():
     fallback_ms = 1788264000000
     row = {
         "dialog_id": "d1",
@@ -84,9 +84,40 @@ def test_iter_user_questions_counts_only_valid_user_messages_and_falls_back():
 
     assert list(iter_user_questions(row)) == [
         _utc(2026, 9, 1, 0),
-        _utc(2026, 9, 1, 12),
+        None,
     ]
     assert list(iter_user_questions({**row, "message": {}})) == []
+
+
+def test_legacy_questions_only_contribute_to_the_lifetime_total():
+    result = aggregate_question_rows(
+        [
+            {
+                "dialog_id": "d1",
+                "create_time": 1788220800000,
+                "update_time": 1790208000000,
+                "message": [
+                    {"role": "user", "content": "legacy without time"},
+                    {
+                        "role": "user",
+                        "content": "timestamped",
+                        "created_at": "2026-09-24T08:00:00Z",
+                    },
+                ],
+            }
+        ],
+        [{"id": "d1", "name": "Support"}],
+        _utc(2026, 9, 24),
+        _utc(2026, 9, 24, 23, 59, 59, 999999),
+        "day",
+        _utc(2026, 9, 24, 12),
+    )
+
+    assert result["total_count"] == 2
+    assert result["last_30_days_count"] == 1
+    assert result["today_count"] == 1
+    assert result["trend"] == [{"date": "2026-09-24", "count": 1}]
+    assert result["assistants"] == [{"id": "d1", "name": "Support", "count": 1}]
 
 
 def test_aggregate_question_rows_builds_summary_trend_and_assistant_totals():

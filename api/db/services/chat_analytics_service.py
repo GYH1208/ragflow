@@ -24,7 +24,7 @@ def _timestamp_to_datetime(value: object) -> datetime | None:
         return None
 
 
-def normalize_message_time(value: object, fallback: datetime) -> datetime:
+def normalize_message_time(value: object, fallback: datetime | None = None) -> datetime | None:
     numeric = _timestamp_to_datetime(value)
     if numeric is not None:
         return numeric
@@ -41,23 +41,16 @@ def normalize_message_time(value: object, fallback: datetime) -> datetime:
     return fallback
 
 
-def _conversation_fallback(row: Mapping[str, Any]) -> datetime:
-    for key in ("update_time", "create_time"):
-        value = _timestamp_to_datetime(row.get(key))
-        if value is not None:
-            return value
-    return datetime.fromtimestamp(0, tz=UTC)
-
-
-def iter_user_questions(row: Mapping[str, Any]) -> Iterator[datetime]:
+def iter_user_questions(
+    row: Mapping[str, Any],
+) -> Iterator[datetime | None]:
     messages = row.get("message")
     if not isinstance(messages, list):
         return
 
-    fallback = _conversation_fallback(row)
     for message in messages:
         if isinstance(message, Mapping) and message.get("role") == "user":
-            yield normalize_message_time(message.get("created_at"), fallback)
+            yield normalize_message_time(message.get("created_at"))
 
 
 def _bucket_key(value: datetime, granularity: str) -> str:
@@ -128,6 +121,8 @@ def aggregate_question_rows(
             continue
         for question_time in iter_user_questions(row):
             total_count += 1
+            if question_time is None:
+                continue
             question_day = question_time.date()
             if last_30_days_start <= question_day <= today:
                 last_30_days_count += 1

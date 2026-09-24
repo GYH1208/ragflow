@@ -23,6 +23,7 @@ from api.db.db_models import DB, Conversation
 from api.db.services.api_service import API4ConversationService
 from api.db.services.common_service import CommonService
 from api.db.services.dialog_service import DialogService, async_chat
+from api.utils.chat_message_utils import stamp_user_message
 from common.constants import StatusEnum
 from common.misc_utils import get_uuid
 from common.time_utils import current_timestamp, get_format_time
@@ -251,11 +252,13 @@ async def async_completion(tenant_id, chat_id, question, name="New session", ses
 
     conv = conv[0]
     msg = []
-    question = {
-        "content": question,
-        "role": "user",
-        "id": str(uuid4())
-    }
+    question = stamp_user_message(
+        {
+            "content": question,
+            "role": "user",
+            "id": str(uuid4()),
+        }
+    )
 
     # Propagate runtime attachments so downstream chat flow can resolve file content.
     if isinstance(kwargs.get("files"), list) and kwargs["files"]:
@@ -344,11 +347,13 @@ async def async_iframe_completion(dialog_id, question, session_id=None, stream=T
     if not conv.message:
         conv.message = []
     messages = conv.message
-    question = {
-        "role": "user",
-        "content": question,
-        "id": str(uuid4())
-    }
+    question = stamp_user_message(
+        {
+            "role": "user",
+            "content": question,
+            "id": str(uuid4()),
+        }
+    )
     messages.append(question)
 
     msg = []

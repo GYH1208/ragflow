@@ -247,6 +247,7 @@ def _make_chat_handler(ch):
     from api.db.services.conversation_service import ConversationService, structure_answer
     from api.db.services.dialog_service import DialogService, async_chat
     from api.db.services.evidence_service import EvidenceService
+    from api.utils.chat_message_utils import stamp_user_message
     from common.misc_utils import get_uuid
 
     async def handle(msg: IncomingMessage) -> None:
@@ -276,7 +277,7 @@ def _make_chat_handler(ch):
         message_id = get_uuid()
         if not conv.message:
             conv.message = []
-        conv.message.append({"role": "user", "content": msg.text, "id": message_id})
+        conv.message.append(stamp_user_message({"role": "user", "content": msg.text, "id": message_id}))
         if not conv.reference:
             conv.reference = []
         conv.reference = [r for r in conv.reference if r]
