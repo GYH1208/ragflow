@@ -113,8 +113,14 @@ export default function ChatAnalyticsPage() {
               </span>
               <DatePickerWithRange
                 required
-                selected={{ from, to }}
-                onSelect={(nextRange) => nextRange && setRange(nextRange)}
+                selected={range}
+                onSelect={(nextRange, selectedDay) => {
+                  if (range.to) {
+                    setRange({ from: selectedDay, to: undefined });
+                    return;
+                  }
+                  setRange(nextRange);
+                }}
               />
             </section>
 

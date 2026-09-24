@@ -87,6 +87,10 @@ beforeEach(() => {
   });
 });
 
+afterEach(() => {
+  jest.useRealTimers();
+});
+
 it('renders summary, trend, and assistant distribution', () => {
   renderDashboard();
 
@@ -117,6 +121,37 @@ it('changes granularity without resetting the current filters', async () => {
     dialogId: undefined,
     granularity: 'week',
   });
+});
+
+it('starts a new date range before choosing its end date', () => {
+  jest.useFakeTimers().setSystemTime(new Date('2026-09-24T12:00:00Z'));
+  renderDashboard();
+
+  fireEvent.click(
+    screen.getByRole('button', {
+      name: 'Aug 26, 2026 - Sep 24, 2026',
+    }),
+  );
+  fireEvent.click(
+    screen.getByRole('button', { name: /Thursday, September 10th, 2026/ }),
+  );
+
+  expect(mockUseChatAnalytics).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      fromDate: '2026-09-10',
+      toDate: '2026-09-10',
+    }),
+  );
+
+  fireEvent.click(
+    screen.getByRole('button', { name: /Tuesday, September 15th, 2026/ }),
+  );
+  expect(mockUseChatAnalytics).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      fromDate: '2026-09-10',
+      toDate: '2026-09-15',
+    }),
+  );
 });
 
 it('renders zero and empty states without crashing', () => {
