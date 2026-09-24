@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from api.db.db_models import DB, API4Conversation, Conversation, Dialog
+from common.constants import StatusEnum
 
 
 def _timestamp_to_datetime(value: object) -> datetime | None:
@@ -16,9 +19,7 @@ def _timestamp_to_datetime(value: object) -> datetime | None:
         number /= 1000
 
     try:
-        return datetime.fromtimestamp(number, tz=timezone.utc).replace(
-            tzinfo=None
-        )
+        return datetime.fromtimestamp(number, tz=UTC)
     except (OverflowError, OSError, ValueError):
         return None
 
@@ -30,10 +31,10 @@ def normalize_message_time(value: object, fallback: datetime) -> datetime:
 
     if isinstance(value, str):
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value)
             if parsed.tzinfo is None:
-                return parsed
-            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                return parsed.replace(tzinfo=UTC)
+            return parsed.astimezone(UTC)
         except ValueError:
             pass
 
@@ -45,7 +46,7 @@ def _conversation_fallback(row: Mapping[str, Any]) -> datetime:
         value = _timestamp_to_datetime(row.get(key))
         if value is not None:
             return value
-    return datetime.fromtimestamp(0, tz=timezone.utc).replace(tzinfo=None)
+    return datetime.fromtimestamp(0, tz=UTC)
 
 
 def iter_user_questions(row: Mapping[str, Any]) -> Iterator[datetime]:
@@ -156,3 +157,81 @@ def aggregate_question_rows(
         ],
         "assistants": assistant_results,
     }
+
+
+class ChatAnalyticsService:
+    BATCH_SIZE = 500
+
+    @classmethod
+    def _load_assistants(cls, tenant_id: str) -> list[dict[str, str]]:
+        query = (
+            Dialog.select(Dialog.id, Dialog.name)
+            .where(
+                Dialog.tenant_id == tenant_id,
+                Dialog.status == StatusEnum.VALID.value,
+            )
+            .order_by(Dialog.name.asc(), Dialog.id.asc())
+        )
+        return list(query.dicts())
+
+    @classmethod
+    def _load_conversation_rows(
+        cls, model, dialog_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        if not dialog_ids:
+            return []
+
+        query = model.select(
+            model.dialog_id,
+            model.message,
+            model.create_time,
+            model.update_time,
+        ).where(model.dialog_id.in_(dialog_ids))
+        rows = []
+        offset = 0
+        while True:
+            batch = list(
+                query.offset(offset).limit(cls.BATCH_SIZE).dicts()
+            )
+            rows.extend(batch)
+            if len(batch) < cls.BATCH_SIZE:
+                break
+            offset += cls.BATCH_SIZE
+        return rows
+
+    @classmethod
+    @DB.connection_context()
+    def dashboard(
+        cls,
+        tenant_id: str,
+        dialog_id: str | None,
+        from_date: datetime,
+        to_date: datetime,
+        granularity: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        assistant_options = cls._load_assistants(tenant_id)
+        assistant_by_id = {
+            assistant["id"]: assistant for assistant in assistant_options
+        }
+        if dialog_id and dialog_id not in assistant_by_id:
+            raise ValueError("Chat assistant not found")
+
+        selected_assistants = (
+            [assistant_by_id[dialog_id]] if dialog_id else assistant_options
+        )
+        selected_ids = [assistant["id"] for assistant in selected_assistants]
+        rows = cls._load_conversation_rows(Conversation, selected_ids)
+        rows.extend(
+            cls._load_conversation_rows(API4Conversation, selected_ids)
+        )
+        result = aggregate_question_rows(
+            rows,
+            selected_assistants,
+            from_date,
+            to_date,
+            granularity,
+            now or datetime.now(UTC),
+        )
+        result["assistant_options"] = assistant_options
+        return result
