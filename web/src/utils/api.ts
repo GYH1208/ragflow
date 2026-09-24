@@ -115,6 +115,9 @@ export default {
   chatChannelRuntime: (id: string) =>
     `${restAPIv1}/chat-channels/${id}/runtime`,
 
+  // chat analytics
+  chatAnalytics: `${restAPIv1}/chat-analytics`,
+
   // plugin
   llmTools: `${restAPIv1}/plugin/tools`,
 
