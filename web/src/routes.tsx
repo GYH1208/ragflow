@@ -33,6 +33,7 @@ export enum Routes {
   SearchShare = '/search/share',
   Chats = '/chats',
   Chat = '/chat',
+  ChatAnalytics = '/chat-analytics',
 
   Skills = '/files/skills',
   ProfileSetting = '/profile-setting',
@@ -208,6 +209,10 @@ const routeConfigOptions = [
       {
         path: Routes.Chats,
         Component: () => import('@/pages/next-chats'),
+      },
+      {
+        path: Routes.ChatAnalytics,
+        Component: () => import('@/pages/chat-analytics'),
       },
       {
         path: Routes.Searches,

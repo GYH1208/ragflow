@@ -11,6 +11,7 @@ import { supportsCssAnchor } from '@/utils/css-support';
 const PathMap = {
   [Routes.Datasets]: [Routes.Datasets, Routes.DatasetBase],
   [Routes.Chats]: [Routes.Chats, Routes.Chat],
+  [Routes.ChatAnalytics]: [Routes.ChatAnalytics],
   [Routes.Searches]: [Routes.Searches, Routes.Search],
   [Routes.Agents]: [Routes.Agents, Routes.AgentTemplates],
   [Routes.Memories]: [Routes.Memories, Routes.Memory, Routes.MemoryMessage],
@@ -29,6 +30,11 @@ const menuItems = [
     path: Routes.Chats,
     name: 'header.chat',
     /* icon: MessageSquareText, */ 'data-testid': 'nav-chat',
+  },
+  {
+    path: Routes.ChatAnalytics,
+    name: 'header.chatAnalytics',
+    'data-testid': 'nav-chat-analytics',
   },
   {
     path: Routes.Searches,
