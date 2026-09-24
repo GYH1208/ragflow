@@ -89,7 +89,33 @@ def test_iter_user_questions_keeps_legacy_questions_without_inventing_a_time():
     assert list(iter_user_questions({**row, "message": {}})) == []
 
 
-def test_legacy_questions_only_contribute_to_the_lifetime_total():
+def test_iter_user_questions_uses_matching_immediate_assistant_time():
+    row = {
+        "message": [
+            {"role": "user", "id": "question-1", "content": "legacy"},
+            {
+                "role": "assistant",
+                "id": "question-1",
+                "content": "answer",
+                "created_at": "2026-09-24T08:00:05Z",
+            },
+            {"role": "user", "id": "question-2", "content": "unmatched"},
+            {
+                "role": "assistant",
+                "id": "different-id",
+                "content": "answer",
+                "created_at": "2026-09-24T09:00:05Z",
+            },
+        ]
+    }
+
+    assert list(iter_user_questions(row)) == [
+        _utc(2026, 9, 24, 8, 0, 5),
+        None,
+    ]
+
+
+def test_legacy_questions_use_paired_answer_time_in_time_metrics():
     result = aggregate_question_rows(
         [
             {
@@ -97,7 +123,17 @@ def test_legacy_questions_only_contribute_to_the_lifetime_total():
                 "create_time": 1788220800000,
                 "update_time": 1790208000000,
                 "message": [
-                    {"role": "user", "content": "legacy without time"},
+                    {
+                        "role": "user",
+                        "id": "legacy-question",
+                        "content": "legacy without time",
+                    },
+                    {
+                        "role": "assistant",
+                        "id": "legacy-question",
+                        "content": "answer",
+                        "created_at": "2026-09-24T07:00:05Z",
+                    },
                     {
                         "role": "user",
                         "content": "timestamped",
@@ -114,10 +150,10 @@ def test_legacy_questions_only_contribute_to_the_lifetime_total():
     )
 
     assert result["total_count"] == 2
-    assert result["last_30_days_count"] == 1
-    assert result["today_count"] == 1
-    assert result["trend"] == [{"date": "2026-09-24", "count": 1}]
-    assert result["assistants"] == [{"id": "d1", "name": "Support", "count": 1}]
+    assert result["last_30_days_count"] == 2
+    assert result["today_count"] == 2
+    assert result["trend"] == [{"date": "2026-09-24", "count": 2}]
+    assert result["assistants"] == [{"id": "d1", "name": "Support", "count": 2}]
 
 
 def test_aggregate_question_rows_builds_summary_trend_and_assistant_totals():

@@ -48,9 +48,19 @@ def iter_user_questions(
     if not isinstance(messages, list):
         return
 
-    for message in messages:
+    for index, message in enumerate(messages):
         if isinstance(message, Mapping) and message.get("role") == "user":
-            yield normalize_message_time(message.get("created_at"))
+            question_time = normalize_message_time(message.get("created_at"))
+            message_id = message.get("id")
+            if question_time is None and message_id and index + 1 < len(messages):
+                next_message = messages[index + 1]
+                if (
+                    isinstance(next_message, Mapping)
+                    and next_message.get("role") == "assistant"
+                    and next_message.get("id") == message_id
+                ):
+                    question_time = normalize_message_time(next_message.get("created_at"))
+            yield question_time
 
 
 def _bucket_key(value: datetime, granularity: str) -> str:
