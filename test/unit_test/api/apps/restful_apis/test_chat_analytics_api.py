@@ -77,7 +77,7 @@ def test_chat_analytics_uses_current_tenant_and_defaults(
     assert seen["dialog_id"] is None
     assert seen["granularity"] == "day"
     assert seen["from_date"].time().isoformat() == "00:00:00"
-    assert seen["to_date"].time().isoformat() == "23:59:59"
+    assert seen["to_date"].time().isoformat() == "23:59:59.999999"
     assert (seen["to_date"].date() - seen["from_date"].date()).days == 29
 
 

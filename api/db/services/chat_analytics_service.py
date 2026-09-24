@@ -186,7 +186,7 @@ class ChatAnalyticsService:
             model.message,
             model.create_time,
             model.update_time,
-        ).where(model.dialog_id.in_(dialog_ids))
+        ).where(model.dialog_id.in_(dialog_ids)).order_by(model.id.asc())
         rows = []
         offset = 0
         while True:

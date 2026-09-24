@@ -47,7 +47,7 @@ async def chat_analytics():
             request.args.get("from_date"), today - timedelta(days=29)
         )
         to_date = _parse_date(request.args.get("to_date"), today).replace(
-            hour=23, minute=59, second=59
+            hour=23, minute=59, second=59, microsecond=999999
         )
         if from_date > to_date:
             raise ValueError("Start date must not be after end date")
