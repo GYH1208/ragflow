@@ -13,6 +13,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
+from collections.abc import Collection
 from datetime import datetime
 
 from peewee import JOIN, fn
@@ -493,7 +494,8 @@ class KnowledgebaseService(CommonService):
     @DB.connection_context()
     def get_list(cls, active_team_ids, user_id,
                  page_number, items_per_page, orderby, desc, id, name, keywords,
-                 parser_id=None, category_id=None, uncategorized=False, owner_ids=None):
+                 parser_id=None, category_id=None, uncategorized=False, owner_ids=None,
+                 allowed_dataset_ids: Collection[str] | None = None):
         # Get list of knowledge bases with filtering and pagination
         # Args:
         #     joined_tenant_ids: List of tenant IDs
@@ -524,6 +526,8 @@ class KnowledgebaseService(CommonService):
             kbs = kbs.where(cls.model.category_id == category_id)
         if owner_ids:
             kbs = kbs.where(cls.model.tenant_id.in_(owner_ids))
+        if allowed_dataset_ids is not None:
+            kbs = kbs.where(cls.model.id.in_(tuple(dict.fromkeys(allowed_dataset_ids))))
 
         kbs = kbs.where(cls._visibility_and_status_filter(active_team_ids, user_id))
 

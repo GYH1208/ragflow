@@ -17,18 +17,22 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from quart import Blueprint, Quart, request, g, current_app, session, jsonify
 from itsdangerous.url_safe import URLSafeTimedSerializer as Serializer
 from quart_cors import cors
 from common.constants import StatusEnum, RetCode
+from api.db import APIKeyLastResult, APIKeyType
 from api.db.db_models import close_connection, APIToken
 from api.db.services import UserService
+from api.db.services.api_service import APIKeyUsageService
 from api.utils.json_encode import CustomJSONEncoder
 from api.utils import commands
 
 from quart_auth import Unauthorized as QuartAuthUnauthorized
+from werkzeug.exceptions import Forbidden as WerkzeugForbidden
 from werkzeug.exceptions import Unauthorized as WerkzeugUnauthorized
 from quart_schema import QuartSchema
 from common import settings
@@ -36,6 +40,7 @@ from api.utils.api_utils import server_error_response, get_json_result
 from api.constants import API_VERSION
 from common.exceptions import ModelException
 from common.misc_utils import get_uuid
+from api.apps.api_key_auth import KNOWLEDGE_RETRIEVE_SCOPE, resolve_api_key
 
 settings.init_settings()
 
@@ -67,6 +72,41 @@ QuartSchema(app)
 app.url_map.strict_slashes = False
 app.json_encoder = CustomJSONEncoder
 app.errorhandler(Exception)(server_error_response)
+
+
+async def _classify_api_key_result(response):
+    if response.status_code == RetCode.FORBIDDEN:
+        return APIKeyLastResult.DENIED
+    if response.status_code == RetCode.TOO_MANY_REQUESTS:
+        return APIKeyLastResult.RATE_LIMITED
+    if response.status_code >= 500:
+        return APIKeyLastResult.ERROR
+    if 200 <= response.status_code < 300:
+        if response.is_json:
+            payload = await response.get_json(silent=True)
+            if isinstance(payload, dict) and payload.get("code", RetCode.SUCCESS) != RetCode.SUCCESS:
+                return APIKeyLastResult.ERROR
+        return APIKeyLastResult.SUCCESS
+    return APIKeyLastResult.ERROR
+
+
+@app.after_request
+async def _record_api_key_usage(response):
+    context = getattr(g, "api_key_context", None)
+    if context is None:
+        return response
+
+    try:
+        APIKeyUsageService.record(
+            token=context.token,
+            key_type=context.key_type,
+            result=await _classify_api_key_result(response),
+            retrieval_started=bool(getattr(g, "retrieval_started", False)),
+            used_at=datetime.now(timezone.utc),
+        )
+    except Exception:
+        logging.warning("API key usage telemetry update failed")
+    return response
 
 # Configure Quart timeouts for slow LLM responses (e.g., local Ollama on CPU)
 # Default Quart timeouts are 60 seconds which is too short for many LLM backends
@@ -139,6 +179,7 @@ def _load_user_from_session():
         return None
     logging.debug("Authenticated request via session fallback for user_id=%s", user_id)
     g.auth_type = AUTH_JWT
+    g.api_key_context = None
     g.user = user
     return user
 
@@ -167,6 +208,7 @@ def _load_user(auth_types=None):
     g.user = None
     g.auth_type = None
     g.auth_error_message = None
+    g.api_key_context = None
 
     # Try Beta token
     if AUTH_BETA in auth_types:
@@ -212,21 +254,22 @@ def _load_user(auth_types=None):
     # JWT decode failed, try as api_token
     if AUTH_API in auth_types:
         try:
-            objs = APIToken.query(token=auth_token)
-            if objs:
-                user = UserService.query(id=objs[0].tenant_id, status=StatusEnum.VALID.value)
+            api_key_context = resolve_api_key(auth_token)
+            if api_key_context:
+                user = UserService.query(id=api_key_context.tenant_id, status=StatusEnum.VALID.value)
                 if user:
                     if not user[0].access_token or not user[0].access_token.strip():
                         logging.warning(f"User {user[0].email} has empty access_token in database")
                         return _load_user_from_session() if AUTH_JWT in auth_types else None
                     g.auth_type = AUTH_API
+                    g.api_key_context = api_key_context
                     g.user = user[0]
                     return user[0]
-                logging.warning(f"load_user: No user found for tenant_id={objs[0].tenant_id} from APIToken")
+                logging.warning("load_user: No user found for resolved API key tenant")
             else:
-                logging.warning(f"load_user: No APIToken found for token={auth_token[:10]}...")
-        except Exception as e_api_token:
-            logging.warning(f"load_user from api token got exception {e_api_token}")
+                logging.warning("load_user: No valid API key found")
+        except Exception:
+            logging.warning("load_user from API key failed")
 
     return _load_user_from_session() if AUTH_JWT in auth_types else None
 
@@ -234,7 +277,7 @@ def _load_user(auth_types=None):
 current_user = LocalProxy(_load_user)
 
 
-def login_required(func: Callable[P, Awaitable[T]] = None, auth_types=None) -> Callable[P, Awaitable[T]]:
+def login_required(func: Callable[P, Awaitable[T]] = None, auth_types=None, api_scope: str | None = None) -> Callable[P, Awaitable[T]]:
     """A decorator to restrict route access to authenticated users.
 
     This should be used to wrap a route handler (or view function) to
@@ -273,6 +316,16 @@ def login_required(func: Callable[P, Awaitable[T]] = None, auth_types=None) -> C
                         message=getattr(g, "auth_error_message", None) or "Authorization is not valid!",
                     )
                 raise QuartAuthUnauthorized()
+            api_key_context = getattr(g, "api_key_context", None)
+            if (
+                api_key_context is not None
+                and api_key_context.key_type is APIKeyType.RETRIEVAL
+                and api_scope != KNOWLEDGE_RETRIEVE_SCOPE
+            ):
+                return get_json_result(
+                    code=RetCode.FORBIDDEN,
+                    message="API key is not allowed to access this route.",
+                ), RetCode.FORBIDDEN
             return await current_app.ensure_async(func)(*args, **kwargs)
 
         return wrapper
@@ -385,8 +438,8 @@ register_backward_compat_routes(app)
 
 @app.errorhandler(404)
 async def not_found(error):
-    logging.error(f"The requested URL {request.path} was not found")
-    message = f"Not Found: {request.path}"
+    logging.error("The requested URL was not found")
+    message = "Not Found."
     response = {
         "code": RetCode.NOT_FOUND,
         "message": message,
@@ -412,6 +465,12 @@ async def unauthorized_quart_auth(error):
 async def unauthorized_werkzeug(error):
     logging.warning("Unauthorized request (werkzeug)")
     return get_json_result(code=error.code, message=error.description), RetCode.UNAUTHORIZED
+
+
+@app.errorhandler(WerkzeugForbidden)
+async def forbidden_werkzeug(error):
+    logging.warning("Forbidden request (werkzeug)")
+    return get_json_result(code=RetCode.FORBIDDEN, message=error.description), RetCode.FORBIDDEN
 
 
 @app.errorhandler(ModelException)

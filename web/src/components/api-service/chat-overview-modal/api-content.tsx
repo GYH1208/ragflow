@@ -1,15 +1,22 @@
 import { useIsDarkTheme } from '@/components/theme-provider';
 import { Button } from '@/components/ui/button';
 import { useSetModalState, useTranslate } from '@/hooks/common-hooks';
+import {
+  useFetchTenantInfo,
+  useFetchUserInfo,
+} from '@/hooks/use-user-setting-request';
 import { LangfuseCard } from '@/pages/user-setting/setting-model/langfuse';
 import apiDoc from '@parent/docs/references/http_api_reference.md?raw';
 import MarkdownPreview from '@uiw/react-markdown-preview';
 import ChatApiKeyModal from '../chat-api-key-modal';
-import BackendServiceApi from './backend-service-api';
+import BackendServiceApi, { canManageApiKeys } from './backend-service-api';
 import MarkdownToc from './markdown-toc';
 
 const ApiContent = ({ id, idKey }: { id?: string; idKey: string }) => {
   const { t } = useTranslate('setting');
+  const { data: tenantInfo } = useFetchTenantInfo();
+  const { data: userInfo } = useFetchUserInfo();
+  const canManageKeys = canManageApiKeys(tenantInfo, userInfo);
 
   const {
     visible: apiKeyVisible,
@@ -27,7 +34,10 @@ const ApiContent = ({ id, idKey }: { id?: string; idKey: string }) => {
 
   return (
     <div className="flex flex-col w-full">
-      <BackendServiceApi show={showApiKeyModal} />
+      <BackendServiceApi
+        show={showApiKeyModal}
+        canManageKeys={canManageKeys}
+      />
 
       <div className="text-left py-4">
         <Button onClick={tocVisible ? hideToc : showToc}>
@@ -44,7 +54,7 @@ const ApiContent = ({ id, idKey }: { id?: string; idKey: string }) => {
         ></MarkdownPreview>
       </section>
       <LangfuseCard></LangfuseCard>
-      {apiKeyVisible && (
+      {canManageKeys && apiKeyVisible && (
         <ChatApiKeyModal
           hideModal={hideApiKeyModal}
           dialogId={id}

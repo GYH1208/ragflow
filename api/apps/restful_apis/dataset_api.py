@@ -18,8 +18,9 @@ import logging
 from peewee import OperationalError
 from quart import request
 
-from common.constants import RetCode
-from api.apps import login_required, current_user
+from common.constants import RetCode, StatusEnum
+from api.apps import KNOWLEDGE_RETRIEVE_SCOPE, current_user, login_required
+from api.apps.api_key_auth import allowed_dataset_ids, require_dataset_access
 from api.utils.api_utils import get_error_argument_result, get_error_data_result, get_json_result, get_result, add_tenant_id_to_kwargs
 from api.utils.pagination_utils import validate_rest_api_page_size
 from api.utils.validation_utils import (
@@ -364,7 +365,7 @@ async def update(tenant_id, dataset_id):
 
 
 @manager.route("/datasets", methods=["GET"])  # noqa: F821
-@login_required
+@login_required(api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
 @add_tenant_id_to_kwargs
 def list_datasets(tenant_id):
     """
@@ -427,7 +428,11 @@ def list_datasets(tenant_id):
         return get_error_argument_result(err)
 
     try:
-        success, result = dataset_api_service.list_datasets(tenant_id, args)
+        success, result = dataset_api_service.list_datasets(
+            tenant_id,
+            args,
+            allowed_dataset_ids=allowed_dataset_ids(),
+        )
         if success:
             return get_result(data=result.get("data"), total=result.get("total"))
         else:
@@ -441,9 +446,13 @@ def list_datasets(tenant_id):
 
 
 @manager.route("/datasets/<dataset_id>", methods=["GET"])  # noqa: F821
-@login_required
+@login_required(api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
 @add_tenant_id_to_kwargs
 def get_dataset(tenant_id, dataset_id):
+    require_dataset_access([dataset_id])
+    exists, _dataset = dataset_api_service.KnowledgebaseService.get_by_id(dataset_id)
+    if not exists or _dataset.status != StatusEnum.VALID.value:
+        return get_json_result(code=RetCode.NOT_FOUND, message="Dataset not found.", data=None), RetCode.NOT_FOUND
     try:
         success, result = dataset_api_service.get_dataset(dataset_id, tenant_id)
         if success:

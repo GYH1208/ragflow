@@ -1,5 +1,6 @@
 import { useSetModalState, useTranslate } from '@/hooks/common-hooks';
 import { useFetchManualSystemTokenList } from '@/hooks/use-user-setting-request';
+import { selectFullAccessToken } from '@/utils/api-key';
 import { useCallback } from 'react';
 import message from '../ui/message';
 
@@ -31,23 +32,24 @@ export const useFetchTokenListBeforeOtherStep = () => {
   let token = '',
     beta = '';
 
-  if (Array.isArray(tokenList) && tokenList.length > 0) {
-    token = tokenList[0].token;
-    beta = tokenList[0].beta;
-  }
-
-  token =
-    Array.isArray(tokenList) && tokenList.length > 0 ? tokenList[0].token : '';
+  const fullAccessToken = Array.isArray(tokenList)
+    ? selectFullAccessToken(tokenList)
+    : undefined;
+  token = fullAccessToken?.token ?? '';
+  beta = fullAccessToken?.beta ?? '';
 
   const handleOperate = useCallback(async () => {
     const ret = await fetchSystemTokenList();
     const list = ret;
-    if (Array.isArray(list) && list.length > 0) {
-      if (!list[0].beta) {
+    const fullAccessToken = Array.isArray(list)
+      ? selectFullAccessToken(list)
+      : undefined;
+    if (fullAccessToken) {
+      if (!fullAccessToken.beta) {
         showBetaEmptyError();
         return false;
       }
-      return list[0]?.token;
+      return fullAccessToken.token;
     } else {
       showTokenEmptyError();
       return false;

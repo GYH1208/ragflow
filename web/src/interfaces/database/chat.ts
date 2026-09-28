@@ -180,15 +180,41 @@ export interface Docagg {
 //   vector_similarity: number;
 // }
 
-export interface IToken {
+export type APIKeyType = 'full_access' | 'retrieval';
+
+export interface ICurrentToken {
+  token: string;
+  name: string;
+  key_type?: APIKeyType;
+  legacy: boolean;
+  allowed_dataset_ids: string[];
+  expires_at: string | null;
+  enabled: boolean;
+  total_calls: number;
+  retrieval_calls: number;
+  last_used_at: string | null;
+  last_result: string | null;
+  create_date: string | null;
+  create_time: number | null;
+  update_date: string | null;
+  update_time: number | null;
+  beta?: string;
+}
+
+export interface ILegacyToken {
+  token: string;
+  tenant_id?: string;
   create_date: string;
   create_time: number;
-  tenant_id: string;
-  token: string;
-  update_date?: any;
-  update_time?: any;
-  beta: string;
+  update_date?: string | null;
+  update_time?: number | null;
+  beta?: string;
+  key_type?: never;
+  enabled?: boolean;
+  expires_at?: string | null;
 }
+
+export type IToken = ICurrentToken | ILegacyToken;
 
 export interface IStats {
   pv: [string, number][];

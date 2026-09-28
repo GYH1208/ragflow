@@ -8,7 +8,11 @@ import {
   ITenantUser,
   IUserInfo,
 } from '@/interfaces/database/user-setting';
-import { ISetLangfuseConfigRequestBody } from '@/interfaces/request/system';
+import {
+  ICreateAPIKeyRequest,
+  ISetLangfuseConfigRequestBody,
+  IUpdateAPIKeyRequest,
+} from '@/interfaces/request/system';
 import { DEFAULT_LANGUAGE_CODE, supportedLanguages } from '@/locales/config';
 import userService, {
   addTenantUser,
@@ -31,6 +35,7 @@ export const enum UserSettingApiAction {
   FetchSystemTokenList = 'fetchSystemTokenList',
   RemoveSystemToken = 'removeSystemToken',
   CreateSystemToken = 'createSystemToken',
+  UpdateSystemToken = 'updateSystemToken',
   ListTenantUser = 'listTenantUser',
   AddTenantUser = 'addTenantUser',
   DeleteTenantUser = 'deleteTenantUser',
@@ -205,7 +210,7 @@ export const useFetchManualSystemTokenList = () => {
     mutateAsync,
   } = useMutation({
     mutationKey: [UserSettingApiAction.FetchManualSystemTokenList],
-    mutationFn: async () => {
+    mutationFn: async (): Promise<IToken[]> => {
       const { data } = await userService.listToken();
 
       return data?.data ?? [];
@@ -218,6 +223,7 @@ export const useFetchManualSystemTokenList = () => {
 export const useFetchSystemTokenList = () => {
   const {
     data,
+    error,
     isFetching: loading,
     refetch,
   } = useQuery<IToken[]>({
@@ -231,7 +237,7 @@ export const useFetchSystemTokenList = () => {
     },
   });
 
-  return { data, loading, refetch };
+  return { data, error, loading, refetch };
 };
 
 export const useRemoveSystemToken = () => {
@@ -245,14 +251,14 @@ export const useRemoveSystemToken = () => {
   } = useMutation({
     mutationKey: [UserSettingApiAction.RemoveSystemToken],
     mutationFn: async (token: string) => {
-      const { data } = await userService.removeToken({}, token);
+      const { data } = await userService.removeToken({ token });
       if (data.code === 0) {
         message.success(t('message.deleted'));
         queryClient.invalidateQueries({
           queryKey: [UserSettingApiAction.FetchSystemTokenList],
         });
       }
-      return data?.data ?? [];
+      return data;
     },
   });
 
@@ -268,18 +274,41 @@ export const useCreateSystemToken = () => {
     mutateAsync,
   } = useMutation({
     mutationKey: [UserSettingApiAction.CreateSystemToken],
-    mutationFn: async (params: Record<string, any>) => {
+    mutationFn: async (params: ICreateAPIKeyRequest) => {
       const { data } = await userService.createToken(params);
       if (data.code === 0) {
         queryClient.invalidateQueries({
           queryKey: [UserSettingApiAction.FetchSystemTokenList],
         });
       }
-      return data?.data ?? [];
+      return data;
     },
   });
 
   return { data, loading, createToken: mutateAsync };
+};
+
+export const useUpdateSystemToken = () => {
+  const queryClient = useQueryClient();
+
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: [UserSettingApiAction.UpdateSystemToken],
+    mutationFn: async (params: IUpdateAPIKeyRequest) => {
+      const { data } = await userService.updateToken(params);
+      if (data.code === 0) {
+        queryClient.invalidateQueries({
+          queryKey: [UserSettingApiAction.FetchSystemTokenList],
+        });
+      }
+      return data;
+    },
+  });
+
+  return { data, loading, updateToken: mutateAsync };
 };
 
 export const useListTenantUser = () => {

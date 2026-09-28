@@ -42,6 +42,18 @@ class SerializedType(IntEnum):
     JSON = 2
 
 
+class APIKeyType(StrEnum):
+    FULL_ACCESS = "full_access"
+    RETRIEVAL = "retrieval"
+
+
+class APIKeyLastResult(StrEnum):
+    SUCCESS = "success"
+    DENIED = "denied"
+    RATE_LIMITED = "rate_limited"
+    ERROR = "error"
+
+
 class FileType(StrEnum):
     PDF = 'pdf'
     DOC = 'doc'

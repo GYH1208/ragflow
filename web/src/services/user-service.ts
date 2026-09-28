@@ -13,6 +13,7 @@ const {
   getSystemTokenList,
   removeSystemToken,
   createSystemToken,
+  updateSystemToken,
   getSystemConfig,
   setLangfuseConfig,
 } = api;
@@ -53,6 +54,10 @@ const methods = {
   createToken: {
     url: createSystemToken,
     method: 'post',
+  },
+  updateToken: {
+    url: updateSystemToken,
+    method: 'patch',
   },
   removeToken: {
     url: removeSystemToken,

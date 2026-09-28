@@ -4,7 +4,21 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { CopyToClipboardWithText } from '@/components/copy-to-clipboard';
 import { useTranslate } from '@/hooks/common-hooks';
 
-const BackendServiceApi = ({ show }: { show(): void }) => {
+export const canManageApiKeys = (
+  tenantInfo?: { role?: string },
+  userInfo?: { is_superuser?: boolean },
+) =>
+  tenantInfo?.role === 'owner' ||
+  tenantInfo?.role === 'admin' ||
+  userInfo?.is_superuser === true;
+
+const BackendServiceApi = ({
+  show,
+  canManageKeys = true,
+}: {
+  show(): void;
+  canManageKeys?: boolean;
+}) => {
   const { t } = useTranslate('chat');
 
   return (
@@ -12,7 +26,7 @@ const BackendServiceApi = ({ show }: { show(): void }) => {
       <CardHeader>
         <div className="flex items-center gap-4">
           <CardTitle>RAGFlow API</CardTitle>
-          <Button onClick={show}>{t('apiKey')}</Button>
+          {canManageKeys && <Button onClick={show}>{t('apiKey')}</Button>}
         </div>
       </CardHeader>
       <CardContent>

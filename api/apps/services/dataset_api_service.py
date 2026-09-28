@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Collection
 from types import SimpleNamespace
 
 from peewee import IntegrityError
@@ -618,7 +619,11 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
     return True, response_data
 
 
-def list_datasets(tenant_id: str, args: dict):
+def list_datasets(
+    tenant_id: str,
+    args: dict,
+    allowed_dataset_ids: Collection[str] | None = None,
+):
     """
     List datasets.
 
@@ -646,14 +651,15 @@ def list_datasets(tenant_id: str, args: dict):
         # unknown type, default to True
         desc = True
 
-    if kb_id:
-        kbs = KnowledgebaseService.get_kb_by_id(kb_id, tenant_id)
-        if not kbs:
-            return False, f"User '{tenant_id}' lacks permission for dataset '{kb_id}'"
-    if name:
-        kbs = KnowledgebaseService.get_kb_by_name(name, tenant_id)
-        if not kbs:
-            return False, f"User '{tenant_id}' lacks permission for dataset '{name}'"
+    if allowed_dataset_ids is None:
+        if kb_id:
+            kbs = KnowledgebaseService.get_kb_by_id(kb_id, tenant_id)
+            if not kbs:
+                return False, f"User '{tenant_id}' lacks permission for dataset '{kb_id}'"
+        if name:
+            kbs = KnowledgebaseService.get_kb_by_name(name, tenant_id)
+            if not kbs:
+                return False, f"User '{tenant_id}' lacks permission for dataset '{name}'"
     active_team_ids = TeamMemberService.active_team_ids(tenant_id)
     owner_ids = ext_fields.get("owner_ids") or None
     kbs, total = KnowledgebaseService.get_list(
@@ -670,6 +676,7 @@ def list_datasets(tenant_id: str, args: dict):
         category_id,
         uncategorized,
         owner_ids=owner_ids,
+        allowed_dataset_ids=allowed_dataset_ids,
     )
     users = UserService.get_by_ids([m["tenant_id"] for m in kbs])
     user_map = {m.id: m.to_dict() for m in users}

@@ -80,6 +80,9 @@ class _KB:
         pagerank=0,
         graphrag_task_id="",
         raptor_task_id="",
+        permission="me",
+        team_id=None,
+        pipeline_id="",
     ):
         self.id = kb_id
         self.name = name
@@ -91,6 +94,9 @@ class _KB:
         self.pagerank = pagerank
         self.graphrag_task_id = graphrag_task_id
         self.raptor_task_id = raptor_task_id
+        self.permission = permission
+        self.team_id = team_id
+        self.pipeline_id = pipeline_id
 
     def to_dict(self):
         return {
@@ -132,6 +138,11 @@ def _patch_json_parser(monkeypatch, module, payload_state, err_state=None):
 def _load_dataset_module(monkeypatch):
     repo_root = Path(__file__).resolve().parents[4]
 
+    services_api_pkg = sys.modules.get("api.apps.services")
+    if services_api_pkg is not None and hasattr(services_api_pkg, "dataset_api_service"):
+        monkeypatch.delattr(services_api_pkg, "dataset_api_service")
+    monkeypatch.delitem(sys.modules, "api.apps.services.dataset_api_service", raising=False)
+
     quart_mod = ModuleType("quart")
     quart_mod.Request = type("Request", (), {})
     quart_mod.request = SimpleNamespace(args=_DummyArgs())
@@ -154,10 +165,21 @@ def _load_dataset_module(monkeypatch):
 
     apps_pkg = ModuleType("api.apps")
     apps_pkg.__path__ = [str(repo_root / "api" / "apps")]
-    apps_pkg.login_required = lambda func: func
+    def _login_required(func=None, **_kwargs):
+        if func is None:
+            return lambda wrapped: wrapped
+        return func
+
+    apps_pkg.login_required = _login_required
+    apps_pkg.KNOWLEDGE_RETRIEVE_SCOPE = "knowledge:retrieve"
     apps_pkg.current_user = SimpleNamespace(id="tenant-current")
     monkeypatch.setitem(sys.modules, "api.apps", apps_pkg)
     api_pkg.apps = apps_pkg
+
+    api_key_auth_mod = ModuleType("api.apps.api_key_auth")
+    api_key_auth_mod.allowed_dataset_ids = lambda: None
+    api_key_auth_mod.require_dataset_access = lambda dataset_ids: list(dict.fromkeys(dataset_ids))
+    monkeypatch.setitem(sys.modules, "api.apps.api_key_auth", api_key_auth_mod)
 
     sdk_pkg = ModuleType("api.apps.sdk")
     sdk_pkg.__path__ = [str(repo_root / "api" / "apps" / "sdk")]
@@ -167,10 +189,23 @@ def _load_dataset_module(monkeypatch):
     db_pkg = ModuleType("api.db")
     db_pkg.__path__ = []
     db_pkg.FileType = SimpleNamespace()
+    db_pkg.TenantPermission = SimpleNamespace(
+        ME=SimpleNamespace(value="me"),
+        TEAM=SimpleNamespace(value="team"),
+    )
     monkeypatch.setitem(sys.modules, "api.db", db_pkg)
     api_pkg.db = db_pkg
 
     db_models_mod = ModuleType("api.db.db_models")
+
+    class _Atomic:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    db_models_mod.DB = SimpleNamespace(atomic=lambda: _Atomic())
     db_models_mod.File = SimpleNamespace(
         source_type=_Field("source_type"),
         id=_Field("id"),
@@ -178,6 +213,13 @@ def _load_dataset_module(monkeypatch):
         name=_Field("name"),
     )
     monkeypatch.setitem(sys.modules, "api.db.db_models", db_models_mod)
+
+    joint_services_pkg = ModuleType("api.db.joint_services")
+    joint_services_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "api.db.joint_services", joint_services_pkg)
+    tenant_model_service_mod = ModuleType("api.db.joint_services.tenant_model_service")
+    tenant_model_service_mod.get_model_config_from_provider_instance = lambda *_args, **_kwargs: {}
+    monkeypatch.setitem(sys.modules, "api.db.joint_services.tenant_model_service", tenant_model_service_mod)
 
     services_pkg = ModuleType("api.db.services")
     services_pkg.__path__ = []
@@ -251,6 +293,10 @@ def _load_dataset_module(monkeypatch):
         def save(**_kwargs):
             return True
 
+        @classmethod
+        def save_in_transaction(cls, **kwargs):
+            return 1 if cls.save(**kwargs) else 0
+
         @staticmethod
         def get_by_id(_kb_id):
             return True, _KB()
@@ -302,6 +348,20 @@ def _load_dataset_module(monkeypatch):
     task_service_mod.TaskService = _StubTaskService
     monkeypatch.setitem(sys.modules, "api.db.services.task_service", task_service_mod)
     services_pkg.task_service = task_service_mod
+
+    category_service_mod = ModuleType("api.db.services.knowledgebase_category_service")
+    category_service_mod.KnowledgebaseCategoryService = SimpleNamespace(query=lambda **_kwargs: [])
+    monkeypatch.setitem(sys.modules, "api.db.services.knowledgebase_category_service", category_service_mod)
+    services_pkg.knowledgebase_category_service = category_service_mod
+
+    team_service_mod = ModuleType("api.db.services.team_service")
+    team_service_mod.TeamAuthorizationService = SimpleNamespace(
+        validate_assignment=lambda *_args, **_kwargs: (True, None),
+    )
+    team_service_mod.TeamMemberService = SimpleNamespace(active_team_ids=lambda _tenant_id: [])
+    team_service_mod.TeamService = SimpleNamespace(query=lambda **_kwargs: [])
+    monkeypatch.setitem(sys.modules, "api.db.services.team_service", team_service_mod)
+    services_pkg.team_service = team_service_mod
 
     user_service_mod = ModuleType("api.db.services.user_service")
 
@@ -393,6 +453,7 @@ def _load_dataset_module(monkeypatch):
     api_utils_mod.get_error_argument_result = _get_error_argument_result
     api_utils_mod.get_error_data_result = _get_error_data_result
     api_utils_mod.get_error_permission_result = _get_error_permission_result
+    api_utils_mod.get_json_result = _get_result
     api_utils_mod.get_parser_config = lambda _chunk_method, _unused: {"auto": True}
     api_utils_mod.get_result = _get_result
     api_utils_mod.remap_dictionary_keys = lambda data: data
@@ -445,6 +506,15 @@ def _load_dataset_module(monkeypatch):
     module.settings = module.dataset_api_service.settings
     module.search = search_mod
     module.queue_raptor_o_graphrag_tasks = module.dataset_api_service.queue_raptor_o_graphrag_tasks
+    module.knowledge_graph = module.get_knowledge_graph
+
+    def _delete_knowledge_graph(tenant_id, dataset_id):
+        success, result = module.dataset_api_service.delete_knowledge_graph(dataset_id, tenant_id)
+        if success:
+            return module.get_result(data=result)
+        return module.get_result(data=False, message=result, code=module.RetCode.AUTHENTICATION_ERROR)
+
+    module.delete_knowledge_graph = _delete_knowledge_graph
     return module
 
 

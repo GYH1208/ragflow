@@ -162,7 +162,11 @@ def auth():
 def token(auth):
     url = HOST_ADDRESS + f"/api/{VERSION}/system/tokens"
     auth = {"Authorization": auth}
-    response = requests.post(url=url, headers=auth)
+    response = requests.post(
+        url=url,
+        headers=auth,
+        json={"name": "REST test full-access key", "key_type": "full_access"},
+    )
     res = response.json()
     if res.get("code") != 0:
         error_msg = f"access: {url}, POST method, error code: {res.get('code')}, message: {res.get('message')}"
