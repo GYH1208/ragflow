@@ -64,6 +64,8 @@ All successful management responses use the standard envelope:
 
 **POST** `/api/v1/system/tokens`
 
+For backward compatibility, an authenticated owner or administrator may omit both the request body and `Content-Type`; this creates a full-access key named `旧版 API Key`. This legacy form is deprecated. New clients must send one of the JSON requests below.
+
 A full-access key request has exactly these fields; dataset scope and expiry fields are rejected:
 
 ```json
@@ -179,6 +181,8 @@ Success returns:
   "message": "success"
 }
 ```
+
+The legacy **DELETE** `/api/v1/system/tokens/{token}` route remains available for existing clients but is deprecated because URLs can be retained in access logs and intermediary telemetry. New clients must use the fixed URL and JSON body above.
 
 ### Retrieval-key contract
 

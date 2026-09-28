@@ -390,7 +390,8 @@ async def new_token():
     security:
       - ApiKeyAuth: []
     requestBody:
-      required: true
+      required: false
+      description: Omit the body only for deprecated full-access key creation compatibility.
       content:
         application/json:
           schema:
@@ -427,9 +428,14 @@ async def new_token():
     if tenant_id is None:
         return _management_error(RetCode.FORBIDDEN, "API key management requires an owner or administrator.")
 
-    req, err = await validate_and_parse_json_request(request, CreateAPIKeyReq, redact_validation_inputs=True)
-    if err is not None:
-        return _management_error(RetCode.BAD_REQUEST, err)
+    content_type_missing = request.content_type is None
+    raw_body = await request.get_data(cache=True) if content_type_missing else None
+    if content_type_missing and not raw_body:
+        req = {"name": "旧版 API Key", "key_type": APIKeyType.FULL_ACCESS.value}
+    else:
+        req, err = await validate_and_parse_json_request(request, CreateAPIKeyReq, redact_validation_inputs=True)
+        if err is not None:
+            return _management_error(RetCode.BAD_REQUEST, err)
 
     try:
         key_type = APIKeyType(req["key_type"])
@@ -557,6 +563,12 @@ async def update_token():
         return _management_failure()
 
 
+def _delete_token_for_tenant(tenant_id, token):
+    APITokenService.filter_delete([APIToken.tenant_id == tenant_id, APIToken.token == token])
+    ScopedAPITokenService.filter_delete([ScopedAPIToken.tenant_id == tenant_id, ScopedAPIToken.token == token])
+    return get_json_result(data=True)
+
+
 @manager.route("/system/tokens", methods=["DELETE"])  # noqa: F821
 @login_required
 async def rm():
@@ -598,10 +610,22 @@ async def rm():
         return _management_error(RetCode.BAD_REQUEST, err)
 
     try:
-        token = req["token"]
-        APITokenService.filter_delete([APIToken.tenant_id == tenant_id, APIToken.token == token])
-        ScopedAPITokenService.filter_delete([ScopedAPIToken.tenant_id == tenant_id, ScopedAPIToken.token == token])
-        return get_json_result(data=True)
+        return _delete_token_for_tenant(tenant_id, req["token"])
+    except Exception:
+        return _management_failure()
+
+
+@manager.route("/system/tokens/<token>", methods=["DELETE"])  # noqa: F821
+@login_required
+async def rm_legacy(token):
+    """Deprecated compatibility route for deleting API tokens."""
+    tenant_id = _managed_tenant_id()
+    if tenant_id is None:
+        return _management_error(RetCode.FORBIDDEN, "API key management requires an owner or administrator.")
+
+    logging.warning("Deprecated API endpoint DELETE /system/tokens/<token> was used")
+    try:
+        return _delete_token_for_tenant(tenant_id, token)
     except Exception:
         return _management_failure()
 

@@ -82,11 +82,15 @@ class _DummyRequest:
     mimetype = "application/json"
     content_type = "application/json"
 
-    def __init__(self, payload=None):
+    def __init__(self, payload=None, raw_body=b""):
         self.payload = payload
+        self.raw_body = raw_body
 
     async def get_json(self):
         return self.payload
+
+    async def get_data(self, cache=True):
+        return self.raw_body
 
 
 class _Record(SimpleNamespace):
@@ -445,16 +449,80 @@ def test_management_body_models_require_nonblank_token_and_keep_it_out_of_mutabl
             DeleteAPIKeyReq(**payload)
 
 
-def test_update_and_delete_register_only_fixed_management_paths(monkeypatch):
+def test_management_routes_keep_fixed_paths_and_deprecated_delete_compatibility(monkeypatch):
     module = _load_system_module(monkeypatch)
 
     registered = set(module.manager.routes)
     assert ("/system/tokens", ("PATCH",)) in registered
     assert ("/system/tokens", ("DELETE",)) in registered
-    assert not any("<token>" in rule for rule, _methods in registered)
+    assert ("/system/tokens/<token>", ("DELETE",)) in registered
 
 
-@pytest.mark.parametrize("handler_name,args", [("token_list", ()), ("new_token", ()), ("update_token", ()), ("rm", ())])
+def test_legacy_create_without_content_type_or_body_creates_full_access_key(monkeypatch):
+    module = _load_system_module(monkeypatch, payload=None)
+    module._test_request.mimetype = ""
+    module._test_request.content_type = None
+
+    response = _call(module.new_token)
+
+    assert response.status_code == 200
+    assert response["code"] == 0
+    assert response["data"]["name"] == "旧版 API Key"
+    assert response["data"]["key_type"] == "full_access"
+    assert response["data"]["legacy"] is False
+    assert len(module._test_full_tokens) == 1
+
+
+def test_create_without_content_type_rejects_nonempty_body(monkeypatch):
+    module = _load_system_module(monkeypatch, payload=None)
+    module._test_request.mimetype = ""
+    module._test_request.content_type = None
+    module._test_request.raw_body = b"not-json"
+
+    response = _call(module.new_token)
+
+    assert response.status_code == 400
+    assert module._test_full_tokens == []
+
+
+@pytest.mark.parametrize(
+    "mimetype,content_type",
+    [
+        ("application/json", "application/json"),
+        ("text/plain", "text/plain"),
+    ],
+)
+def test_empty_create_with_explicit_content_type_keeps_strict_contract(monkeypatch, mimetype, content_type):
+    module = _load_system_module(monkeypatch, payload=None)
+    module._test_request.mimetype = mimetype
+    module._test_request.content_type = content_type
+
+    response = _call(module.new_token)
+
+    assert response.status_code == 400
+    assert module._test_full_tokens == []
+
+
+def test_deprecated_delete_path_removes_token_from_managed_tenant(monkeypatch):
+    full_tokens = [
+        _Record(tenant_id="tenant-1", token="ragflow-legacy-delete"),
+        _Record(tenant_id="tenant-2", token="ragflow-legacy-delete"),
+    ]
+    module = _load_system_module(monkeypatch, full_tokens=full_tokens)
+
+    response = _call(module.rm_legacy, "ragflow-legacy-delete")
+
+    assert response.status_code == 200
+    assert response["data"] is True
+    assert [(row.tenant_id, row.token) for row in module._test_full_tokens] == [
+        ("tenant-2", "ragflow-legacy-delete")
+    ]
+
+
+@pytest.mark.parametrize(
+    "handler_name,args",
+    [("token_list", ()), ("new_token", ()), ("update_token", ()), ("rm", ()), ("rm_legacy", ("ragflow-key",))],
+)
 def test_ordinary_member_cannot_manage_any_api_key_route(monkeypatch, handler_name, args):
     module = _load_system_module(
         monkeypatch,
@@ -466,7 +534,10 @@ def test_ordinary_member_cannot_manage_any_api_key_route(monkeypatch, handler_na
     assert response["code"] == 403
 
 
-@pytest.mark.parametrize("handler_name,args", [("token_list", ()), ("new_token", ()), ("update_token", ()), ("rm", ())])
+@pytest.mark.parametrize(
+    "handler_name,args",
+    [("token_list", ()), ("new_token", ()), ("update_token", ()), ("rm", ()), ("rm_legacy", ("ragflow-key",))],
+)
 def test_retrieval_key_is_denied_by_default_on_every_management_route(monkeypatch, handler_name, args):
     module = _load_system_module(
         monkeypatch,
