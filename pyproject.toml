@@ -65,7 +65,7 @@ dependencies = [
     "markdown==3.6",
     "markdown-to-json==2.1.1",
     "markdownify>=1.2.0",
-    "mcp>=1.19.0",
+    "mcp>=1.30,<2",
     "mini-racer>=0.12.4,<0.13.0",
     "minio==7.2.4",
     "mistralai==0.4.2",
@@ -219,6 +219,9 @@ override-dependencies = [
     # moodlepy<=0.24.1 pins attrs<23.0.0, but trio>=0.26.0 requires attrs>=23.2.0.
     # attrs 23.x is backward-compatible; moodlepy works fine at runtime with it.
     "attrs>=23.2.0",
+    # mcp>=1.23.2 requires PyJWT>=2.10.1, while zhipuai==2.0.1 pins PyJWT~=2.8.0.
+    # ZhipuAI's HS256 token generation remains compatible with PyJWT 2.10.1+.
+    "pyjwt[crypto]>=2.10.1",
 ]
 # trio 0.26+ (Python 3.13 compatible) is not yet on the Aliyun mirror.
 # Mark PyPI as explicit so it is used only for packages listed in [tool.uv.sources].
