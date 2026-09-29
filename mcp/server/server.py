@@ -15,6 +15,7 @@
 #
 
 import asyncio
+import hashlib
 import json
 import logging
 import random
@@ -93,8 +94,10 @@ def _response_error_message(response, default):
 
 class RAGFlowConnector:
     _MAX_DATASET_CACHE = 32
+    _MAX_DATASET_ID_CACHE = 256
     _MAX_DOCUMENT_CACHE = 4096
     _CACHE_TTL = 300
+    _DATASET_ID_CACHE_TTL = 60
     _DOCUMENT_SEARCH_CONCURRENCY = 8
     _MAX_DOCUMENT_SEARCH_DATASETS = 32
     _MAX_DOCUMENT_SEARCH_PAGES = 5
@@ -109,6 +112,10 @@ class RAGFlowConnector:
         self.version = version
         self.api_url = f"{self.base_url}/api/{self.version}"
         self._async_client = None
+        self._dataset_id_cache: OrderedDict[bytes, tuple[tuple[str, ...], float]] = OrderedDict()
+        self._dataset_id_inflight: dict[bytes, asyncio.Task[list[str]]] = {}
+        self._dataset_id_tasks: dict[bytes, set[asyncio.Task[list[str]]]] = {}
+        self._dataset_id_versions: dict[bytes, int] = {}
 
     async def _get_client(self):
         if self._async_client is None:
@@ -116,6 +123,14 @@ class RAGFlowConnector:
         return self._async_client
 
     async def close(self):
+        inflight_tasks = {task for tasks in self._dataset_id_tasks.values() for task in tasks}
+        self._dataset_id_inflight.clear()
+        for task in inflight_tasks:
+            task.cancel()
+        if inflight_tasks:
+            await asyncio.gather(*inflight_tasks, return_exceptions=True)
+        self._dataset_id_tasks.clear()
+        self._dataset_id_versions.clear()
         if self._async_client is not None:
             await self._async_client.aclose()
             self._async_client = None
@@ -125,6 +140,8 @@ class RAGFlowConnector:
             return None
         client = await self._get_client()
         res = await client.post(url=self.api_url + path, json=json, headers={"Authorization": f"Bearer {api_key}"})
+        if res.status_code in (401, 403):
+            self._invalidate_cached_dataset_ids(api_key)
         return res
 
     async def _get(self, path, params=None, api_key: str = ""):
@@ -132,7 +149,48 @@ class RAGFlowConnector:
             return None
         client = await self._get_client()
         res = await client.get(url=self.api_url + path, params=params, headers={"Authorization": f"Bearer {api_key}"})
+        if res.status_code in (401, 403):
+            self._invalidate_cached_dataset_ids(api_key)
         return res
+
+    @staticmethod
+    def _dataset_id_cache_key(api_key: str) -> bytes:
+        return hashlib.sha256(api_key.encode()).digest()
+
+    def _get_cached_dataset_ids(self, cache_key: bytes) -> list[str] | None:
+        entry = self._dataset_id_cache.get(cache_key)
+        if entry is None:
+            return None
+
+        dataset_ids, expires_at = entry
+        if time.monotonic() >= expires_at:
+            self._dataset_id_cache.pop(cache_key, None)
+            if cache_key not in self._dataset_id_tasks:
+                self._dataset_id_versions.pop(cache_key, None)
+            return None
+
+        self._dataset_id_cache.move_to_end(cache_key)
+        return list(dataset_ids)
+
+    def _set_cached_dataset_ids(self, cache_key: bytes, dataset_ids: list[str]) -> None:
+        self._dataset_id_cache[cache_key] = (tuple(dataset_ids), time.monotonic() + self._DATASET_ID_CACHE_TTL)
+        self._dataset_id_cache.move_to_end(cache_key)
+        if len(self._dataset_id_cache) > self._MAX_DATASET_ID_CACHE:
+            evicted_key, _ = self._dataset_id_cache.popitem(last=False)
+            if evicted_key not in self._dataset_id_tasks:
+                self._dataset_id_versions.pop(evicted_key, None)
+
+    def _invalidate_cached_dataset_ids(self, api_key: str) -> None:
+        if not api_key:
+            return
+
+        cache_key = self._dataset_id_cache_key(api_key)
+        self._dataset_id_cache.pop(cache_key, None)
+        self._dataset_id_inflight.pop(cache_key, None)
+        if cache_key not in self._dataset_id_tasks:
+            self._dataset_id_versions.pop(cache_key, None)
+        else:
+            self._dataset_id_versions[cache_key] = self._dataset_id_versions.get(cache_key, 0) + 1
 
     def _is_cache_valid(self, ts):
         return time.time() < ts
@@ -203,12 +261,14 @@ class RAGFlowConnector:
             raise Exception([types.TextContent(type="text", text=_response_error_message(res, "Cannot process this operation."))])
 
         data = res_json.get("data")
-        total = res_json.get("total")
+        total = res_json.get("total", res_json.get("total_datasets"))
         if not isinstance(data, list) or (total is not None and type(total) is not int):
             raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
         if any(not isinstance(item, dict) or "id" not in item or "description" not in item for item in data):
             raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
 
+        if total is not None:
+            res_json["total"] = total
         return res_json
 
     async def _fetch_all_datasets(
@@ -266,6 +326,36 @@ class RAGFlowConnector:
 
     async def resolve_dataset_ids(self, *, api_key: str):
         """Resolve all accessible dataset IDs for MCP retrieval fallback."""
+        cache_key = self._dataset_id_cache_key(api_key)
+        cached_dataset_ids = self._get_cached_dataset_ids(cache_key)
+        if cached_dataset_ids is not None:
+            return cached_dataset_ids
+
+        task = self._dataset_id_inflight.get(cache_key)
+        if task is None:
+            cache_version = self._dataset_id_versions.get(cache_key, 0)
+            task = asyncio.create_task(self._load_dataset_ids(api_key=api_key, cache_key=cache_key, cache_version=cache_version))
+            self._dataset_id_inflight[cache_key] = task
+            self._dataset_id_tasks.setdefault(cache_key, set()).add(task)
+
+            def clear_inflight(completed_task):
+                if not completed_task.cancelled():
+                    completed_task.exception()
+                if self._dataset_id_inflight.get(cache_key) is completed_task:
+                    self._dataset_id_inflight.pop(cache_key, None)
+                tasks = self._dataset_id_tasks.get(cache_key)
+                if tasks is not None:
+                    tasks.discard(completed_task)
+                    if not tasks:
+                        self._dataset_id_tasks.pop(cache_key, None)
+                if cache_key not in self._dataset_id_cache and cache_key not in self._dataset_id_tasks:
+                    self._dataset_id_versions.pop(cache_key, None)
+
+            task.add_done_callback(clear_inflight)
+
+        return list(await asyncio.shield(task))
+
+    async def _load_dataset_ids(self, *, api_key: str, cache_key: bytes, cache_version: int) -> list[str]:
         logging.info("Resolving accessible dataset IDs for MCP retrieval")
         try:
             datasets = await self._fetch_all_datasets(api_key=api_key)
@@ -275,6 +365,8 @@ class RAGFlowConnector:
 
         dataset_ids = [data["id"] for data in datasets if data.get("id")]
         resolved = list(dict.fromkeys(dataset_ids))
+        if self._dataset_id_versions.get(cache_key, 0) == cache_version:
+            self._set_cached_dataset_ids(cache_key, resolved)
         logging.info("resolve_dataset_ids resolved %s accessible dataset IDs", len(resolved))
         return resolved
 
@@ -728,13 +820,18 @@ def with_api_key(required: bool = True):
 @app.list_tools()
 @with_api_key(required=True)
 async def list_tools(*, connector: RAGFlowConnector, api_key: str) -> list[types.Tool]:
-    dataset_description = await connector.list_datasets(api_key=api_key)
-
     return [
         types.Tool(
             name="ragflow_retrieval",
-            description="Semantically retrieve relevant chunks when you do not know which document contains the answer. To locate a known or named file, call search_documents first. After obtaining a document_id, use get_document_chunks to read the original text instead of repeatedly calling this tool. You can optionally specify dataset_ids to search only specific datasets, or omit dataset_ids entirely to search across ALL available datasets. You can also optionally specify document_ids to search within specific documents. When dataset_ids is not provided or is empty, the system will automatically search across all available datasets. Below is the list of all available datasets, including their descriptions and IDs:"
-            + dataset_description,
+            description=(
+                "Semantically retrieve relevant chunks when you do not know which document contains the answer. "
+                "To locate a known or named file, call search_documents first. After obtaining a document_id, use "
+                "get_document_chunks to read the original text instead of repeatedly calling this tool. You can "
+                "optionally specify dataset_ids to search only specific datasets, or omit dataset_ids entirely to "
+                "search across ALL available datasets. You can also optionally specify document_ids to search within "
+                "specific documents. When dataset_ids is not provided or is empty, the system will automatically "
+                "search across all available datasets."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -795,8 +892,12 @@ async def list_tools(*, connector: RAGFlowConnector, api_key: str) -> list[types
         ),
         types.Tool(
             name="search_documents",
-            description="Find documents by filename keyword without semantic content retrieval. Use this first when the user names or describes a specific file. The result returns dataset_id and document_id; then call get_document_chunks to read that document. Do not repeatedly call ragflow_retrieval after a document has been identified. Available datasets:"
-            + dataset_description,
+            description=(
+                "Find documents by filename keyword without semantic content retrieval. Use this first when the user "
+                "names or describes a specific file. The result returns dataset_id and document_id; then call "
+                "get_document_chunks to read that document. Do not repeatedly call ragflow_retrieval after a document "
+                "has been identified. Omit dataset_ids to search all datasets accessible to the current API key."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -810,7 +911,11 @@ async def list_tools(*, connector: RAGFlowConnector, api_key: str) -> list[types
         ),
         types.Tool(
             name="get_document_chunks",
-            description="Read chunks from one identified document in original document order, without semantic reranking. Use this after search_documents or ragflow_retrieval has returned dataset_id and document_id. Continue with the next page until all chunks needed for the answer have been read.",
+            description=(
+                "Read chunks from one identified document in original document order, without semantic reranking. Use "
+                "this after search_documents or ragflow_retrieval has returned dataset_id and document_id. Continue "
+                "with the next page until all chunks needed for the answer have been read."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {

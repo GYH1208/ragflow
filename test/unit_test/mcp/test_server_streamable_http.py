@@ -110,12 +110,9 @@ async def test_host_streamable_http_rejects_untrusted_origin(mcp_server):
 
 
 @pytest.mark.asyncio
-async def test_host_streamable_http_uses_api_key_from_each_tools_request(monkeypatch, mcp_server):
-    received_api_keys = []
-
+async def test_host_streamable_http_lists_static_tools_without_fetching_datasets(monkeypatch, mcp_server):
     async def list_datasets(_connector, *, api_key, **_kwargs):
-        received_api_keys.append(api_key)
-        return '{"description":"Human resources","id":"dataset-1"}'
+        raise AssertionError(f"tools/list must not fetch datasets with {api_key=}")
 
     monkeypatch.setattr(mcp_server.RAGFlowConnector, "list_datasets", list_datasets)
 
@@ -139,7 +136,6 @@ async def test_host_streamable_http_uses_api_key_from_each_tools_request(monkeyp
         "search_documents",
         "get_document_chunks",
     ]
-    assert received_api_keys == ["ragflow-rk-tools-request"]
 
 
 @pytest.mark.asyncio

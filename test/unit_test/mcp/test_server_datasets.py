@@ -14,6 +14,7 @@
 #  limitations under the License.
 #
 
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
@@ -119,6 +120,222 @@ async def test_resolve_dataset_ids_fetches_all_pages_and_deduplicates(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_resolve_dataset_ids_stops_at_api_total_datasets(monkeypatch, mcp_server):
+    connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
+    requested_pages = []
+
+    async def _get(_path, params=None, api_key=""):
+        requested_pages.append(params["page"])
+        if params["page"] != 1:
+            raise AssertionError("the reported dataset total should stop pagination")
+        return _FakeResponse(
+            {
+                "code": 0,
+                "data": [{"id": "dataset-1", "description": "Policies"}],
+                "total_datasets": 1,
+            }
+        )
+
+    monkeypatch.setattr(connector, "_get", _get)
+
+    result = await connector.resolve_dataset_ids(api_key="unit-key")
+
+    assert result == ["dataset-1"]
+    assert requested_pages == [1]
+
+
+@pytest.mark.asyncio
+async def test_resolve_dataset_ids_caches_per_api_key_until_ttl(monkeypatch, mcp_server):
+    connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
+    now = [100.0]
+    fetches = []
+
+    async def _fetch_all_datasets(*, api_key, **_kwargs):
+        fetches.append(api_key)
+        suffix = api_key.rsplit("-", 1)[-1]
+        return [{"id": f"dataset-{suffix}", "description": "Policies"}]
+
+    monkeypatch.setattr(mcp_server.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(connector, "_fetch_all_datasets", _fetch_all_datasets)
+
+    assert await connector.resolve_dataset_ids(api_key="unit-key-a") == ["dataset-a"]
+    assert await connector.resolve_dataset_ids(api_key="unit-key-a") == ["dataset-a"]
+    assert await connector.resolve_dataset_ids(api_key="unit-key-b") == ["dataset-b"]
+
+    now[0] += 61
+    assert await connector.resolve_dataset_ids(api_key="unit-key-a") == ["dataset-a"]
+
+    assert fetches == ["unit-key-a", "unit-key-b", "unit-key-a"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_dataset_ids_coalesces_concurrent_cache_misses(monkeypatch, mcp_server):
+    connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+    fetch_count = 0
+
+    async def _fetch_all_datasets(*, api_key, **_kwargs):
+        nonlocal fetch_count
+        assert api_key == "unit-key"
+        fetch_count += 1
+        fetch_started.set()
+        await release_fetch.wait()
+        return [{"id": "dataset-1", "description": "Policies"}]
+
+    monkeypatch.setattr(connector, "_fetch_all_datasets", _fetch_all_datasets)
+
+    tasks = [asyncio.create_task(connector.resolve_dataset_ids(api_key="unit-key")) for _ in range(8)]
+    await fetch_started.wait()
+    await asyncio.sleep(0)
+    release_fetch.set()
+
+    results = await asyncio.gather(*tasks)
+
+    assert results == [["dataset-1"]] * 8
+    assert fetch_count == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_dataset_ids_does_not_cache_failed_fetch(monkeypatch, mcp_server):
+    connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
+    fetch_count = 0
+
+    async def _fetch_all_datasets(*, api_key, **_kwargs):
+        nonlocal fetch_count
+        assert api_key == "unit-key"
+        fetch_count += 1
+        if fetch_count == 1:
+            raise RuntimeError("temporary backend failure")
+        return [{"id": "dataset-1", "description": "Policies"}]
+
+    monkeypatch.setattr(connector, "_fetch_all_datasets", _fetch_all_datasets)
+
+    with pytest.raises(RuntimeError, match="temporary backend failure"):
+        await connector.resolve_dataset_ids(api_key="unit-key")
+
+    assert await connector.resolve_dataset_ids(api_key="unit-key") == ["dataset-1"]
+    assert fetch_count == 2
+
+
+@pytest.mark.asyncio
+async def test_forbidden_backend_response_invalidates_cached_dataset_ids(monkeypatch, mcp_server):
+    connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
+    fetch_count = 0
+
+    async def _fetch_all_datasets(*, api_key, **_kwargs):
+        nonlocal fetch_count
+        assert api_key == "unit-key"
+        fetch_count += 1
+        return [{"id": f"dataset-{fetch_count}", "description": "Policies"}]
+
+    class _ForbiddenClient:
+        async def get(self, **_kwargs):
+            response = _FakeResponse({"code": 403, "message": "Forbidden"})
+            response.status_code = 403
+            return response
+
+    monkeypatch.setattr(connector, "_fetch_all_datasets", _fetch_all_datasets)
+
+    assert await connector.resolve_dataset_ids(api_key="unit-key") == ["dataset-1"]
+    connector._async_client = _ForbiddenClient()
+    response = await connector._get("/forbidden", api_key="unit-key")
+    assert response.status_code == 403
+
+    assert await connector.resolve_dataset_ids(api_key="unit-key") == ["dataset-2"]
+    assert fetch_count == 2
+
+
+@pytest.mark.asyncio
+async def test_invalidation_does_not_allow_inflight_result_to_repopulate_cache(monkeypatch, mcp_server):
+    connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
+    fetch_started = asyncio.Event()
+    release_stale_fetch = asyncio.Event()
+    fetch_count = 0
+
+    async def _fetch_all_datasets(*, api_key, **_kwargs):
+        nonlocal fetch_count
+        assert api_key == "unit-key"
+        fetch_count += 1
+        if fetch_count == 1:
+            fetch_started.set()
+            await release_stale_fetch.wait()
+            return [{"id": "stale", "description": "Old permissions"}]
+        return [{"id": "fresh", "description": "Current permissions"}]
+
+    monkeypatch.setattr(connector, "_fetch_all_datasets", _fetch_all_datasets)
+
+    stale_resolution = asyncio.create_task(connector.resolve_dataset_ids(api_key="unit-key"))
+    await fetch_started.wait()
+    connector._invalidate_cached_dataset_ids("unit-key")
+    release_stale_fetch.set()
+
+    assert await stale_resolution == ["stale"]
+    assert await connector.resolve_dataset_ids(api_key="unit-key") == ["fresh"]
+    assert fetch_count == 2
+
+
+@pytest.mark.asyncio
+async def test_repeated_invalidation_keeps_all_older_inflight_results_stale(monkeypatch, mcp_server):
+    connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
+    fetch_started = [asyncio.Event(), asyncio.Event()]
+    release_fetch = [asyncio.Event(), asyncio.Event()]
+    fetch_count = 0
+
+    async def _fetch_all_datasets(**_kwargs):
+        nonlocal fetch_count
+        fetch_index = fetch_count
+        fetch_count += 1
+        if fetch_index < 2:
+            fetch_started[fetch_index].set()
+            await release_fetch[fetch_index].wait()
+            return [{"id": f"stale-{fetch_index}", "description": "Old permissions"}]
+        return [{"id": "fresh", "description": "Current permissions"}]
+
+    monkeypatch.setattr(connector, "_fetch_all_datasets", _fetch_all_datasets)
+
+    first_resolution = asyncio.create_task(connector.resolve_dataset_ids(api_key="unit-key"))
+    await fetch_started[0].wait()
+    connector._invalidate_cached_dataset_ids("unit-key")
+    second_resolution = asyncio.create_task(connector.resolve_dataset_ids(api_key="unit-key"))
+    await fetch_started[1].wait()
+    connector._invalidate_cached_dataset_ids("unit-key")
+
+    release_fetch[1].set()
+    assert await second_resolution == ["stale-1"]
+    release_fetch[0].set()
+    assert await first_resolution == ["stale-0"]
+
+    assert await connector.resolve_dataset_ids(api_key="unit-key") == ["fresh"]
+    assert fetch_count == 3
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_and_awaits_inflight_dataset_resolution(monkeypatch, mcp_server):
+    connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
+    fetch_started = asyncio.Event()
+    fetch_cancelled = asyncio.Event()
+
+    async def _fetch_all_datasets(**_kwargs):
+        fetch_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            fetch_cancelled.set()
+
+    monkeypatch.setattr(connector, "_fetch_all_datasets", _fetch_all_datasets)
+
+    resolution = asyncio.create_task(connector.resolve_dataset_ids(api_key="unit-key"))
+    await fetch_started.wait()
+    await connector.close()
+
+    with pytest.raises(asyncio.CancelledError):
+        await resolution
+    assert fetch_cancelled.is_set()
+    assert connector._dataset_id_inflight == {}
+
+
+@pytest.mark.asyncio
 async def test_list_datasets_clamps_explicit_page_size_to_rest_limit_and_preserves_filters(monkeypatch, mcp_server):
     connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
     requests = _stub_dataset_pages(monkeypatch, connector, _datasets(150))
@@ -155,7 +372,7 @@ async def test_list_datasets_clamps_explicit_page_size_to_rest_limit_and_preserv
     ],
 )
 @pytest.mark.asyncio
-async def test_list_tools_surfaces_safe_backend_error_without_credentials(
+async def test_list_datasets_surfaces_safe_backend_error_without_credentials(
     monkeypatch,
     mcp_server,
     status_code,
@@ -180,7 +397,7 @@ async def test_list_tools_surfaces_safe_backend_error_without_credentials(
     monkeypatch.setattr(connector, "_get", _get)
 
     with pytest.raises(Exception) as exc_info:
-        await mcp_server.list_tools.__wrapped__(connector=connector, api_key=api_key)
+        await connector.list_datasets(api_key=api_key)
 
     error_text = _raised_text(exc_info)
     assert error_text == message
@@ -197,7 +414,7 @@ async def test_list_tools_surfaces_safe_backend_error_without_credentials(
     ],
 )
 @pytest.mark.asyncio
-async def test_list_tools_uses_generic_error_for_non_string_or_non_json_response(
+async def test_list_datasets_uses_generic_error_for_non_string_or_non_json_response(
     monkeypatch,
     mcp_server,
     payload,
@@ -212,7 +429,7 @@ async def test_list_tools_uses_generic_error_for_non_string_or_non_json_response
     monkeypatch.setattr(connector, "_get", _get)
 
     with pytest.raises(Exception) as exc_info:
-        await mcp_server.list_tools.__wrapped__(connector=connector, api_key=api_key)
+        await connector.list_datasets(api_key=api_key)
 
     error_text = _raised_text(exc_info)
     assert error_text == "Cannot process this operation."
@@ -276,7 +493,7 @@ async def test_dataset_auto_resolution_rejects_credential_bearing_messages_witho
     ],
 )
 @pytest.mark.asyncio
-async def test_list_tools_uses_generic_error_for_malformed_http_200_envelope(
+async def test_list_datasets_uses_generic_error_for_malformed_http_200_envelope(
     monkeypatch,
     mcp_server,
     payload,
@@ -291,10 +508,7 @@ async def test_list_tools_uses_generic_error_for_malformed_http_200_envelope(
     monkeypatch.setattr(connector, "_get", _get)
 
     with pytest.raises(Exception) as exc_info:
-        await mcp_server.list_tools.__wrapped__(
-            connector=connector,
-            api_key="ragflow-rk-dataset-request-secret",
-        )
+        await connector.list_datasets(api_key="ragflow-rk-dataset-request-secret")
 
     error_text = _raised_text(exc_info)
     assert error_text == "Cannot process this operation."
@@ -302,7 +516,7 @@ async def test_list_tools_uses_generic_error_for_malformed_http_200_envelope(
 
 
 @pytest.mark.asyncio
-async def test_list_tools_surfaces_safe_nonzero_http_200_envelope(monkeypatch, mcp_server):
+async def test_list_datasets_surfaces_safe_nonzero_http_200_envelope(monkeypatch, mcp_server):
     connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
     message = "API key does not allow access to the requested dataset."
     response = _error_response(200, {"code": 403, "message": message, "data": None})
@@ -313,9 +527,6 @@ async def test_list_tools_surfaces_safe_nonzero_http_200_envelope(monkeypatch, m
     monkeypatch.setattr(connector, "_get", _get)
 
     with pytest.raises(Exception) as exc_info:
-        await mcp_server.list_tools.__wrapped__(
-            connector=connector,
-            api_key="ragflow-rk-dataset-request-secret",
-        )
+        await connector.list_datasets(api_key="ragflow-rk-dataset-request-secret")
 
     assert _raised_text(exc_info) == message

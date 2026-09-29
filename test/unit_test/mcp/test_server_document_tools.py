@@ -46,11 +46,11 @@ def mcp_server():
 
 
 @pytest.mark.asyncio
-async def test_list_tools_exposes_document_discovery_and_ordered_chunk_reading(monkeypatch, mcp_server):
+async def test_list_tools_exposes_static_document_tools_without_fetching_datasets(monkeypatch, mcp_server):
     connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
 
     async def _list_datasets(**_kwargs):
-        return '{"description":"Policies","id":"dataset-1"}'
+        raise AssertionError("tools/list must not fetch datasets")
 
     monkeypatch.setattr(connector, "list_datasets", _list_datasets)
 
@@ -62,6 +62,8 @@ async def test_list_tools_exposes_document_discovery_and_ordered_chunk_reading(m
     assert search_schema["properties"]["query"]["minLength"] == 1
     assert search_schema["properties"]["dataset_ids"]["items"]["type"] == "string"
     assert search_schema["properties"]["metadata"]["type"] == "object"
+    assert "dataset-1" not in tools[0].description
+    assert "dataset-1" not in tools[1].description
     chunks_schema = tools[2].inputSchema
     assert chunks_schema["required"] == ["dataset_id", "document_id"]
     assert chunks_schema["properties"]["page_size"]["default"] == 10
