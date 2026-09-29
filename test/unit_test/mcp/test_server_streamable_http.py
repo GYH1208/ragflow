@@ -134,7 +134,11 @@ async def test_host_streamable_http_uses_api_key_from_each_tools_request(monkeyp
     assert initialize_response.status_code == 200
     assert initialize_response.json()["result"]["protocolVersion"] == "2025-06-18"
     assert tools_response.status_code == 200
-    assert [tool["name"] for tool in tools_response.json()["result"]["tools"]] == ["ragflow_retrieval"]
+    assert [tool["name"] for tool in tools_response.json()["result"]["tools"]] == [
+        "ragflow_retrieval",
+        "search_documents",
+        "get_document_chunks",
+    ]
     assert received_api_keys == ["ragflow-rk-tools-request"]
 
 

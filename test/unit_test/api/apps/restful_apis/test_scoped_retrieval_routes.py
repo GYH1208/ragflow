@@ -32,7 +32,6 @@ from api.db.db_models import Knowledgebase, Team
 from api.db.services.knowledgebase_service import KnowledgebaseService
 from common.constants import RetCode, StatusEnum
 
-
 DATASET_A = "00000000000010008000000000000001"
 DATASET_B = "00000000000010008000000000000002"
 DATASET_C = "00000000000010008000000000000003"
@@ -454,7 +453,6 @@ async def test_scoped_resource_routes_return_404_for_allowlisted_soft_deleted_da
         ("delete", f"/api/v1/datasets/{DATASET_A}/documents"),
         ("post", f"/api/v1/datasets/{DATASET_A}/chunks"),
         ("delete", f"/api/v1/datasets/{DATASET_A}/chunks"),
-        ("get", f"/api/v1/datasets/{DATASET_A}/documents/{DOCUMENT_A}/chunks"),
     ],
 )
 async def test_retrieval_key_cannot_reach_non_whitelisted_dataset_document_or_chunk_routes(
@@ -466,6 +464,46 @@ async def test_retrieval_key_cannot_reach_non_whitelisted_dataset_document_or_ch
     client, _state = api_client
 
     response = await getattr(client, method)(path, json={})
+
+    assert response.status_code == RetCode.FORBIDDEN
+    assert (await response.get_json())["code"] == RetCode.FORBIDDEN
+
+
+@pytest.mark.asyncio
+async def test_retrieval_key_can_list_chunks_for_allowlisted_dataset(api_client, monkeypatch):
+    """The MCP document reader must work with a scoped retrieval key inside its allowlist."""
+    client, state = api_client
+    state["context"] = _api_key_context(allowed_dataset_ids=[DATASET_A])
+
+    class _Document:
+        def to_dict(self):
+            return {"id": DOCUMENT_A, "name": "handbook.pdf", "run": "3", "chunk_count": 0}
+
+    monkeypatch.setattr(chunk_api, "_get_authorized_kb", lambda dataset_id, user_id: _kb(dataset_id))
+    monkeypatch.setattr(chunk_api.DocumentService, "query", lambda **_kwargs: [_Document()])
+    monkeypatch.setattr(chunk_api.settings.docStoreConn, "index_exist", lambda *_args: False)
+
+    response = await client.get(f"/api/v1/datasets/{DATASET_A}/documents/{DOCUMENT_A}/chunks")
+
+    assert response.status_code == 200
+    payload = await response.get_json()
+    assert payload["code"] == RetCode.SUCCESS
+    assert payload["data"]["total"] == 0
+    assert payload["data"]["doc"]["id"] == DOCUMENT_A
+
+
+@pytest.mark.asyncio
+async def test_retrieval_key_cannot_list_chunks_outside_dataset_allowlist(api_client, monkeypatch):
+    """Allowing the route scope without the dataset allowlist check would broaden key authority."""
+    client, state = api_client
+    state["context"] = _api_key_context(allowed_dataset_ids=[DATASET_A])
+    monkeypatch.setattr(
+        chunk_api,
+        "_get_authorized_kb",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("resource work must not start")),
+    )
+
+    response = await client.get(f"/api/v1/datasets/{DATASET_C}/documents/{DOCUMENT_A}/chunks")
 
     assert response.status_code == RetCode.FORBIDDEN
     assert (await response.get_json())["code"] == RetCode.FORBIDDEN

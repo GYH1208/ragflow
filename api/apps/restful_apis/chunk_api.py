@@ -442,9 +442,11 @@ async def retrieval_test(tenant_id):
 
 
 @manager.route("/datasets/<dataset_id>/documents/<document_id>/chunks", methods=["GET"])  # noqa: F821
-@login_required
+@login_required(api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
 @add_tenant_id_to_kwargs
 async def list_chunks(tenant_id, dataset_id, document_id):
+    require_dataset_access([dataset_id])
+
     from rag.nlp import search
 
     kb = _get_authorized_kb(dataset_id, tenant_id)

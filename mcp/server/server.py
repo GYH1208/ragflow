@@ -14,6 +14,7 @@
 #  limitations under the License.
 #
 
+import asyncio
 import json
 import logging
 import random
@@ -22,6 +23,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from enum import StrEnum
 from functools import wraps
 from typing import Any
 
@@ -33,7 +35,6 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
-from enum import StrEnum
 
 
 class LaunchMode(StrEnum):
@@ -94,6 +95,9 @@ class RAGFlowConnector:
     _MAX_DATASET_CACHE = 32
     _MAX_DOCUMENT_CACHE = 4096
     _CACHE_TTL = 300
+    _DOCUMENT_SEARCH_CONCURRENCY = 8
+    _MAX_DOCUMENT_SEARCH_DATASETS = 32
+    _MAX_DOCUMENT_SEARCH_PAGES = 5
     # Keep in sync with api.utils.pagination_utils.REST_API_MAX_PAGE_SIZE.
     _REST_API_MAX_PAGE_SIZE = 100
 
@@ -273,6 +277,168 @@ class RAGFlowConnector:
         resolved = list(dict.fromkeys(dataset_ids))
         logging.info("resolve_dataset_ids resolved %s accessible dataset IDs", len(resolved))
         return resolved
+
+    async def search_documents(self, *, api_key: str, query: str, dataset_ids=None, metadata=None, limit: int = 20):
+        """Find documents by filename without running semantic retrieval."""
+        query = query.strip()
+        if not query:
+            raise Exception([types.TextContent(type="text", text="A non-empty filename query is required.")])
+        if not dataset_ids:
+            dataset_ids = await self.resolve_dataset_ids(api_key=api_key)
+        dataset_ids = list(dict.fromkeys(dataset_ids))
+        if len(dataset_ids) > self._MAX_DOCUMENT_SEARCH_DATASETS:
+            raise Exception(
+                [
+                    types.TextContent(
+                        type="text",
+                        text=f"Too many datasets to search safely. Provide at most {self._MAX_DOCUMENT_SEARCH_DATASETS} dataset_ids.",
+                    )
+                ]
+            )
+        limit = max(1, min(limit, self._REST_API_MAX_PAGE_SIZE))
+        filename_query = re.split(r"[/\\]", query)[-1]
+        semaphore = asyncio.Semaphore(self._DOCUMENT_SEARCH_CONCURRENCY)
+        query_name = filename_query.casefold()
+        query_stem = query_name.rsplit(".", 1)[0]
+        query_has_extension = "." in query_name
+        normalized_query_path = query.replace("\\", "/").casefold()
+
+        def document_rank(document):
+            name = document["name"].casefold()
+            name_stem = name.rsplit(".", 1)[0]
+            location = document["location"].replace("\\", "/").casefold()
+            if name == query_name or location == normalized_query_path or (not query_has_extension and name_stem == query_stem):
+                return 0
+            if name.startswith(query_name) or name_stem.startswith(query_stem) or location.endswith(normalized_query_path):
+                return 1
+            if query_name in name or normalized_query_path in location:
+                return 2
+            return 3
+
+        def summarize_document(document, dataset_id):
+            return {
+                "dataset_id": document.get("dataset_id") or dataset_id,
+                "document_id": document["id"],
+                "name": document.get("name") or "",
+                "location": document.get("location") or "",
+                "type": document.get("type") or "",
+                "chunk_count": document.get("chunk_count"),
+                "update_date": document.get("update_date") or "",
+                "meta_fields": document.get("meta_fields") or {},
+            }
+
+        def keep_best_documents(documents):
+            documents.sort(key=lambda document: document["update_date"], reverse=True)
+            documents.sort(key=document_rank)
+            return documents[:limit]
+
+        async def fetch_dataset_documents(dataset_id):
+            documents = []
+            total = 0
+            page = 1
+            scanned_documents = 0
+            scan_truncated = False
+            while True:
+                params = {
+                    "page": page,
+                    "page_size": self._REST_API_MAX_PAGE_SIZE,
+                    "keywords": filename_query,
+                    "orderby": "update_time",
+                    "desc": True,
+                }
+                if metadata:
+                    params["metadata"] = json.dumps(metadata, ensure_ascii=False)
+                async with semaphore:
+                    res = await self._get(f"/datasets/{dataset_id}/documents", params=params, api_key=api_key)
+                if not res or res.status_code != 200:
+                    raise Exception([types.TextContent(type="text", text=_response_error_message(res, "Cannot process this operation."))])
+
+                payload = _response_json_object(res)
+                if payload is None or type(payload.get("code")) is not int:
+                    raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
+                if payload["code"] != 0:
+                    raise Exception([types.TextContent(type="text", text=_response_error_message(res, "Cannot process this operation."))])
+
+                data = payload.get("data")
+                if not isinstance(data, dict) or type(data.get("total")) is not int or not isinstance(data.get("docs"), list):
+                    raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
+                page_documents = data["docs"]
+                if any(not isinstance(document, dict) or not document.get("id") for document in page_documents):
+                    raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
+
+                total = data["total"]
+                scanned_documents += len(page_documents)
+                documents.extend(summarize_document(document, dataset_id) for document in page_documents)
+                documents = keep_best_documents(documents)
+                if not page_documents or scanned_documents >= total:
+                    break
+                if page >= self._MAX_DOCUMENT_SEARCH_PAGES:
+                    scan_truncated = True
+                    break
+                page += 1
+
+            return {"total": total, "documents": documents, "scan_truncated": scan_truncated}
+
+        results = await asyncio.gather(*(fetch_dataset_documents(dataset_id) for dataset_id in dataset_ids))
+        documents = []
+        total_matches = 0
+        scan_truncated = False
+        for data in results:
+            total_matches += data["total"]
+            documents.extend(data["documents"])
+            scan_truncated = scan_truncated or data["scan_truncated"]
+
+        documents = keep_best_documents(documents)
+        response = {
+            "documents": documents,
+            "total_matches": total_matches,
+            "returned": len(documents),
+            "query_info": {"query": query, "dataset_count": len(dataset_ids), "limit": limit, "scan_truncated": scan_truncated},
+        }
+        return [types.TextContent(type="text", text=json.dumps(response, ensure_ascii=False))]
+
+    async def get_document_chunks(self, *, api_key: str, dataset_id: str, document_id: str, page: int = 1, page_size: int = 10):
+        """Read a document's chunks in their backend-defined source order."""
+        page_size = max(1, min(page_size, 50))
+        params = {"page": page, "page_size": page_size}
+        res = await self._get(f"/datasets/{dataset_id}/documents/{document_id}/chunks", params=params, api_key=api_key)
+        if not res or res.status_code != 200:
+            raise Exception([types.TextContent(type="text", text=_response_error_message(res, "Cannot process this operation."))])
+
+        payload = _response_json_object(res)
+        if payload is None or type(payload.get("code")) is not int:
+            raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
+        if payload["code"] != 0:
+            raise Exception([types.TextContent(type="text", text=_response_error_message(res, "Cannot process this operation."))])
+
+        data = payload.get("data")
+        if not isinstance(data, dict) or type(data.get("total")) is not int or not isinstance(data.get("chunks"), list) or not isinstance(data.get("doc"), dict):
+            raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
+        if any(not isinstance(chunk, dict) for chunk in data["chunks"]):
+            raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
+
+        document = data["doc"]
+        document_summary = {
+            "document_id": document.get("document_id", document.get("id")),
+            **{
+                field: document[field]
+                for field in ("name", "location", "type", "chunk_count", "token_count", "update_date", "meta_fields")
+                if field in document
+            },
+        }
+        chunk_fields = ("id", "content", "document_id", "dataset_id", "positions", "image_id", "important_keywords", "questions", "available")
+        chunks = [{field: chunk[field] for field in chunk_fields if field in chunk} for chunk in data["chunks"]]
+        response = {
+            "document": document_summary,
+            "chunks": chunks,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total_chunks": data["total"],
+                "total_pages": (data["total"] + page_size - 1) // page_size,
+            },
+        }
+        return [types.TextContent(type="text", text=json.dumps(response, ensure_ascii=False))]
 
     async def retrieval(
         self,
@@ -567,7 +733,7 @@ async def list_tools(*, connector: RAGFlowConnector, api_key: str) -> list[types
     return [
         types.Tool(
             name="ragflow_retrieval",
-            description="Retrieve relevant chunks from the RAGFlow retrieve interface based on the question. You can optionally specify dataset_ids to search only specific datasets, or omit dataset_ids entirely to search across ALL available datasets. You can also optionally specify document_ids to search within specific documents. When dataset_ids is not provided or is empty, the system will automatically search across all available datasets. Below is the list of all available datasets, including their descriptions and IDs:"
+            description="Semantically retrieve relevant chunks when you do not know which document contains the answer. To locate a known or named file, call search_documents first. After obtaining a document_id, use get_document_chunks to read the original text instead of repeatedly calling this tool. You can optionally specify dataset_ids to search only specific datasets, or omit dataset_ids entirely to search across ALL available datasets. You can also optionally specify document_ids to search within specific documents. When dataset_ids is not provided or is empty, the system will automatically search across all available datasets. Below is the list of all available datasets, including their descriptions and IDs:"
             + dataset_description,
             inputSchema={
                 "type": "object",
@@ -627,6 +793,35 @@ async def list_tools(*, connector: RAGFlowConnector, api_key: str) -> list[types
                 "required": ["question"],
             },
         ),
+        types.Tool(
+            name="search_documents",
+            description="Find documents by filename keyword without semantic content retrieval. Use this first when the user names or describes a specific file. The result returns dataset_id and document_id; then call get_document_chunks to read that document. Do not repeatedly call ragflow_retrieval after a document has been identified. Available datasets:"
+            + dataset_description,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Filename keyword or partial filename to find.", "minLength": 1},
+                    "dataset_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional dataset IDs to search. If omitted or empty, all accessible datasets are searched."},
+                    "metadata": {"type": "object", "description": "Optional exact document metadata filters. Values for the same key may be arrays."},
+                    "limit": {"type": "integer", "description": "Maximum number of documents to return across all datasets.", "default": 20, "minimum": 1, "maximum": 100},
+                },
+                "required": ["query"],
+            },
+        ),
+        types.Tool(
+            name="get_document_chunks",
+            description="Read chunks from one identified document in original document order, without semantic reranking. Use this after search_documents or ragflow_retrieval has returned dataset_id and document_id. Continue with the next page until all chunks needed for the answer have been read.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_id": {"type": "string", "description": "Dataset ID returned with the document."},
+                    "document_id": {"type": "string", "description": "Document ID to read."},
+                    "page": {"type": "integer", "description": "Page number for sequential reading.", "default": 1, "minimum": 1},
+                    "page_size": {"type": "integer", "description": "Chunks per page.", "default": 10, "minimum": 1, "maximum": 50},
+                },
+                "required": ["dataset_id", "document_id"],
+            },
+        ),
     ]
 
 
@@ -665,6 +860,22 @@ async def call_tool(
             top_k=top_k,
             rerank_id=rerank_id,
             force_refresh=force_refresh,
+        )
+    if name == "search_documents":
+        return await connector.search_documents(
+            api_key=api_key,
+            query=arguments.get("query", ""),
+            dataset_ids=arguments.get("dataset_ids", []),
+            metadata=arguments.get("metadata"),
+            limit=arguments.get("limit", 20),
+        )
+    if name == "get_document_chunks":
+        return await connector.get_document_chunks(
+            api_key=api_key,
+            dataset_id=arguments.get("dataset_id", ""),
+            document_id=arguments.get("document_id", ""),
+            page=arguments.get("page", 1),
+            page_size=arguments.get("page_size", 10),
         )
     raise ValueError(f"Tool not found: {name}")
 
