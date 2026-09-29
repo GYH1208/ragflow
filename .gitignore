@@ -207,6 +207,7 @@ ragflow_cli.egg-info
 
 # Default backup dir
 backup
+/backups/
 
 
 *huqie.txt
