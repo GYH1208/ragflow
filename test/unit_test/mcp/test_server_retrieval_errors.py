@@ -259,6 +259,175 @@ async def test_ragflow_retrieval_surfaces_safe_nonzero_http_200_envelope(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_ragflow_retrieval_fetches_metadata_only_for_unique_matched_documents(monkeypatch, mcp_server):
+    connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
+    retrieval_response = _response(
+        200,
+        {
+            "code": 0,
+            "message": "success",
+            "data": {
+                "chunks": [
+                    {
+                        "id": "chunk-1",
+                        "dataset_id": "dataset-1",
+                        "document_id": "document-1",
+                        "document_keyword": "Employee handbook",
+                    },
+                    {
+                        "id": "chunk-2",
+                        "dataset_id": "dataset-1",
+                        "document_id": "document-1",
+                        "document_keyword": "Employee handbook",
+                    },
+                ],
+                "page": 1,
+                "page_size": 10,
+                "total": 2,
+            },
+        },
+    )
+    document_requests = []
+
+    async def _post(_path, json=None, api_key="", **_kwargs):
+        return retrieval_response
+
+    async def _get(path, params=None, api_key=""):
+        if path == "/datasets":
+            return _response(
+                200,
+                {
+                    "code": 0,
+                    "data": [{"id": "dataset-1", "name": "Policies", "description": "Company policies"}],
+                },
+            )
+        if path == "/datasets/dataset-1/documents":
+            document_requests.append((path, params))
+            return _response(
+                200,
+                {
+                    "code": 0,
+                    "data": {
+                        "total": 1,
+                        "docs": [
+                            {
+                                "id": "document-1",
+                                "name": "Employee handbook.pdf",
+                                "location": "hr/Employee handbook.pdf",
+                                "type": "pdf",
+                                "size": 1024,
+                                "chunk_count": 12,
+                                "create_date": "2026-09-01 10:00:00",
+                                "update_date": "2026-09-02 10:00:00",
+                                "token_count": 4096,
+                                "thumbnail": "thumbnail-id",
+                                "dataset_id": "dataset-1",
+                                "meta_fields": {"department": "HR"},
+                            }
+                        ],
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected GET {path} {params}")
+
+    monkeypatch.setattr(connector, "_post", _post)
+    monkeypatch.setattr(connector, "_get", _get)
+
+    content = await connector.retrieval(
+        api_key="unit-key",
+        dataset_ids=["dataset-1"],
+        question="Where is the handbook?",
+        force_refresh=True,
+    )
+
+    result = json.loads(content[0].text)
+    assert document_requests == [
+        (
+            "/datasets/dataset-1/documents",
+            [("page_size", 1), ("ids", "document-1")],
+        )
+    ]
+    assert result["chunks"][0]["document_metadata"]["meta_fields"] == {"department": "HR"}
+    assert result["chunks"][1]["document_metadata"]["document_id"] == "document-1"
+
+
+@pytest.mark.asyncio
+async def test_ragflow_retrieval_fetches_only_documents_missing_from_metadata_cache(monkeypatch, mcp_server):
+    connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
+    retrieval_payloads = [
+        {
+            "code": 0,
+            "data": {
+                "chunks": [{"id": "chunk-1", "dataset_id": "dataset-1", "document_id": "document-1"}],
+                "page": 1,
+                "page_size": 10,
+                "total": 1,
+            },
+        },
+        {
+            "code": 0,
+            "data": {
+                "chunks": [
+                    {"id": "chunk-1", "dataset_id": "dataset-1", "document_id": "document-1"},
+                    {"id": "chunk-2", "dataset_id": "dataset-1", "document_id": "document-2"},
+                ],
+                "page": 1,
+                "page_size": 10,
+                "total": 2,
+            },
+        },
+    ]
+    requested_document_ids = []
+
+    async def _post(_path, json=None, api_key="", **_kwargs):
+        return _response(200, retrieval_payloads.pop(0))
+
+    async def _get(path, params=None, api_key=""):
+        if path == "/datasets":
+            return _response(
+                200,
+                {
+                    "code": 0,
+                    "data": [{"id": "dataset-1", "name": "Policies", "description": "Company policies"}],
+                },
+            )
+        if path == "/datasets/dataset-1/documents":
+            document_ids = [value for key, value in params if key == "ids"]
+            requested_document_ids.append(document_ids)
+            return _response(
+                200,
+                {
+                    "code": 0,
+                    "data": {
+                        "total": len(document_ids),
+                        "docs": [
+                            {
+                                "id": document_id,
+                                "name": f"{document_id}.pdf",
+                                "dataset_id": "dataset-1",
+                                "meta_fields": {"source": document_id},
+                            }
+                            for document_id in document_ids
+                        ],
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected GET {path} {params}")
+
+    monkeypatch.setattr(connector, "_post", _post)
+    monkeypatch.setattr(connector, "_get", _get)
+
+    first_content = await connector.retrieval(api_key="unit-key", dataset_ids=["dataset-1"], question="handbook")
+    second_content = await connector.retrieval(api_key="unit-key", dataset_ids=["dataset-1"], question="handbook and process")
+
+    first_result = json.loads(first_content[0].text)
+    second_result = json.loads(second_content[0].text)
+    assert requested_document_ids == [["document-1"], ["document-2"]]
+    assert first_result["chunks"][0]["document_metadata"]["document_id"] == "document-1"
+    assert [chunk["document_metadata"]["document_id"] for chunk in second_result["chunks"]] == ["document-1", "document-2"]
+
+
+@pytest.mark.asyncio
 async def test_ragflow_retrieval_success_preserves_pagination_and_document_metadata(monkeypatch, mcp_server):
     connector = mcp_server.RAGFlowConnector(base_url=mcp_server.BASE_URL)
     retrieval_response = _response(
@@ -291,7 +460,7 @@ async def test_ragflow_retrieval_success_preserves_pagination_and_document_metad
     async def _post(_path, json=None, api_key="", **_kwargs):
         return retrieval_response
 
-    async def _metadata(_dataset_ids, *, api_key, force_refresh=False):
+    async def _metadata(*, api_key, force_refresh=False, **_kwargs):
         return (
             {
                 "document-1": {
