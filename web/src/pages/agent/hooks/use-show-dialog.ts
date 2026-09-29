@@ -24,7 +24,10 @@ export const useOperateApiKey = (idKey: string, dialogId?: string) => {
   };
 
   const onCreateToken = useCallback(() => {
-    createToken({ [idKey]: dialogId });
+    createToken({
+      name: `${idKey}${dialogId ? `-${dialogId}` : ''} integration API key`,
+      key_type: 'full_access',
+    });
   }, [createToken, idKey, dialogId]);
 
   return {

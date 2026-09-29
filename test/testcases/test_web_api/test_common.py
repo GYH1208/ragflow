@@ -84,7 +84,12 @@ def system_token_list(auth, params=None, *, headers=HEADERS):
 
 
 def system_delete_token(auth, token, *, headers=HEADERS):
-    res = requests.delete(url=f"{HOST_ADDRESS}{SYSTEM_API_URL}/tokens/{token}", headers=headers, auth=auth)
+    res = requests.delete(
+        url=f"{HOST_ADDRESS}{SYSTEM_API_URL}/tokens",
+        headers=headers,
+        auth=auth,
+        json={"token": token},
+    )
     return res.json()
 
 

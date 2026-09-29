@@ -73,6 +73,21 @@ class LongTextField(TextField):
     field_type = TextFieldType[settings.DATABASE_TYPE.upper()].value
 
 
+class UTCDateTimeField(DateTimeField):
+    def db_value(self, value):
+        if value is not None and value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return super().db_value(value)
+
+    def python_value(self, value):
+        value = super().python_value(value)
+        if value is None or not isinstance(value, datetime):
+            return value
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+
 class JSONField(LongTextField):
     default_value = {}
 
@@ -1099,9 +1114,33 @@ class APIToken(DataBaseModel):
     dialog_id = CharField(max_length=32, null=True, index=True)
     source = CharField(max_length=16, null=True, help_text="none|agent|dialog", index=True)
     beta = CharField(max_length=255, null=True, index=True)
+    name = CharField(max_length=64, null=False, default="旧版 API Key")
+    is_legacy = BooleanField(null=False, default=False)
+    enabled = BooleanField(null=False, default=True)
+    total_calls = BigIntegerField(null=False, default=0)
+    retrieval_calls = BigIntegerField(null=False, default=0)
+    last_used_at = UTCDateTimeField(null=True)
+    last_result = CharField(max_length=16, null=True)
 
     class Meta:
         db_table = "api_token"
+        primary_key = CompositeKey("tenant_id", "token")
+
+
+class ScopedAPIToken(DataBaseModel):
+    tenant_id = CharField(max_length=32, null=False, index=True)
+    token = CharField(max_length=255, null=False, index=True)
+    name = CharField(max_length=64, null=False)
+    allowed_dataset_ids = JSONField(null=False, default=list)
+    expires_at = UTCDateTimeField(null=True)
+    enabled = BooleanField(null=False, default=True)
+    total_calls = BigIntegerField(null=False, default=0)
+    retrieval_calls = BigIntegerField(null=False, default=0)
+    last_used_at = UTCDateTimeField(null=True)
+    last_result = CharField(max_length=16, null=True)
+
+    class Meta:
+        db_table = "scoped_api_token"
         primary_key = CompositeKey("tenant_id", "token")
 
 
@@ -1497,24 +1536,45 @@ class TenantModelGroupMapping(DataBaseModel):
         primary_key = CompositeKey("group_id", "provider_id", "instance_id", "model_id")
 
 
+def _is_duplicate_column_error(ex):
+    error_code = ex.args[0] if ex.args else None
+    sqlstate = getattr(ex, "sqlstate", None) or getattr(ex, "pgcode", None)
+    message = str(ex).lower()
+    return (
+        error_code == 1060
+        or sqlstate == "42701"
+        or "duplicate column name" in message
+        or ("column" in message and "already exists" in message)
+    )
+
+
 def alter_db_add_column(migrator, table_name, column_name, column_type):
     try:
         migrate(migrator.add_column(table_name, column_name, column_type))
-    except OperationalError as ex:
-        error_codes = [1060]
-        error_messages = ['Duplicate column name']
-
-        should_skip_error = (
-                (hasattr(ex, 'args') and ex.args and ex.args[0] in error_codes) or
-                (str(ex) in error_messages)
-        )
-
-        if not should_skip_error:
-            logging.critical(f"Failed to add {settings.DATABASE_TYPE.upper()}.{table_name} column {column_name}, operation error: {ex}")
-
+    except (OperationalError, ProgrammingError) as ex:
+        if _is_duplicate_column_error(ex):
+            return
+        logging.critical(f"Failed to add {settings.DATABASE_TYPE.upper()}.{table_name} column {column_name}, operation error: {ex}")
+        raise
     except Exception as ex:
         logging.critical(f"Failed to add {settings.DATABASE_TYPE.upper()}.{table_name} column {column_name}, error: {ex}")
-        pass
+        raise
+
+
+def migrate_api_token_metadata(migrator):
+    alter_db_add_column(migrator, "api_token", "name", CharField(max_length=64, null=False, default="旧版 API Key"))
+    alter_db_add_column(migrator, "api_token", "is_legacy", BooleanField(null=False, default=True))
+    alter_db_add_column(migrator, "api_token", "enabled", BooleanField(null=False, default=True))
+    alter_db_add_column(migrator, "api_token", "total_calls", BigIntegerField(null=False, default=0))
+    alter_db_add_column(migrator, "api_token", "retrieval_calls", BigIntegerField(null=False, default=0))
+    alter_db_add_column(
+        migrator,
+        "api_token",
+        "last_used_at",
+        UTCDateTimeField(null=True),
+    )
+    alter_db_add_column(migrator, "api_token", "last_result", CharField(max_length=16, null=True))
+
 
 def alter_db_column_type(migrator, table_name, column_name, new_column_type):
     try:
@@ -1753,6 +1813,7 @@ def migrate_db():
     alter_db_column_type(migrator, "dialog", "top_k", IntegerField(default=1024))
     alter_db_add_column(migrator, "tenant_llm", "api_key", CharField(max_length=2048, null=True, help_text="API KEY", index=True))
     alter_db_add_column(migrator, "api_token", "source", CharField(max_length=16, null=True, help_text="none|agent|dialog", index=True))
+    migrate_api_token_metadata(migrator)
     alter_db_add_column(migrator, "tenant", "tts_id", CharField(max_length=256, null=True, help_text="default tts model ID", index=True))
     alter_db_add_column(migrator, "api_4_conversation", "source", CharField(max_length=16, null=True, help_text="none|agent|dialog", index=True))
     alter_db_add_column(migrator, "task", "retry_count", IntegerField(default=0))

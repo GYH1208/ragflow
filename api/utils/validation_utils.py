@@ -34,7 +34,12 @@ from common.constants import RetCode
 
 
 async def validate_and_parse_json_request(
-    request: Request, validator: type[BaseModel], *, extras: dict[str, Any] | None = None, exclude_unset: bool = False
+    request: Request,
+    validator: type[BaseModel],
+    *,
+    extras: dict[str, Any] | None = None,
+    exclude_unset: bool = False,
+    redact_validation_inputs: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """
     Validates and parses JSON requests through a multi-stage validation pipeline.
@@ -51,6 +56,8 @@ async def validate_and_parse_json_request(
         extras (dict[str, Any] | None): Additional fields to merge into payload
             before validation. These fields will be removed from the final output
         exclude_unset (bool): Whether to exclude fields that have not been explicitly set
+        redact_validation_inputs (bool): Whether validation errors should retain field
+            locations/messages but replace rejected input values with a redaction marker
 
     Returns:
         tuple[Dict[str, Any] | None, str | None]:
@@ -100,7 +107,7 @@ async def validate_and_parse_json_request(
             payload.update(extras)
         validated_request = validator(**payload)
     except ValidationError as e:
-        return None, format_validation_error_message(e)
+        return None, format_validation_error_message(e, redact_inputs=redact_validation_inputs)
 
     parsed_payload = validated_request.model_dump(by_alias=True, exclude_unset=exclude_unset)
 
@@ -187,7 +194,7 @@ def validate_and_parse_request_args(request: Request, validator: type[BaseModel]
     return parsed_args, None
 
 
-def format_validation_error_message(e: ValidationError) -> str:
+def format_validation_error_message(e: ValidationError, *, redact_inputs: bool = False) -> str:
     """
     Formats validation errors into a standardized string format.
 
@@ -216,11 +223,14 @@ def format_validation_error_message(e: ValidationError) -> str:
     for error in e.errors():
         field = ".".join(map(str, error["loc"]))
         msg = error["msg"]
-        input_val = error["input"]
-        input_str = str(input_val)
+        if redact_inputs:
+            input_str = "redacted"
+        else:
+            input_val = error["input"]
+            input_str = str(input_val)
 
-        if len(input_str) > 128:
-            input_str = input_str[:125] + "..."
+            if len(input_str) > 128:
+                input_str = input_str[:125] + "..."
 
         error_msg = f"Field: <{field}> - Message: <{msg}> - Value: <{input_str}>"
         error_messages.append(error_msg)
@@ -331,6 +341,65 @@ class Base(BaseModel):
     """Strict base model that rejects unknown request fields."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
+
+
+APIKeyName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+APIKeyDatasetID = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+APIKeyToken = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+APIKeyExpiryDays = Literal[30, 90, 180, 365] | None
+
+
+class CreateAPIKeyReq(Base):
+    name: APIKeyName
+    key_type: Literal["full_access", "retrieval"]
+    allowed_dataset_ids: list[APIKeyDatasetID] = Field(default_factory=list)
+    expires_in_days: APIKeyExpiryDays = None
+
+    @field_validator("allowed_dataset_ids")
+    @classmethod
+    def deduplicate_dataset_ids(cls, value):
+        return list(dict.fromkeys(value))
+
+    @model_validator(mode="after")
+    def validate_key_type_fields(self):
+        if self.key_type == "full_access":
+            forbidden = {"allowed_dataset_ids", "expires_in_days"} & self.model_fields_set
+            if forbidden:
+                raise ValueError("Full-access API keys cannot define dataset scope or expiry")
+        elif not self.allowed_dataset_ids:
+            raise ValueError("Retrieval API keys require at least one dataset")
+        return self
+
+
+class UpdateAPIKeyReq(Base):
+    token: APIKeyToken
+    name: APIKeyName | None = None
+    allowed_dataset_ids: list[APIKeyDatasetID] | None = None
+    expires_in_days: APIKeyExpiryDays = None
+    enabled: bool | None = None
+
+    @field_validator("allowed_dataset_ids")
+    @classmethod
+    def deduplicate_dataset_ids(cls, value):
+        if value is None:
+            return value
+        return list(dict.fromkeys(value))
+
+    @model_validator(mode="after")
+    def validate_edit_fields(self):
+        if not (self.model_fields_set - {"token"}):
+            raise ValueError("At least one API key field must be updated")
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("API key name cannot be null")
+        if "allowed_dataset_ids" in self.model_fields_set and not self.allowed_dataset_ids:
+            raise ValueError("Retrieval API keys require at least one dataset")
+        if "enabled" in self.model_fields_set and self.enabled is None:
+            raise ValueError("API key enabled state cannot be null")
+        return self
+
+
+class DeleteAPIKeyReq(Base):
+    token: APIKeyToken
 
 
 class CreateTeamReq(Base):

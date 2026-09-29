@@ -21,9 +21,16 @@ import re
 
 import xxhash
 from pydantic import BaseModel, Field, validator
-from quart import request
+from quart import g, request
+from werkzeug.exceptions import HTTPException
 
-from api.apps import login_required
+from api.apps import KNOWLEDGE_RETRIEVE_SCOPE, login_required
+from api.apps.api_key_auth import (
+    allowed_dataset_ids,
+    consume_retrieval_quota,
+    mark_retrieval_started,
+    require_dataset_access,
+)
 from api.common.check_team_permission import check_kb_team_permission
 from api.db.db_models import Task
 from api.db.joint_services.tenant_model_service import (
@@ -42,6 +49,7 @@ from api.utils.api_utils import (
     add_tenant_id_to_kwargs,
     check_duplicate_ids,
     construct_json_result,
+    get_error_argument_result,
     get_error_data_result,
     get_request_json,
     get_result,
@@ -53,8 +61,9 @@ from api.utils.reference_metadata_utils import (
     enrich_chunks_with_document_metadata,
     resolve_reference_metadata_preferences,
 )
+from api.utils.validation_utils import validate_uuid1_hex
 from common import settings
-from common.constants import LLMType, ParserType, RetCode, TaskStatus
+from common.constants import LLMType, ParserType, RetCode, StatusEnum, TaskStatus
 from common.metadata_utils import convert_conditions, meta_filter
 from common.misc_utils import thread_pool_exec
 from common.string_utils import is_content_empty, remove_redundant_spaces
@@ -284,19 +293,41 @@ async def stop_parsing(tenant_id, dataset_id):
 
 
 @manager.route("/retrieval", methods=["POST"])  # noqa: F821
-@login_required
+@login_required(api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
 @add_tenant_id_to_kwargs
 async def retrieval_test(tenant_id):
     req = await get_request_json()
-    if not req.get("dataset_ids"):
-        return get_error_data_result("`dataset_ids` is required.")
-    kb_ids = req["dataset_ids"]
+    kb_ids = req.get("dataset_ids")
+    scoped_dataset_ids = allowed_dataset_ids()
+    if not kb_ids:
+        if scoped_dataset_ids is None:
+            return get_error_data_result("`dataset_ids` is required.")
+        kb_ids = sorted(scoped_dataset_ids)
     if not isinstance(kb_ids, list):
         return get_error_data_result("`dataset_ids` should be a list")
+    try:
+        kb_ids = [validate_uuid1_hex(dataset_id) for dataset_id in kb_ids]
+    except Exception as error:
+        return get_error_argument_result(str(error))
+    kb_ids = require_dataset_access(kb_ids)
+    if not kb_ids:
+        return get_error_data_result("`dataset_ids` is required.")
+    kb_by_id = None
+    if scoped_dataset_ids is not None:
+        kb_by_id = {kb.id: kb for kb in KnowledgebaseService.get_by_ids(kb_ids)}
+        if any(
+            dataset_id not in kb_by_id or kb_by_id[dataset_id].status != StatusEnum.VALID.value
+            for dataset_id in kb_ids
+        ):
+            return get_result(code=RetCode.NOT_FOUND, message="Dataset not found!"), RetCode.NOT_FOUND
     for id in kb_ids:
         if not KnowledgebaseService.accessible(kb_id=id, user_id=tenant_id):
             return get_error_data_result(f"You don't own the dataset {id}.")
-    kbs = KnowledgebaseService.get_by_ids(kb_ids)
+    if kb_by_id is None:
+        kb_by_id = {kb.id: kb for kb in KnowledgebaseService.get_by_ids(kb_ids)}
+        if any(dataset_id not in kb_by_id for dataset_id in kb_ids):
+            return get_error_data_result("Dataset not found!")
+    kbs = [kb_by_id[dataset_id] for dataset_id in kb_ids]
     embd_nms = list(set([split_model_name(kb.embd_id)[0] for kb in kbs]))
     if len(embd_nms) != 1:
         return get_result(message="Datasets use different embedding models.", code=RetCode.DATA_ERROR)
@@ -357,6 +388,11 @@ async def retrieval_test(tenant_id):
             rerank_model_config = get_model_config_from_provider_instance(kb.tenant_id, LLMType.RERANK, req["rerank_id"])
             rerank_mdl = LLMBundle(kb.tenant_id, rerank_model_config)
 
+        api_key_context = getattr(g, "api_key_context", None)
+        if api_key_context is not None:
+            consume_retrieval_quota(api_key_context)
+        mark_retrieval_started()
+
         if langs:
             question = await cross_languages(kb.tenant_id, None, question, langs)
         if req.get("keyword", False):
@@ -397,6 +433,8 @@ async def retrieval_test(tenant_id):
         }
         ranks["chunks"] = [{key_mapping.get(key, key): value for key, value in chunk.items()} for chunk in ranks["chunks"]]
         return get_result(data=ranks)
+    except HTTPException as error:
+        return get_result(code=error.code, message=error.description), error.code
     except Exception as e:
         if "not_found" in str(e):
             return get_result(message="No chunk found! Check the chunk status please!", code=RetCode.DATA_ERROR)

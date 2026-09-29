@@ -59,6 +59,8 @@ class RetCode(IntEnum, CustomEnum):
     FORBIDDEN = 403
     NOT_FOUND = 404
     CONFLICT = 409
+    TOO_MANY_REQUESTS = 429
+    SERVICE_UNAVAILABLE = 503
 
 
 class StatusEnum(Enum):

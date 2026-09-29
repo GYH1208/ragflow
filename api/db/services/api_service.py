@@ -17,7 +17,8 @@ from datetime import datetime
 
 import peewee
 
-from api.db.db_models import DB, API4Conversation, APIToken, Dialog
+from api.db import APIKeyLastResult, APIKeyType
+from api.db.db_models import DB, API4Conversation, APIToken, Dialog, ScopedAPIToken
 from api.db.services.common_service import CommonService
 from common.time_utils import current_timestamp, datetime_format
 
@@ -39,6 +40,34 @@ class APITokenService(CommonService):
     @DB.connection_context()
     def delete_by_tenant_id(cls, tenant_id):
         return cls.model.delete().where(cls.model.tenant_id == tenant_id).execute()
+
+
+class ScopedAPITokenService(CommonService):
+    model = ScopedAPIToken
+
+
+class APIKeyUsageService:
+    _models = {
+        APIKeyType.FULL_ACCESS: APIToken,
+        APIKeyType.RETRIEVAL: ScopedAPIToken,
+    }
+
+    @classmethod
+    def record(
+        cls,
+        token: str,
+        key_type: APIKeyType,
+        result: APIKeyLastResult,
+        retrieval_started: bool,
+        used_at: datetime,
+    ) -> None:
+        model = cls._models[key_type]
+        model.update(
+            total_calls=model.total_calls + 1,
+            retrieval_calls=model.retrieval_calls + (1 if retrieval_started else 0),
+            last_used_at=used_at,
+            last_result=result.value,
+        ).where(model.token == token).execute()
 
 
 class API4ConversationService(CommonService):

@@ -21,9 +21,243 @@ A complete reference for RAGFlow's RESTful API. Before proceeding, please ensure
 | 401  | Unauthorized          | Unauthorized access        |
 | 403  | Forbidden             | Access denied              |
 | 404  | Not Found             | Resource not found         |
+| 429  | Too Many Requests     | Retrieval-key rate limit exceeded |
 | 500  | Internal Server Error | Server internal error      |
+| 503  | Service Unavailable   | Retrieval quota dependency unavailable |
 | 1001 | Invalid Chunk ID      | Invalid Chunk ID           |
 | 1002 | Chunk Update Failed   | Chunk update failed        |
+
+---
+
+## API keys
+
+RAGFlow has two API key types:
+
+- `full_access`: a high-privilege key with the existing API behavior. It is suitable only for trusted administrative integrations.
+- `retrieval`: a least-privilege key restricted to an explicit dataset allowlist and exactly four read/retrieval capabilities.
+
+API keys are bearer credentials:
+
+```http
+Authorization: Bearer <YOUR_API_KEY>
+```
+
+:::danger Store API keys as secrets
+Both key types are stored and returned in plaintext by the API key management endpoints. A full-access key is a plaintext administrator credential with broad API privileges: never distribute it to employees or configure it in WorkBuddy. Never put a key in source control, logs, screenshots, analytics, or a client-side application. Rotate a key after suspected exposure.
+:::
+
+The API key management UI and all management endpoints are available only to an authenticated owner or administrator of a managed tenant (or an eligible system superuser with tenant membership). Ordinary members receive `403`. For compatibility, an enabled full-access API key that maps to an owner or administrator may manage keys. A retrieval key may never list, create, update, or delete keys.
+
+### Manage API keys
+
+All successful management responses use the standard envelope:
+
+```json
+{
+  "code": 0,
+  "data": {},
+  "message": "success"
+}
+```
+
+#### Create
+
+**POST** `/api/v1/system/tokens`
+
+For backward compatibility, an authenticated owner or administrator may omit both the request body and `Content-Type`; this creates a full-access key named `旧版 API Key`. This legacy form is deprecated. New clients must send one of the JSON requests below.
+
+A full-access key request has exactly these fields; dataset scope and expiry fields are rejected:
+
+```json
+{
+  "name": "Administrative integration",
+  "key_type": "full_access"
+}
+```
+
+A retrieval key requires at least one valid dataset belonging to the managed tenant. Duplicate IDs are removed in first-seen order. `expires_in_days` may be `30`, `90`, `180`, `365`, or `null` for no expiry:
+
+```json
+{
+  "name": "WorkBuddy production",
+  "key_type": "retrieval",
+  "allowed_dataset_ids": ["<DATASET_ID_1>", "<DATASET_ID_2>"],
+  "expires_in_days": 90
+}
+```
+
+The response `data` is the created row in the same shape returned by list. Retrieval tokens start with `ragflow-rk-`. The server generates the token; requests cannot supply one.
+
+#### List
+
+**GET** `/api/v1/system/tokens`
+
+The response `data` is an array containing both key types:
+
+```json
+{
+  "code": 0,
+  "data": [
+    {
+      "token": "ragflow-...",
+      "name": "Administrative integration",
+      "key_type": "full_access",
+      "legacy": false,
+      "allowed_dataset_ids": [],
+      "expires_at": null,
+      "enabled": true,
+      "total_calls": 12,
+      "retrieval_calls": 4,
+      "last_used_at": "2026-09-28T10:00:00Z",
+      "last_result": "success",
+      "create_time": 1790589000000,
+      "create_date": "2026-09-28 09:50:00",
+      "update_time": null,
+      "update_date": null,
+      "beta": "..."
+    },
+    {
+      "token": "ragflow-rk-...",
+      "name": "WorkBuddy production",
+      "key_type": "retrieval",
+      "legacy": false,
+      "allowed_dataset_ids": ["<DATASET_ID_1>", "<DATASET_ID_2>"],
+      "expires_at": "2026-12-27T09:50:00Z",
+      "enabled": true,
+      "total_calls": 40,
+      "retrieval_calls": 8,
+      "last_used_at": "2026-09-28T10:05:00Z",
+      "last_result": "success",
+      "create_time": 1790589000000,
+      "create_date": "2026-09-28 09:50:00",
+      "update_time": null,
+      "update_date": null
+    }
+  ],
+  "message": "success"
+}
+```
+
+`last_result` is `success`, `denied`, `rate_limited`, `error`, or `null`. `beta` exists only on full-access rows. `legacy` identifies full-access keys that predate this contract.
+
+`total_calls` and `retrieval_calls` are totals for a key, not employee identity or unique-user metrics. Multiple people or services can share a key, although sharing is discouraged. One retrieval request is one API operation, not a user session.
+
+#### Update
+
+**PATCH** `/api/v1/system/tokens`
+
+Send the target token in the authenticated JSON body with one or more mutable fields. Omitted mutable fields are preserved. The token must never be placed in the URL:
+
+```json
+{
+  "token": "<API_KEY_TO_UPDATE>",
+  "name": "WorkBuddy production v2",
+  "allowed_dataset_ids": ["<DATASET_ID_1>"],
+  "expires_in_days": 180,
+  "enabled": true
+}
+```
+
+The exact shape is `token: string` plus `name?: string`, `allowed_dataset_ids?: string[]`, `expires_in_days?: 30 | 90 | 180 | 365 | null`, and `enabled?: boolean`. `token` selects the row and remains immutable; `key_type` is forbidden. `expires_in_days: null` removes expiry. Full-access keys accept only `name` and `enabled`; scope or expiry fields return `400`. The response `data` is the updated list-row shape.
+
+#### Delete
+
+**DELETE** `/api/v1/system/tokens`
+
+Send the target only in the authenticated JSON body:
+
+```json
+{
+  "token": "<API_KEY_TO_DELETE>"
+}
+```
+
+Success returns:
+
+```json
+{
+  "code": 0,
+  "data": true,
+  "message": "success"
+}
+```
+
+The legacy **DELETE** `/api/v1/system/tokens/{token}` route remains available for existing clients but is deprecated because URLs can be retained in access logs and intermediary telemetry. New clients must use the fixed URL and JSON body above.
+
+### Retrieval-key contract
+
+A retrieval key can call exactly these four endpoints:
+
+1. **GET** `/api/v1/datasets` — returns only allowlisted datasets and an allowlist-filtered total.
+2. **GET** `/api/v1/datasets/{dataset_id}` — returns one allowlisted dataset.
+3. **GET** `/api/v1/datasets/{dataset_id}/documents` — lists documents for one allowlisted dataset.
+4. **POST** `/api/v1/retrieval` — retrieves from allowlisted datasets.
+
+Every other endpoint, including writes and `/api/v1/system/status`, is denied with `403`. A missing or empty `dataset_ids` array on `POST /api/v1/retrieval` defaults to the key's complete allowlist. Explicit IDs keep caller order after de-duplication. If any explicit ID is outside the allowlist, the entire request returns `403`; a mixed allowed/disallowed request never returns partial results.
+
+Retrieval keys may have no expiry or one of the supported fixed expiry periods. A disabled, deleted, expired, malformed, or unknown key returns `401`. The retrieval limit is fixed at 60 requests per minute per retrieval key; an exhausted key returns `429` with a retry hint. If the quota service is unavailable, retrieval fails closed with `503`. Full-access keys do not use this retrieval-key quota.
+
+RAGFlow MCP forwards these safe backend authentication, permission, rate-limit, and dependency messages to the MCP client. Malformed, HTML, binary, or non-string error responses are replaced with a generic message; request headers, bearer tokens, and raw response bodies are never included.
+
+For WorkBuddy, create a dedicated `retrieval` key containing only the datasets WorkBuddy needs. Never configure WorkBuddy with a shared administrator full-access key.
+
+### Deployment, rollback, and staging acceptance
+
+The schema migration is additive: startup creates the `scoped_api_token` table, adds usage metadata columns to `api_token`, and marks pre-existing full-access rows as legacy. Use this rollout sequence:
+
+1. Back up the staging database and record every running backend revision and existing integration key owner.
+2. Drain one upgraded backend, start it against staging, and let normal database initialization apply the additive migration. Stop the rollout on any migration error.
+3. In the staging database console, run the database-equivalent of the following checks:
+
+   ```sql
+   SHOW COLUMNS FROM api_token;
+   SHOW CREATE TABLE scoped_api_token;
+   SELECT COUNT(*) AS historical_keys,
+          SUM(CASE WHEN is_legacy = 1 THEN 1 ELSE 0 END) AS legacy_keys
+     FROM api_token;
+   ```
+
+   Confirm `api_token` has `name`, `is_legacy`, `enabled`, `total_calls`, `retrieval_calls`, `last_used_at`, and `last_result`; confirm the scoped table and its composite tenant/token key exist; confirm all historical rows were backfilled without changing token values.
+4. Start one pre-upgrade backend revision against the migrated staging schema. Confirm an existing full-access key still works and a `ragflow-rk-*` value returns `401`. Do not issue scoped keys while old backends remain in service.
+5. Upgrade every backend, then create a dedicated WorkBuddy retrieval key through `POST /api/v1/system/tokens` and configure WorkBuddy with it.
+6. Complete every acceptance check below before production rollout.
+
+Pending staging acceptance commands (replace every non-secret placeholder and use non-production test datasets). Acquire the retrieval key interactively in Bash, write it only to a mode-`0600` temporary curl config, remove the shell variable immediately, and delete the config on exit. The bearer value is then supplied through curl's protected config input rather than process arguments:
+
+```bash
+umask 077
+read -r -s -p 'Staging WorkBuddy retrieval key: ' WORKBUDDY_RETRIEVAL_KEY
+printf '\n'
+STAGING_CURL_CONFIG=$(mktemp)
+trap 'rm -f -- "$STAGING_CURL_CONFIG"; unset WORKBUDDY_RETRIEVAL_KEY' EXIT HUP INT TERM
+printf 'header = "Authorization: Bearer %s"\n' "$WORKBUDDY_RETRIEVAL_KEY" > "$STAGING_CURL_CONFIG"
+unset WORKBUDDY_RETRIEVAL_KEY
+
+curl --config "$STAGING_CURL_CONFIG" -i \
+  "$STAGING_BASE_URL/api/v1/datasets"
+
+curl --config "$STAGING_CURL_CONFIG" -i \
+  "$STAGING_BASE_URL/api/v1/datasets/$ALLOWED_DATASET_ID/documents"
+
+curl --config "$STAGING_CURL_CONFIG" -i -X POST -H 'Content-Type: application/json' \
+  -d "{\"question\":\"staging acceptance\",\"dataset_ids\":[\"$ALLOWED_DATASET_ID\"]}" \
+  "$STAGING_BASE_URL/api/v1/retrieval"
+
+curl --config "$STAGING_CURL_CONFIG" -i -X POST -H 'Content-Type: application/json' \
+  -d "{\"question\":\"must be denied\",\"dataset_ids\":[\"$ALLOWED_DATASET_ID\",\"$DENIED_DATASET_ID\"]}" \
+  "$STAGING_BASE_URL/api/v1/retrieval"
+
+curl --config "$STAGING_CURL_CONFIG" -i \
+  "$STAGING_BASE_URL/api/v1/system/status"
+
+rm -f -- "$STAGING_CURL_CONFIG"
+unset STAGING_CURL_CONFIG
+trap - EXIT HUP INT TERM
+```
+
+Also connect the real staging WorkBuddy client and verify MCP connection, tool discovery, and retrieval metadata. Send a controlled immediate burst of 61 valid retrievals with one fresh key and confirm the 61st response is `429`; do not reuse that key for earlier checks. PATCH `/api/v1/system/tokens` with `{"token":"<API_KEY_TO_UPDATE>","enabled":false}` and confirm the same retrieval returns `401`, then PATCH the same fixed URL with `{"token":"<API_KEY_TO_UPDATE>","enabled":true}` using an administrator credential and confirm retrieval recovers. These checks require a staging deployment and must not be inferred from local unit tests.
+
+Rollback is application-first: disable/delete newly issued retrieval keys, remove them from clients, and restore the previous backend revision. Keep the additive columns and `scoped_api_token` table in place during rollback so mixed or restarted nodes remain schema-compatible. Restore clients only with dedicated, rotated credentials; never fall back to a shared administrator key. Drop the additive schema only in a later maintenance window after a verified backup, after all new binaries and scoped keys are gone, and after retention requirements are satisfied.
 
 ---
 

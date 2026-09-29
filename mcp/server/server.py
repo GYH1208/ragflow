@@ -17,6 +17,7 @@
 import json
 import logging
 import random
+import re
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator
@@ -53,6 +54,38 @@ MODE = ""
 TRANSPORT_SSE_ENABLED = True
 TRANSPORT_STREAMABLE_HTTP_ENABLED = True
 JSON_RESPONSE = True
+
+
+_CREDENTIAL_MESSAGE_PATTERN = re.compile(
+    r"(?i)(?:\bauthorization\b|\b(?:x[\s_-]*)?api[\s_-]*key\b)\s*[:=]\s*\S+"
+    r"|\bbearer\s+(?:ragflow-[A-Za-z0-9._~+/=-]+|[A-Za-z0-9._~+/=-]{16,})"
+    r"|\bragflow-(?:rk-)?[A-Za-z0-9._~+/=-]{4,}"
+)
+
+
+def _response_json_object(response):
+    if response is None:
+        return None
+
+    try:
+        payload = response.json()
+    except Exception:
+        return None
+
+    return payload if isinstance(payload, dict) else None
+
+
+def _response_error_message(response, default):
+    payload = _response_json_object(response)
+    if payload is None:
+        return default
+
+    message = payload.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return default
+    if _CREDENTIAL_MESSAGE_PATTERN.search(message):
+        return default
+    return message
 
 
 class RAGFlowConnector:
@@ -149,17 +182,20 @@ class RAGFlowConnector:
 
         res = await self._get("/datasets", params, api_key=api_key)
         if not res or res.status_code != 200:
-            error_message = None
-            if res is not None:
-                try:
-                    error_message = res.json().get("message")
-                except Exception:
-                    error_message = None
-            raise Exception([types.TextContent(type="text", text=error_message or "Cannot process this operation.")])
+            raise Exception([types.TextContent(type="text", text=_response_error_message(res, "Cannot process this operation."))])
 
-        res_json = res.json()
-        if res_json.get("code") != 0:
-            raise Exception([types.TextContent(type="text", text=res_json.get("message", "Cannot process this operation."))])
+        res_json = _response_json_object(res)
+        if res_json is None or type(res_json.get("code")) is not int:
+            raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
+        if res_json["code"] != 0:
+            raise Exception([types.TextContent(type="text", text=_response_error_message(res, "Cannot process this operation."))])
+
+        data = res_json.get("data")
+        total = res_json.get("total")
+        if not isinstance(data, list) or (total is not None and type(total) is not int):
+            raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
+        if any(not isinstance(item, dict) or "id" not in item or "description" not in item for item in data):
+            raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
 
         return res_json
 
@@ -271,18 +307,27 @@ class RAGFlowConnector:
         # Send a POST request to the backend service (using requests library as an example, actual implementation may vary)
         res = await self._post("/retrieval", json=data_json, api_key=api_key)
         if not res or res.status_code != 200:
-            raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
+            raise Exception([types.TextContent(type="text", text=_response_error_message(res, "Cannot process this operation."))])
 
-        res = res.json()
-        if res.get("code") == 0:
-            data = res["data"]
+        res_json = _response_json_object(res)
+        if res_json is None or type(res_json.get("code")) is not int:
+            raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
+        if res_json["code"] == 0:
+            data = res_json.get("data")
+            if not isinstance(data, dict):
+                raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
+            chunks_data = data.get("chunks", [])
+            if not isinstance(chunks_data, list) or any(not isinstance(chunk, dict) for chunk in chunks_data):
+                raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
+            if any(field in data and type(data[field]) is not int for field in ("page", "page_size", "total")):
+                raise Exception([types.TextContent(type="text", text="Cannot process this operation.")])
             chunks = []
 
             # Cache document metadata and dataset information
             document_cache, dataset_cache = await self._get_document_metadata_cache(dataset_ids, api_key=api_key, force_refresh=force_refresh)
 
             # Process chunks with enhanced field mapping including per-chunk metadata
-            for chunk_data in data.get("chunks", []):
+            for chunk_data in chunks_data:
                 enhanced_chunk = self._map_chunk_fields(chunk_data, dataset_cache, document_cache)
                 chunks.append(enhanced_chunk)
 
@@ -306,7 +351,7 @@ class RAGFlowConnector:
 
             return [types.TextContent(type="text", text=json.dumps(response, ensure_ascii=False))]
 
-        raise Exception([types.TextContent(type="text", text=res.get("message"))])
+        raise Exception([types.TextContent(type="text", text=_response_error_message(res, "Cannot process this operation."))])
 
     async def _get_document_metadata_cache(self, dataset_ids, *, api_key: str, force_refresh=False):
         """Cache document metadata for all documents in the specified datasets"""
