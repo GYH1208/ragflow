@@ -37,6 +37,8 @@ def mcp_server():
     module.TRANSPORT_SSE_ENABLED = False
     module.TRANSPORT_STREAMABLE_HTTP_ENABLED = True
     module.JSON_RESPONSE = True
+    module.STREAMABLE_HTTP_ALLOWED_HOSTS = ["mcp.test"]
+    module.STREAMABLE_HTTP_ALLOWED_ORIGINS = ["http://mcp.test"]
     return module
 
 
@@ -81,6 +83,30 @@ async def test_host_streamable_http_rejects_initialize_without_api_key(mcp_serve
 
     assert response.status_code == 401
     assert response.json() == {"error": "Missing or invalid authorization header"}
+
+
+@pytest.mark.asyncio
+async def test_host_streamable_http_rejects_untrusted_host(mcp_server):
+    headers = _headers("ragflow-rk-test")
+    headers["host"] = "untrusted.test"
+
+    async with _client_for(mcp_server) as client:
+        response = await client.post("/mcp", headers=headers, json=_initialize_request())
+
+    assert response.status_code == 421
+    assert response.text == "Invalid Host header"
+
+
+@pytest.mark.asyncio
+async def test_host_streamable_http_rejects_untrusted_origin(mcp_server):
+    headers = _headers("ragflow-rk-test")
+    headers["origin"] = "http://untrusted.test"
+
+    async with _client_for(mcp_server) as client:
+        response = await client.post("/mcp", headers=headers, json=_initialize_request())
+
+    assert response.status_code == 403
+    assert response.text == "Invalid Origin header"
 
 
 @pytest.mark.asyncio

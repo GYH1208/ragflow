@@ -54,6 +54,8 @@ MODE = ""
 TRANSPORT_SSE_ENABLED = True
 TRANSPORT_STREAMABLE_HTTP_ENABLED = True
 JSON_RESPONSE = True
+STREAMABLE_HTTP_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+STREAMABLE_HTTP_ALLOWED_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
 
 
 _CREDENTIAL_MESSAGE_PATTERN = re.compile(
@@ -700,6 +702,7 @@ def create_starlette_app():
     streamablehttp_lifespan = None
     if TRANSPORT_STREAMABLE_HTTP_ENABLED:
         from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+        from mcp.server.transport_security import TransportSecuritySettings
         from starlette.types import Receive, Scope, Send
 
         session_manager = StreamableHTTPSessionManager(
@@ -707,6 +710,11 @@ def create_starlette_app():
             event_store=None,
             json_response=JSON_RESPONSE,
             stateless=True,
+            security_settings=TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=STREAMABLE_HTTP_ALLOWED_HOSTS,
+                allowed_origins=STREAMABLE_HTTP_ALLOWED_ORIGINS,
+            ),
         )
 
         class StreamableHTTPEntry:
@@ -778,6 +786,7 @@ def main(base_url, host, port, mode, api_key, transport_sse_enabled, transport_s
         return str(val).strip().lower() in ("1", "true", "yes", "on")
 
     global BASE_URL, HOST, PORT, MODE, HOST_API_KEY, TRANSPORT_SSE_ENABLED, TRANSPORT_STREAMABLE_HTTP_ENABLED, JSON_RESPONSE
+    global STREAMABLE_HTTP_ALLOWED_HOSTS, STREAMABLE_HTTP_ALLOWED_ORIGINS
     BASE_URL = os.environ.get("RAGFLOW_MCP_BASE_URL", base_url)
     HOST = os.environ.get("RAGFLOW_MCP_HOST", host)
     PORT = os.environ.get("RAGFLOW_MCP_PORT", str(port))
@@ -786,6 +795,8 @@ def main(base_url, host, port, mode, api_key, transport_sse_enabled, transport_s
     TRANSPORT_SSE_ENABLED = parse_bool_flag("RAGFLOW_MCP_TRANSPORT_SSE_ENABLED", transport_sse_enabled)
     TRANSPORT_STREAMABLE_HTTP_ENABLED = parse_bool_flag("RAGFLOW_MCP_TRANSPORT_STREAMABLE_ENABLED", transport_streamable_http_enabled)
     JSON_RESPONSE = parse_bool_flag("RAGFLOW_MCP_JSON_RESPONSE", json_response)
+    STREAMABLE_HTTP_ALLOWED_HOSTS = [value.strip() for value in os.environ.get("RAGFLOW_MCP_ALLOWED_HOSTS", ",".join(STREAMABLE_HTTP_ALLOWED_HOSTS)).split(",") if value.strip()]
+    STREAMABLE_HTTP_ALLOWED_ORIGINS = [value.strip() for value in os.environ.get("RAGFLOW_MCP_ALLOWED_ORIGINS", ",".join(STREAMABLE_HTTP_ALLOWED_ORIGINS)).split(",") if value.strip()]
 
     if MODE == LaunchMode.SELF_HOST and not HOST_API_KEY:
         raise click.UsageError("--api-key is required when --mode is 'self-host'")
