@@ -20,7 +20,7 @@ An MCP server can start up in either self-host mode (default) or host mode:
 - **Host mode**:  
   In host mode, each MCP client can access their own datasets on the RAGFlow server. However, each client request must include a valid API key to authenticate the client with the RAGFlow server.
 
-Once a connection is established, an MCP server communicates with its client in MCP HTTP+SSE (Server-Sent Events) mode, unidirectionally pushing responses from the RAGFlow server to its client in real time.
+Clients can connect through the legacy HTTP+SSE transport or the Streamable HTTP transport. Streamable HTTP returns JSON responses by default and can also return SSE responses.
 
 ## Prerequisites
 
@@ -62,7 +62,11 @@ Where:
 
 ### Transports
 
-The RAGFlow MCP server supports two transports: the legacy SSE transport (served at `/sse`), introduced on November 5, 2024, and deprecated on March 26, 2025, and the streamable-HTTP transport (served at `/mcp`). The legacy SSE transport and the streamable HTTP transport with JSON responses are enabled by default. To disable either transport, use the flags `--no-transport-sse-enabled` or `--no-transport-streamable-http-enabled`. To disable JSON responses for the streamable HTTP transport,  use the `--no-json-response` flag.
+The RAGFlow MCP server supports two transports in both self-host and host modes: the legacy SSE transport (served at `/sse`), introduced on November 5, 2024, and deprecated on March 26, 2025, and the Streamable HTTP transport (served at `/mcp`). Both transports are enabled by default, and Streamable HTTP returns JSON responses by default. To disable either transport, use `--no-transport-sse-enabled` or `--no-transport-streamable-http-enabled`. To use SSE responses over Streamable HTTP instead of JSON responses, use `--no-json-response`.
+
+For deployments that use only Streamable HTTP, pass `--no-transport-sse-enabled` or set `RAGFLOW_MCP_TRANSPORT_SSE_ENABLED=false`. This disables both legacy routes, `/sse` and `/messages/`, while keeping `/mcp` available. Restart the MCP process after changing its transport configuration. Clients using the legacy routes must switch to `/mcp` with a Streamable HTTP client.
+
+When running from source, the server loads `.env` from its script directory or the nearest parent directory. A local `mcp/server/.env` can contain `RAGFLOW_MCP_TRANSPORT_SSE_ENABLED=false`. Environment values override command-line transport flags; an existing process environment value takes precedence over `.env`. Keep this local deployment file outside version control.
 
 ### Launch from Docker
 
@@ -71,15 +75,17 @@ The RAGFlow MCP server supports two transports: the legacy SSE transport (served
 The MCP server is designed as an optional component that complements the RAGFlow server and disabled by default. To enable MCP server:
 
 1. Navigate to **docker/docker-compose.yml**.
-2. Uncomment the `services.ragflow.command` section as shown below:
+2. Add the MCP flags to the existing `command` of the active `ragflow-cpu` or `ragflow-gpu` service, as shown below for `ragflow-cpu`:
 
 ```yaml {6-13}
   services:
-    ragflow:
+    ragflow-cpu:
       ...
       image: ${RAGFLOW_IMAGE}
       # Example configuration to set up an MCP server:
       command:
+        - --enable-adminserver
+        - --init-model-provider-tables
         - --enable-mcpserver
         - --mcp-host=0.0.0.0
         - --mcp-port=9382
@@ -88,7 +94,7 @@ The MCP server is designed as an optional component that complements the RAGFlow
         - --mcp-mode=self-host
         - --mcp-host-api-key=ragflow-xxxxxxx
         # Optional transport flags for the RAGFlow MCP server.
-        # If you set `mcp-mode` to `host`, you must add the --no-transport-streamable-http-enabled flag, because the streamable-HTTP transport is not yet supported in host mode.
+        # In host mode, each MCP request must include the client's RAGFlow API key.
         # The legacy SSE transport and the streamable-HTTP transport with JSON responses are enabled by default.
         # To disable a specific transport or JSON responses for the streamable-HTTP transport, use the corresponding flag(s):
         #   - --no-transport-sse-enabled # Disables the legacy SSE endpoint (/sse)
@@ -108,7 +114,7 @@ Where:
 - `mcp-host-api_key`: Required in self-host mode to authenticate the MCP server with the RAGFlow server. See [here](../acquire_ragflow_api_key.md) for instructions on acquiring an API key.
 
 :::tip INFO
-If you set `mcp-mode` to `host`, you must add the `--no-transport-streamable-http-enabled` flag, because the streamable-HTTP transport is not yet supported in host mode.
+Host mode supports Streamable HTTP at `/mcp`. Set `--mcp-mode=host` and omit `--mcp-host-api-key`; each client must send its own RAGFlow API key in the `Authorization: Bearer <API key>` header on every request, including initialization, tool discovery, and tool calls. For access through a non-local hostname, configure `RAGFLOW_MCP_ALLOWED_HOSTS` to include that hostname. If browser clients send an `Origin` header, configure `RAGFLOW_MCP_ALLOWED_ORIGINS` for their origins as well.
 :::
 
 #### 2. Launch a RAGFlow server with an MCP server
