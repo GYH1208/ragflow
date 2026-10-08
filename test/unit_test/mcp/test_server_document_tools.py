@@ -56,7 +56,7 @@ async def test_list_tools_exposes_static_document_tools_without_fetching_dataset
 
     tools = await mcp_server.list_tools.__wrapped__(connector=connector, api_key="unit-key")
 
-    assert [tool.name for tool in tools] == ["ragflow_retrieval", "search_documents", "get_document_chunks"]
+    assert [tool.name for tool in tools] == ["ragflow_retrieval", "search_documents", "get_document_chunks", "get_chunk_image"]
     search_schema = tools[1].inputSchema
     assert search_schema["required"] == ["query"]
     assert search_schema["properties"]["query"]["minLength"] == 1
@@ -68,6 +68,11 @@ async def test_list_tools_exposes_static_document_tools_without_fetching_dataset
     assert chunks_schema["required"] == ["dataset_id", "document_id"]
     assert chunks_schema["properties"]["page_size"]["default"] == 10
     assert chunks_schema["properties"]["page_size"]["maximum"] == 50
+    image_schema = tools[3].inputSchema
+    assert image_schema["required"] == ["dataset_id", "document_id", "chunk_id"]
+    assert set(image_schema["properties"]) == {"dataset_id", "document_id", "chunk_id"}
+    assert "get_chunk_image" in tools[0].description
+    assert "get_chunk_image" in tools[2].description
 
 
 @pytest.mark.asyncio

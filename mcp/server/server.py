@@ -15,9 +15,11 @@
 #
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -58,6 +60,7 @@ TRANSPORT_STREAMABLE_HTTP_ENABLED = True
 JSON_RESPONSE = True
 STREAMABLE_HTTP_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 STREAMABLE_HTTP_ALLOWED_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+MCP_IMAGE_MAX_BYTES = int(os.environ.get("RAGFLOW_MCP_IMAGE_MAX_BYTES", str(10 * 1024 * 1024)))
 
 
 _CREDENTIAL_MESSAGE_PATTERN = re.compile(
@@ -90,6 +93,21 @@ def _response_error_message(response, default):
     if _CREDENTIAL_MESSAGE_PATTERN.search(message):
         return default
     return message
+
+
+def _image_content_type(data: bytes) -> str | None:
+    """Detect raster image signatures without importing backend dependencies."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:2] == b"BM":
+        return "image/bmp"
+    return None
 
 
 class RAGFlowConnector:
@@ -532,6 +550,39 @@ class RAGFlowConnector:
         }
         return [types.TextContent(type="text", text=json.dumps(response, ensure_ascii=False))]
 
+    async def get_chunk_image(self, *, api_key: str, dataset_id: str, document_id: str, chunk_id: str):
+        """Fetch one authorized chunk image and return native MCP image content."""
+        default_error = "Cannot retrieve this chunk image."
+
+        if not api_key:
+            raise ValueError("RAGFlow API key is required.")
+        if any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) for value in (dataset_id, document_id, chunk_id)):
+            raise ValueError("Valid dataset_id, document_id, and chunk_id are required.")
+
+        try:
+            response = await self._get(f"/datasets/{dataset_id}/documents/{document_id}/chunks/{chunk_id}/image", api_key=api_key)
+        except httpx.HTTPError:
+            raise ValueError(default_error) from None
+        if response is None or response.status_code != 200:
+            message = _response_error_message(response, default_error)
+            # Backend/proxy errors can contain storage URLs with credentials.
+            if api_key in message or re.search(r"(?i)\b[a-z][a-z0-9+.-]*://", message):
+                message = default_error
+            raise ValueError(message)
+
+        image_data = response.content
+        if len(image_data) > MCP_IMAGE_MAX_BYTES:
+            raise ValueError("Chunk image exceeds the MCP size limit.")
+        content_type = response.headers.get("Content-Type", "").partition(";")[0].strip().lower()
+        detected_type = _image_content_type(image_data)
+        if detected_type is None or content_type != detected_type:
+            raise ValueError(default_error)
+        source = {"dataset_id": dataset_id, "document_id": document_id, "chunk_id": chunk_id}
+        return [
+            types.TextContent(type="text", text=json.dumps(source, ensure_ascii=False)),
+            types.ImageContent(type="image", data=base64.b64encode(image_data).decode("ascii"), mimeType=detected_type),
+        ]
+
     async def retrieval(
         self,
         *,
@@ -830,7 +881,8 @@ async def list_tools(*, connector: RAGFlowConnector, api_key: str) -> list[types
                 "optionally specify dataset_ids to search only specific datasets, or omit dataset_ids entirely to "
                 "search across ALL available datasets. You can also optionally specify document_ids to search within "
                 "specific documents. When dataset_ids is not provided or is empty, the system will automatically "
-                "search across all available datasets."
+                "search across all available datasets. If a relevant chunk has a non-empty image_id, call "
+                "get_chunk_image only when the user requests the image or it helps explain the answer."
             ),
             inputSchema={
                 "type": "object",
@@ -914,7 +966,8 @@ async def list_tools(*, connector: RAGFlowConnector, api_key: str) -> list[types
             description=(
                 "Read chunks from one identified document in original document order, without semantic reranking. Use "
                 "this after search_documents or ragflow_retrieval has returned dataset_id and document_id. Continue "
-                "with the next page until all chunks needed for the answer have been read."
+                "with the next page until all chunks needed for the answer have been read. If a relevant chunk has a "
+                "non-empty image_id, use get_chunk_image when its image is needed for the answer."
             ),
             inputSchema={
                 "type": "object",
@@ -925,6 +978,27 @@ async def list_tools(*, connector: RAGFlowConnector, api_key: str) -> list[types
                     "page_size": {"type": "integer", "description": "Chunks per page.", "default": 10, "minimum": 1, "maximum": 50},
                 },
                 "required": ["dataset_id", "document_id"],
+            },
+        ),
+        types.Tool(
+            name="get_chunk_image",
+            description=(
+                "Fetch one image associated with an authorized chunk and return native MCP image content with its source IDs. "
+                "Use dataset_id, document_id, and the chunk ID (id or chunk_id) from ragflow_retrieval or get_document_chunks. "
+                "Call only for a relevant chunk with a non-empty image_id when the user asks to see the image, screenshot, "
+                "diagram, or chart, or when it helps explain the answer. Fetch images on demand; do not fetch every result "
+                "or repeatedly fetch the same chunk within one answer. Include the image's source when presenting it. "
+                "Authorization is handled by the server; never put credentials in tool arguments or display an authenticated image URL."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_id": {"type": "string", "description": "Dataset ID returned with the chunk.", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+                    "document_id": {"type": "string", "description": "Document ID returned with the chunk.", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+                    "chunk_id": {"type": "string", "description": "The chunk's id or chunk_id field, not image_id.", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+                },
+                "required": ["dataset_id", "document_id", "chunk_id"],
+                "additionalProperties": False,
             },
         ),
     ]
@@ -981,6 +1055,13 @@ async def call_tool(
             document_id=arguments.get("document_id", ""),
             page=arguments.get("page", 1),
             page_size=arguments.get("page_size", 10),
+        )
+    if name == "get_chunk_image":
+        return await connector.get_chunk_image(
+            api_key=api_key,
+            dataset_id=arguments.get("dataset_id", ""),
+            document_id=arguments.get("document_id", ""),
+            chunk_id=arguments.get("chunk_id", ""),
         )
     raise ValueError(f"Tool not found: {name}")
 

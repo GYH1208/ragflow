@@ -17,11 +17,13 @@ import base64
 import binascii
 import datetime
 import logging
+import os
 import re
 
 import xxhash
+from opendal.exceptions import NotFound as OpenDALNotFound
 from pydantic import BaseModel, Field, validator
-from quart import g, request
+from quart import g, make_response, request
 from werkzeug.exceptions import HTTPException
 
 from api.apps import KNOWLEDGE_RETRIEVE_SCOPE, login_required
@@ -55,7 +57,7 @@ from api.utils.api_utils import (
     get_result,
     server_error_response,
 )
-from api.utils.image_utils import store_chunk_image
+from api.utils.image_utils import detect_image_content_type, store_chunk_image
 from api.utils.pagination_utils import validate_rest_api_page_size
 from api.utils.reference_metadata_utils import (
     enrich_chunks_with_document_metadata,
@@ -71,9 +73,11 @@ from common.tag_feature_utils import validate_tag_features
 from rag.app.tag import label_question
 from rag.nlp import search
 from rag.prompts.generator import cross_languages, keyword_extraction
+from rag.utils.base64_image import parse_storage_composite_id
 
 DOC_STOP_PARSING_INVALID_STATE_MESSAGE = "Can't stop parsing document that has not started or already completed"
 DOC_STOP_PARSING_INVALID_STATE_ERROR_CODE = "DOC_STOP_PARSING_INVALID_STATE"
+CHUNK_IMAGE_MAX_BYTES = int(os.environ.get("RAGFLOW_CHUNK_IMAGE_MAX_BYTES", str(10 * 1024 * 1024)))
 
 
 def _decode_chunk_image_base64(image_base64):
@@ -550,6 +554,70 @@ async def get_chunk(tenant_id, dataset_id, document_id, chunk_id):
         if str(e).find("NotFoundError") >= 0:
             return get_result(data=False, message="Chunk not found!", code=RetCode.DATA_ERROR)
         return server_error_response(e)
+
+
+@manager.route("/datasets/<dataset_id>/documents/<document_id>/chunks/<chunk_id>/image", methods=["GET"])  # noqa: F821
+@login_required(api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
+@add_tenant_id_to_kwargs
+async def get_chunk_image(tenant_id, dataset_id, document_id, chunk_id):
+    """Return the raster image bound to an authorized chunk as inline binary content."""
+    require_dataset_access([dataset_id])
+    # Some document engines interpolate chunk IDs into filter expressions.
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", chunk_id):
+        return get_result(code=RetCode.BAD_REQUEST, message="Invalid chunk ID."), 400
+
+    def not_found():
+        return get_result(code=RetCode.NOT_FOUND, message="Chunk image not found."), 404
+
+    try:
+        kb = await thread_pool_exec(_get_authorized_kb, dataset_id, tenant_id)
+        if not kb or (allowed_dataset_ids() is not None and kb.tenant_id != tenant_id):
+            return not_found()
+        documents = await thread_pool_exec(DocumentService.query, id=document_id, kb_id=dataset_id)
+        if not documents:
+            return not_found()
+        chunk = await thread_pool_exec(settings.docStoreConn.get, chunk_id, search.index_name(kb.tenant_id), [dataset_id])
+        if not chunk or str(chunk.get("doc_id", chunk.get("document_id"))) != document_id:
+            return not_found()
+        chunk_datasets = chunk.get("kb_id", chunk.get("dataset_id"))
+        if isinstance(chunk_datasets, str):
+            chunk_datasets = [chunk_datasets]
+        # ES/OpenSearch get-by-ID does not itself enforce the dataset filter.
+        if not isinstance(chunk_datasets, (list, tuple)) or dataset_id not in chunk_datasets:
+            return not_found()
+        image_id = chunk.get("img_id") or chunk.get("image_id")
+        if not isinstance(image_id, str):
+            return not_found()
+        parsed = parse_storage_composite_id(image_id)
+        if not parsed:
+            return not_found()
+        bucket, object_key = parsed
+        # Pipeline previews use imagetemps; their authorization comes from the
+        # validated chunk binding. Never accept a storage ID from the caller.
+        if bucket not in (dataset_id, "imagetemps"):
+            return not_found()
+        try:
+            data = await thread_pool_exec(settings.STORAGE_IMPL.get, bucket, object_key)
+        except OpenDALNotFound:
+            return not_found()
+        if not data:
+            return not_found()
+        if len(data) > CHUNK_IMAGE_MAX_BYTES:
+            return get_result(code=413, message="Chunk image exceeds the configured size limit."), 413
+        content_type = detect_image_content_type(data)
+        if content_type is None:
+            return get_result(code=415, message="Unsupported chunk image format."), 415
+        response = await make_response(data)
+        response.headers.set("Content-Type", content_type)
+        response.headers.set("Content-Disposition", "inline")
+        response.headers.set("Cache-Control", "private, no-store")
+        response.headers.set("X-Content-Type-Options", "nosniff")
+        return response
+    except HTTPException as error:
+        return get_result(code=error.code, message=error.description), error.code
+    except Exception:
+        logging.exception("Failed to read chunk image")
+        return get_result(code=RetCode.SERVICE_UNAVAILABLE, message="Chunk image service is unavailable."), 503
 
 
 @manager.route("/datasets/<dataset_id>/documents/<document_id>/chunks", methods=["POST"])  # noqa: F821

@@ -14,12 +14,15 @@
 #  limitations under the License.
 #
 
+import base64
 import importlib.util
 from contextlib import asynccontextmanager
+from io import BytesIO
 from pathlib import Path
 
 import httpx
 import pytest
+from PIL import Image
 
 
 def _load_mcp_server():
@@ -135,6 +138,7 @@ async def test_host_streamable_http_lists_static_tools_without_fetching_datasets
         "ragflow_retrieval",
         "search_documents",
         "get_document_chunks",
+        "get_chunk_image",
     ]
 
 
@@ -160,3 +164,51 @@ async def test_host_streamable_http_does_not_reuse_initialize_api_key(monkeypatc
     assert initialize_response.status_code == 200
     assert tools_response.status_code == 401
     assert tools_response.json() == {"error": "Missing or invalid authorization header"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_status", [200, 403])
+async def test_host_streamable_http_serves_chunk_image_with_current_request_key(monkeypatch, mcp_server, backend_status):
+    buffer = BytesIO()
+    Image.new("RGB", (1, 1)).save(buffer, format="PNG")
+    image_bytes = buffer.getvalue()
+    requests = []
+
+    def backend(request):
+        requests.append(request)
+        if backend_status != 200:
+            return httpx.Response(backend_status, json={"code": backend_status, "message": "Chunk image access denied."})
+        return httpx.Response(200, content=image_bytes, headers={"Content-Type": "image/png"})
+
+    async def get_backend_client(connector):
+        if connector._async_client is None:
+            connector._async_client = httpx.AsyncClient(transport=httpx.MockTransport(backend))
+        return connector._async_client
+
+    monkeypatch.setattr(mcp_server.RAGFlowConnector, "_get_client", get_backend_client)
+
+    async with _client_for(mcp_server) as client:
+        await client.post("/mcp", headers=_headers("ragflow-rk-initialize-only"), json=_initialize_request())
+        response = await client.post(
+            "/mcp",
+            headers=_headers("ragflow-rk-image-request"),
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "get_chunk_image", "arguments": {"dataset_id": "dataset-1", "document_id": "document-1", "chunk_id": "chunk-1"}},
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert requests[0].headers["Authorization"] == "Bearer ragflow-rk-image-request"
+    assert "ragflow-rk-image-request" not in response.text
+    if backend_status != 200:
+        assert result["isError"] is True
+        assert result["content"][0]["text"] == "Chunk image access denied."
+        return
+    assert result["isError"] is False
+    assert [item["type"] for item in result["content"]] == ["text", "image"]
+    assert result["content"][1]["mimeType"] == "image/png"
+    assert base64.b64decode(result["content"][1]["data"]) == image_bytes

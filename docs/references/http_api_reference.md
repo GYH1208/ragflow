@@ -34,7 +34,7 @@ A complete reference for RAGFlow's RESTful API. Before proceeding, please ensure
 RAGFlow has two API key types:
 
 - `full_access`: a high-privilege key with the existing API behavior. It is suitable only for trusted administrative integrations.
-- `retrieval`: a least-privilege key restricted to an explicit dataset allowlist and exactly four read/retrieval capabilities.
+- `retrieval`: a least-privilege key restricted to an explicit dataset allowlist and the read/retrieval capabilities listed below.
 
 API keys are bearer credentials:
 
@@ -186,12 +186,14 @@ The legacy **DELETE** `/api/v1/system/tokens/{token}` route remains available fo
 
 ### Retrieval-key contract
 
-A retrieval key can call exactly these four endpoints:
+A retrieval key can call these endpoints:
 
 1. **GET** `/api/v1/datasets` — returns only allowlisted datasets and an allowlist-filtered total.
 2. **GET** `/api/v1/datasets/{dataset_id}` — returns one allowlisted dataset.
 3. **GET** `/api/v1/datasets/{dataset_id}/documents` — lists documents for one allowlisted dataset.
 4. **POST** `/api/v1/retrieval` — retrieves from allowlisted datasets.
+5. **GET** `/api/v1/datasets/{dataset_id}/documents/{document_id}/chunks` — lists chunks for an authorized document.
+6. **GET** `/api/v1/datasets/{dataset_id}/documents/{document_id}/chunks/{chunk_id}/image` — returns the image bound to an authorized chunk.
 
 Every other endpoint, including writes and `/api/v1/system/status`, is denied with `403`. A missing or empty `dataset_ids` array on `POST /api/v1/retrieval` defaults to the key's complete allowlist. Explicit IDs keep caller order after de-duplication. If any explicit ID is outside the allowlist, the entire request returns `403`; a mixed allowed/disallowed request never returns partial results.
 
@@ -2549,6 +2551,57 @@ Failure:
 {
     "code": 100,
     "message": "Chunk not found"
+}
+```
+
+---
+
+### Get chunk image
+
+**GET** `/api/v1/datasets/{dataset_id}/documents/{document_id}/chunks/{chunk_id}/image`
+
+Returns the image associated with one chunk for display in an external application. Use the dataset, document, and chunk IDs from retrieval or chunk-list results. The server reads the image ID from the stored chunk; callers cannot select an arbitrary image or storage object.
+
+#### Request
+
+- Header: `Authorization: Bearer <YOUR_API_KEY>`
+- `dataset_id`: Dataset containing the document.
+- `document_id`: Document containing the chunk.
+- `chunk_id`: Chunk to read; 1–128 letters, digits, underscores, or hyphens.
+
+```bash
+curl --request GET \
+     --url http://{address}/api/v1/datasets/{dataset_id}/documents/{document_id}/chunks/{chunk_id}/image \
+     --header 'Authorization: Bearer <YOUR_API_KEY>' \
+     --output chunk-image.png
+```
+
+Retrieval keys can access only allowlisted datasets still owned by their tenant. Full-access keys and authenticated web users follow the existing dataset visibility rules. The document must belong to the requested dataset, and the chunk must belong to both. Dataset images and pipeline images in `imagetemps` are supported only through this validated chunk binding. The generic `/api/v1/documents/images/{image_id}` route remains unavailable to retrieval keys.
+
+#### Response
+
+On success, HTTP `200` returns raw image bytes, not a JSON envelope or Base64 string. `Content-Type` is detected from the bytes: `image/png`, `image/jpeg`, `image/gif`, `image/webp`, or `image/bmp`. Responses include `Content-Disposition: inline`, `Cache-Control: private, no-store`, and `X-Content-Type-Options: nosniff`.
+
+The default maximum response size is **10 MiB**. Set the backend environment variable `RAGFLOW_CHUNK_IMAGE_MAX_BYTES` to a positive integer byte count and restart the backend to change it. The size check occurs after reading from object storage; it limits the response size, not the storage read's memory usage. Images are returned as stored, without resizing or compression. Image reads do not consume the semantic retrieval quota.
+
+Errors use the standard JSON envelope with a matching HTTP status and `code`:
+
+| HTTP status | Meaning |
+| --- | --- |
+| 400 | Invalid chunk ID. |
+| 401 | Missing, invalid, expired, or disabled authentication. |
+| 403 | Dataset is outside the retrieval key's allowlist. |
+| 404 | Dataset/document/chunk is missing or inaccessible, the binding is invalid, or the image is missing. |
+| 413 | Image exceeds the configured byte limit. |
+| 415 | Stored content is not a supported raster image format. |
+| 503 | A dependency failed while reading the chunk image. |
+
+Storage adapters that return no content for either a missing object or a read failure produce `404`; a dependency exception reported to the route produces `503`. OpenDAL's explicit missing-object exception produces `404`.
+
+```json
+{
+    "code": 404,
+    "message": "Chunk image not found."
 }
 ```
 

@@ -19,6 +19,7 @@ from collections.abc import Collection
 from importlib import import_module
 from types import SimpleNamespace
 
+import opendal
 import pytest
 from peewee import SqliteDatabase
 from quart import g
@@ -507,6 +508,214 @@ async def test_retrieval_key_cannot_list_chunks_outside_dataset_allowlist(api_cl
 
     assert response.status_code == RetCode.FORBIDDEN
     assert (await response.get_json())["code"] == RetCode.FORBIDDEN
+
+
+@pytest.fixture()
+def chunk_image_backend(monkeypatch):
+    state = {
+        "kb": _kb(DATASET_A),
+        "document_exists": True,
+        "chunk": {"doc_id": DOCUMENT_A, "kb_id": DATASET_A, "img_id": f"{DATASET_A}-image-key"},
+        "blob": b"\x89PNG\r\n\x1a\nimage-content",
+        "storage_reads": [],
+        "chunk_reads": [],
+    }
+    monkeypatch.setattr(chunk_api, "_get_authorized_kb", lambda *_args: state["kb"])
+
+    def documents(**filters):
+        assert filters == {"id": DOCUMENT_A, "kb_id": DATASET_A}
+        return [SimpleNamespace(id=DOCUMENT_A)] if state["document_exists"] else []
+
+    def get_chunk(chunk_id, index, dataset_ids):
+        state["chunk_reads"].append((chunk_id, index, dataset_ids))
+        return state["chunk"]
+
+    def get_image(bucket, object_key):
+        state["storage_reads"].append((bucket, object_key))
+        if isinstance(state["blob"], Exception):
+            raise state["blob"]
+        return state["blob"]
+
+    monkeypatch.setattr(chunk_api.DocumentService, "query", documents)
+    monkeypatch.setattr(chunk_api.settings, "docStoreConn", SimpleNamespace(get=get_chunk))
+    monkeypatch.setattr(chunk_api.settings, "STORAGE_IMPL", SimpleNamespace(get=get_image))
+    return state
+
+
+def _chunk_image_url(dataset_id=DATASET_A):
+    return f"/api/v1/datasets/{dataset_id}/documents/{DOCUMENT_A}/chunks/chunk-1/image"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth_type", ["retrieval", "full", "jwt"])
+@pytest.mark.parametrize("bucket", [DATASET_A, "imagetemps"])
+async def test_chunk_image_reads_bound_image_with_authorized_key(api_client, chunk_image_backend, auth_type, bucket):
+    client, auth_state = api_client
+    if auth_type == "full":
+        auth_state["context"] = _api_key_context(APIKeyType.FULL_ACCESS, None)
+    elif auth_type == "jwt":
+        auth_state["context"] = None
+    chunk_image_backend["chunk"]["img_id"] = f"{bucket}-page-1.png"
+
+    response = await client.get(_chunk_image_url(), query_string={"image_id": f"{DATASET_C}-unrelated-image"})
+
+    assert response.status_code == 200
+    assert await response.get_data() == chunk_image_backend["blob"]
+    assert response.headers["Content-Type"] == "image/png"
+    assert response.headers["Content-Disposition"] == "inline"
+    assert response.headers["Cache-Control"] == "private, no-store"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert chunk_image_backend["storage_reads"] == [(bucket, "page-1.png")]
+    assert chunk_image_backend["chunk_reads"] == [("chunk-1", "ragflow_tenant-1", [DATASET_A])]
+
+
+@pytest.mark.asyncio
+async def test_chunk_image_denies_dataset_outside_key_allowlist_before_reads(api_client, chunk_image_backend):
+    client, _ = api_client
+    response = await client.get(_chunk_image_url(DATASET_C))
+    assert response.status_code == 403
+    assert chunk_image_backend["chunk_reads"] == []
+    assert chunk_image_backend["storage_reads"] == []
+
+
+@pytest.mark.asyncio
+async def test_chunk_image_requires_authentication(api_client, chunk_image_backend, monkeypatch):
+    client, _ = api_client
+    monkeypatch.setattr(import_module("api.apps"), "_load_user", lambda *_args: None)
+    response = await client.get(_chunk_image_url())
+    assert response.status_code == 401
+    assert chunk_image_backend["storage_reads"] == []
+
+
+@pytest.mark.asyncio
+async def test_chunk_image_rejects_filter_expression_in_chunk_id_before_reads(api_client, chunk_image_backend):
+    client, _ = api_client
+    response = await client.get(_chunk_image_url().replace("chunk-1", "chunk%27%20OR%201%3D1"))
+    assert response.status_code == 400
+    assert chunk_image_backend["chunk_reads"] == []
+    assert chunk_image_backend["storage_reads"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["kb", "document", "chunk", "image_id", "blob"])
+async def test_chunk_image_missing_resources_do_not_expose_image(api_client, chunk_image_backend, missing):
+    client, _ = api_client
+    if missing == "document":
+        chunk_image_backend["document_exists"] = False
+    elif missing == "image_id":
+        chunk_image_backend["chunk"]["img_id"] = ""
+    else:
+        chunk_image_backend[missing] = None
+    response = await client.get(_chunk_image_url())
+    assert response.status_code == 404
+    assert (await response.get_json())["message"] == "Chunk image not found."
+    if missing != "blob":
+        assert chunk_image_backend["storage_reads"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [("doc_id", "other-document"), ("kb_id", DATASET_C), ("kb_id", None), ("kb_id", [])])
+async def test_chunk_image_rejects_mismatched_chunk_ownership(api_client, chunk_image_backend, field, value):
+    client, _ = api_client
+    chunk_image_backend["chunk"][field] = value
+    response = await client.get(_chunk_image_url())
+    assert response.status_code == 404
+    assert chunk_image_backend["storage_reads"] == []
+
+
+@pytest.mark.asyncio
+async def test_chunk_image_supports_dataset_list_and_api_field_aliases(api_client, chunk_image_backend):
+    client, _ = api_client
+    chunk_image_backend["chunk"] = {"document_id": DOCUMENT_A, "dataset_id": [DATASET_A], "image_id": "imagetemps-object-key"}
+    response = await client.get(_chunk_image_url())
+    assert response.status_code == 200
+    assert chunk_image_backend["storage_reads"] == [("imagetemps", "object-key")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("image_id", ["invalid", f"{DATASET_C}-image-key", "unrelated-bucket-image", "imagetemps-", None])
+async def test_chunk_image_rejects_invalid_or_unrelated_storage_binding(api_client, chunk_image_backend, image_id):
+    client, _ = api_client
+    chunk_image_backend["chunk"]["img_id"] = image_id
+    response = await client.get(_chunk_image_url())
+    assert response.status_code == 404
+    assert chunk_image_backend["storage_reads"] == []
+
+
+@pytest.mark.asyncio
+async def test_chunk_image_uses_owner_index_for_shared_dataset(api_client, chunk_image_backend):
+    client, state = api_client
+    state["context"] = None
+    chunk_image_backend["kb"].tenant_id = "owner-2"
+    response = await client.get(_chunk_image_url())
+    assert response.status_code == 200
+    assert chunk_image_backend["chunk_reads"][0][1] == "ragflow_owner-2"
+
+
+@pytest.mark.asyncio
+async def test_chunk_image_scoped_key_rejects_changed_dataset_owner(api_client, chunk_image_backend):
+    client, _ = api_client
+    chunk_image_backend["kb"].tenant_id = "owner-2"
+    response = await client.get(_chunk_image_url())
+    assert response.status_code == 404
+    assert chunk_image_backend["storage_reads"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blob,content_type", [(b"\xff\xd8\xffimage", "image/jpeg"), (b"GIF89aimage", "image/gif"), (b"RIFFxxxxWEBPimage", "image/webp"), (b"BMimage", "image/bmp")])
+async def test_chunk_image_detects_actual_format(api_client, chunk_image_backend, blob, content_type):
+    client, _ = api_client
+    chunk_image_backend["blob"] = blob
+    response = await client.get(_chunk_image_url())
+    assert response.status_code == 200
+    assert response.headers["Content-Type"] == content_type
+    assert await response.get_data() == blob
+
+
+@pytest.mark.asyncio
+async def test_chunk_image_rejects_non_image_even_with_image_extension(api_client, chunk_image_backend):
+    client, _ = api_client
+    chunk_image_backend["chunk"]["img_id"] = f"{DATASET_A}-fake.png"
+    chunk_image_backend["blob"] = b"<html>not an image</html>"
+    response = await client.get(_chunk_image_url())
+    assert response.status_code == 415
+
+
+@pytest.mark.asyncio
+async def test_chunk_image_bounds_response_size(api_client, chunk_image_backend, monkeypatch):
+    client, _ = api_client
+    monkeypatch.setattr(chunk_api, "CHUNK_IMAGE_MAX_BYTES", len(chunk_image_backend["blob"]), raising=False)
+    response = await client.get(_chunk_image_url())
+    assert response.status_code == 200
+    chunk_image_backend["blob"] += b"x"
+    response = await client.get(_chunk_image_url())
+    assert response.status_code == 413
+    assert (await response.get_json())["code"] == 413
+
+
+@pytest.mark.asyncio
+async def test_chunk_image_storage_failure_returns_safe_error(api_client, chunk_image_backend):
+    client, _ = api_client
+    chunk_image_backend["blob"] = RuntimeError("private-storage-credentials")
+    response = await client.get(_chunk_image_url())
+    assert response.status_code == 503
+    assert "private-storage-credentials" not in await response.get_data(as_text=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exists", [True, False])
+async def test_chunk_image_handles_opendal_storage_reads(api_client, chunk_image_backend, monkeypatch, exists):
+    client, _ = api_client
+    operator = opendal.Operator("memory")
+    if exists:
+        operator.write(f"{DATASET_A}/image-key", chunk_image_backend["blob"])
+    monkeypatch.setattr(chunk_api.settings, "STORAGE_IMPL", SimpleNamespace(get=lambda bucket, key: operator.read(f"{bucket}/{key}")))
+    response = await client.get(_chunk_image_url())
+    assert response.status_code == (200 if exists else 404)
+    if exists:
+        assert await response.get_data() == chunk_image_backend["blob"]
+    else:
+        assert (await response.get_json())["message"] == "Chunk image not found."
 
 
 @pytest.mark.asyncio

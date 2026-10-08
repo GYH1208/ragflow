@@ -21,6 +21,21 @@ from PIL import Image
 from common import settings
 
 
+def detect_image_content_type(data):
+    """Identify supported raster image formats from their bytes, not a filename."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:2] == b"BM":
+        return "image/bmp"
+    return None
+
+
 def store_chunk_image(bucket, name, image_binary):
     if settings.STORAGE_IMPL.obj_exist(bucket, name):
         old_binary = settings.STORAGE_IMPL.get(bucket, name)
