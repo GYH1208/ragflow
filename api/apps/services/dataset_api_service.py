@@ -524,11 +524,9 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
             if target_permission == TenantPermission.ME.value:
                 req["team_id"] = None
 
-    # Extract connectors from request
-    connectors = []
-    if "connectors" in req:
-        connectors = req["connectors"]
-        del req["connectors"]
+    # Only an explicit connectors field changes the dataset's connector links.
+    connectors_provided = "connectors" in req
+    connectors = req.pop("connectors", None)
 
     if req.get("parser_config"):
         # Flatten parent_child config into children_delimiter for the execution layer
@@ -609,13 +607,13 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
     if not ok:
         return False, "Dataset updated failed"
 
-    # Link connectors to the dataset
-    errors = Connector2KbService.link_connectors(kb.id, [conn for conn in connectors], tenant_id)
-    if errors:
-        logging.error("Link KB errors: %s", errors)
+    if connectors_provided:
+        errors = Connector2KbService.link_connectors(kb.id, [conn for conn in connectors], tenant_id)
+        if errors:
+            logging.error("Link KB errors: %s", errors)
 
     response_data = _serialize_dataset(k)
-    response_data["connectors"] = connectors
+    response_data["connectors"] = connectors if connectors_provided else Connector2KbService.list_connectors(kb.id)
     return True, response_data
 
 

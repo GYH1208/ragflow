@@ -177,9 +177,44 @@ async def test_update_dataset_can_move_to_uncategorized(monkeypatch):
         lambda _id: (True, SimpleNamespace(to_dict=lambda: {"id": "kb-1", "category_id": None})),
     )
     monkeypatch.setattr(Connector2KbService, "link_connectors", lambda *_args: [])
+    monkeypatch.setattr(Connector2KbService, "list_connectors", lambda _id: [])
 
     ok, result = await update_dataset("owner-1", "kb-1", {"category_id": None})
 
     assert ok is True
     assert updates == [{"category_id": None}]
     assert result["category_id"] is None
+
+
+async def test_update_dataset_preserves_connector_when_field_is_omitted(monkeypatch):
+    kb = SimpleNamespace(
+        id="kb-1",
+        tenant_id="owner-1",
+        parser_config={},
+        parser_id="naive",
+        pipeline_id=None,
+        name="研发体系文件",
+        embd_id="embd-1",
+        pagerank=0,
+        permission="me",
+        team_id=None,
+    )
+    connector = {"id": "svn-1", "source": "svn", "auto_parse": "1", "status": "5"}
+    monkeypatch.setattr(KnowledgebaseService, "get_or_none", lambda **_kwargs: kb)
+    monkeypatch.setattr(KnowledgebaseService, "update_by_id", lambda *_args: 1)
+    monkeypatch.setattr(
+        KnowledgebaseService,
+        "get_by_id",
+        lambda _id: (True, SimpleNamespace(to_dict=lambda: {"id": "kb-1"})),
+    )
+    monkeypatch.setattr(Connector2KbService, "list_connectors", lambda _id: [connector])
+
+    def unexpected_unlink(*_args):
+        raise AssertionError("Updating other settings must preserve connector links")
+
+    monkeypatch.setattr(Connector2KbService, "link_connectors", unexpected_unlink)
+
+    ok, result = await update_dataset("owner-1", "kb-1", {"description": "新版说明"})
+
+    assert ok is True
+    assert result["connectors"] == [connector]

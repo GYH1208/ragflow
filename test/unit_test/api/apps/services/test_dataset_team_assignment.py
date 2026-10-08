@@ -191,6 +191,7 @@ def _stub_update(
     )
     monkeypatch.setattr(KnowledgebaseService, "get_by_id", lambda _dataset_id: (True, dataset))
     monkeypatch.setattr(Connector2KbService, "link_connectors", lambda *_args: [])
+    monkeypatch.setattr(Connector2KbService, "list_connectors", lambda _id: [])
 
     def rename_kb_root(_cls, _tenant_id, old_name, new_name):
         dataset.root_rename_calls += 1
