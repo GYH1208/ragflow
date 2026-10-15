@@ -218,4 +218,45 @@ declare namespace AdminService {
     provider_type: string;
     config: Record<string, unknown>;
   };
+
+  export type WorkBuddyDepartment = {
+    department_id: string;
+    name: string;
+    parent_id: string | null;
+    is_center: boolean;
+    synced_at?: string | null;
+  };
+  export type WorkBuddyPath = {
+    department_id: string;
+    is_main: boolean;
+    complete: boolean;
+    hierarchy: { id: string; name: string; parent_id: string | null }[];
+  };
+  export type WorkBuddyEmployee = {
+    user_id: string;
+    name: string;
+    alias_id: string | null;
+    account_source: 'workbuddy';
+    enterprise_id: string;
+    directory_status: string | null;
+    center_id: string | null;
+    center_name: string | null;
+    primary_department_id: string | null;
+    primary_department_name: string | null;
+    department_path: string | null;
+    department_paths: WorkBuddyPath[];
+    sync_status: string;
+    enabled: boolean;
+    profile_synced_at: string | null;
+    last_seen_at: string | null;
+    allowed_dataset_ids?: string[];
+  };
+  export type WorkBuddyEmployeePage = {
+    items: WorkBuddyEmployee[];
+    total: number;
+  };
+  export type WorkBuddyDatasetPage = {
+    items: { id: string; name: string; owner: string }[];
+    total: number;
+  };
 }

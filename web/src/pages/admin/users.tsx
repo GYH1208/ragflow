@@ -1,6 +1,8 @@
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useContext, useLayoutEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router';
+import WorkBuddyEmployees from './workbuddy-employees';
 
 import {
   createColumnHelper,
@@ -120,7 +122,7 @@ const STATUS_FILTER_OPTIONS = [
   { value: 'inactive', label: 'admin.inactive' },
 ];
 
-function AdminUserManagement() {
+function LocalUserManagement() {
   const [{ userInfo }] = useContext(CurrentUserInfoContext);
 
   const { t } = useTranslation();
@@ -146,7 +148,7 @@ function AdminUserManagement() {
 
   const { data: usersList } = useQuery({
     queryKey: ['admin/listUsers'],
-    queryFn: async () => (await listUsers()).data.data,
+    queryFn: async () => (await listUsers('local')).data.data,
     retry: false,
     placeholderData: keepPreviousData,
   });
@@ -809,4 +811,25 @@ function AdminUserManagement() {
   );
 }
 
+function AdminUserManagement() {
+  const { t } = useTranslation();
+  const [source, setSource] = useState('local');
+  return (
+    <div className="flex min-w-0 h-full flex-col gap-4">
+      <Tabs value={source} onValueChange={setSource}>
+        <TabsList>
+          <TabsTrigger value="local">
+            {t('admin.workbuddy.localAccounts')}
+          </TabsTrigger>
+          <TabsTrigger value="workbuddy">
+            {t('admin.workbuddy.employees')}
+          </TabsTrigger>
+        </TabsList>
+      </Tabs>
+      <div className="min-h-0 min-w-0 flex-1">
+        {source === 'local' ? <LocalUserManagement /> : <WorkBuddyEmployees />}
+      </div>
+    </div>
+  );
+}
 export default AdminUserManagement;
