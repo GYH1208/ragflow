@@ -24,7 +24,7 @@ from config import SERVICE_CONFIGS
 from werkzeug.security import check_password_hash
 
 from api.common.exceptions import AdminException, UserAlreadyExistsError, UserNotFoundError
-from api.db.db_models import APIToken
+from api.db.db_models import APIToken, User
 from api.db.joint_services.user_account_service import create_new_user, delete_user_data
 from api.db.services import UserService
 from api.db.services.api_service import APITokenService
@@ -40,12 +40,15 @@ from common.constants import ActiveEnum
 
 class UserMgr:
     @staticmethod
-    def get_all_users():
+    def get_all_users(account_source=None):
         users = UserService.get_all_users()
+        if account_source is not None:
+            users = [u for u in users if getattr(u, "account_source", "local") == account_source]
         result = []
         for user in users:
             result.append(
                 {
+                    "account_source": getattr(user, "account_source", "local"),
                     "email": user.email,
                     "nickname": user.nickname,
                     "create_date": user.create_date,
@@ -64,6 +67,7 @@ class UserMgr:
             result.append(
                 {
                     "avatar": user.avatar,
+                    "account_source": getattr(user, "account_source", "local"),
                     "email": user.email,
                     "language": user.language,
                     "last_login_time": user.last_login_time,
@@ -105,6 +109,8 @@ class UserMgr:
         if len(user_list) > 1:
             raise AdminException(f"Exist more than 1 user: {username}!")
         usr = user_list[0]
+        if getattr(usr, "account_source", "local") == "workbuddy":
+            raise AdminException("WorkBuddy employees do not support this operation", 403)
         return delete_user_data(usr.id)
 
     @staticmethod
@@ -117,6 +123,8 @@ class UserMgr:
             raise AdminException(f"Exist more than 1 user: {username}!")
         # check new_password different from old.
         usr = user_list[0]
+        if getattr(usr, "account_source", "local") == "workbuddy":
+            raise AdminException("WorkBuddy employees do not support this operation", 403)
         psw = decrypt(new_password)
         if check_password_hash(usr.password, psw):
             return "Same password, no need to update!"
@@ -172,6 +180,8 @@ class UserMgr:
 
     @staticmethod
     def save_api_key(api_key: dict[str, Any]) -> bool:
+        if User.select().where((User.id == api_key.get("tenant_id")) & (User.account_source == "workbuddy")).exists():
+            raise AdminException("WorkBuddy employees cannot receive API keys", 403)
         return APITokenService.save(**api_key)
 
     @staticmethod
@@ -202,6 +212,8 @@ class UserMgr:
 
         # check activate status different from new
         usr = user_list[0]
+        if getattr(usr, "account_source", "local") == "workbuddy":
+            raise AdminException("WorkBuddy employees do not support this operation", 403)
         if usr.is_superuser:
             return f"{usr} is already superuser!"
         # update is_active
