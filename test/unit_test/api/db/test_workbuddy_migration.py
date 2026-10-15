@@ -8,8 +8,8 @@ def test_migration_is_idempotent_and_preserves_existing_data(monkeypatch):
     models = [m.User, m.WorkBuddyEmployeeIdentity, m.EnterpriseDepartment, m.CenterDatasetGrant]
     db = SqliteDatabase(':memory:')
     with db.bind_ctx(models), db.connection_context():
-        db.execute_sql('CREATE TABLE user (id TEXT PRIMARY KEY, email TEXT, nickname TEXT)')
-        db.execute_sql("INSERT INTO user VALUES ('old','old@example.com','Old')")
+        db.execute_sql('CREATE TABLE user (id TEXT PRIMARY KEY, email TEXT, nickname TEXT, update_time BIGINT, update_date DATETIME)')
+        db.execute_sql("INSERT INTO user (id,email,nickname) VALUES ('old','old@example.com','Old')")
         monkeypatch.setenv('RAGFLOW_WORKBUDDY_TENANT_ID', '1494560257098951656')
         migrate_workbuddy_schema(SqliteMigrator(db))
         migrate_workbuddy_schema(SqliteMigrator(db))
