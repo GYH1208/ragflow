@@ -16,10 +16,10 @@
 import logging
 
 from peewee import OperationalError
-from quart import request
+from quart import g, request
 
 from common.constants import RetCode, StatusEnum
-from api.apps import KNOWLEDGE_RETRIEVE_SCOPE, current_user, login_required
+from api.apps import AUTH_WORKBUDDY, DEFAULT_AUTH_TYPES, KNOWLEDGE_RETRIEVE_SCOPE, current_user, login_required
 from api.apps.api_key_auth import allowed_dataset_ids, require_dataset_access
 from api.utils.api_utils import get_error_argument_result, get_error_data_result, get_json_result, get_result, add_tenant_id_to_kwargs
 from api.utils.pagination_utils import validate_rest_api_page_size
@@ -365,7 +365,7 @@ async def update(tenant_id, dataset_id):
 
 
 @manager.route("/datasets", methods=["GET"])  # noqa: F821
-@login_required(api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
+@login_required(auth_types=(*DEFAULT_AUTH_TYPES, AUTH_WORKBUDDY), api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
 @add_tenant_id_to_kwargs
 def list_datasets(tenant_id):
     """
@@ -427,6 +427,11 @@ def list_datasets(tenant_id):
     if err is not None:
         return get_error_argument_result(err)
 
+    employee = getattr(g, "workbuddy_context", None)
+    if employee is not None:
+        from api.apps.services.workbuddy_read_service import list_workbuddy_datasets
+        result = list_workbuddy_datasets(employee, args)
+        return get_result(data=result["data"], total=result["total"])
     try:
         success, result = dataset_api_service.list_datasets(
             tenant_id,
@@ -446,10 +451,15 @@ def list_datasets(tenant_id):
 
 
 @manager.route("/datasets/<dataset_id>", methods=["GET"])  # noqa: F821
-@login_required(api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
+@login_required(auth_types=(*DEFAULT_AUTH_TYPES, AUTH_WORKBUDDY), api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
 @add_tenant_id_to_kwargs
 def get_dataset(tenant_id, dataset_id):
     require_dataset_access([dataset_id])
+    employee = getattr(g, "workbuddy_context", None)
+    if employee is not None:
+        from api.apps.services.workbuddy_read_service import require_workbuddy_datasets, serialize_dataset
+        kb = require_workbuddy_datasets(employee, [dataset_id])[dataset_id]
+        return get_result(data=serialize_dataset(kb))
     exists, _dataset = dataset_api_service.KnowledgebaseService.get_by_id(dataset_id)
     if not exists or _dataset.status != StatusEnum.VALID.value:
         return get_json_result(code=RetCode.NOT_FOUND, message="Dataset not found.", data=None), RetCode.NOT_FOUND

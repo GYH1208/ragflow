@@ -22,9 +22,9 @@ from pathlib import Path
 
 from peewee import OperationalError
 from pydantic import ValidationError
-from quart import make_response, request, send_file
+from quart import g, make_response, request, send_file
 
-from api.apps import AUTH_API, AUTH_BETA, AUTH_JWT, KNOWLEDGE_RETRIEVE_SCOPE, current_user, login_required
+from api.apps import AUTH_WORKBUDDY, DEFAULT_AUTH_TYPES, AUTH_API, AUTH_BETA, AUTH_JWT, KNOWLEDGE_RETRIEVE_SCOPE, current_user, login_required
 from api.apps.api_key_auth import require_dataset_access
 from api.apps.services.document_api_service import (
     map_doc_keys,
@@ -665,7 +665,7 @@ async def _upload_local_documents(kb, actor_id):
 
 
 @manager.route("/datasets/<dataset_id>/documents", methods=["GET"])  # noqa: F821
-@login_required(api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
+@login_required(auth_types=(*DEFAULT_AUTH_TYPES, AUTH_WORKBUDDY), api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
 @add_tenant_id_to_kwargs
 def list_docs(dataset_id, tenant_id):
     """
@@ -777,7 +777,7 @@ def list_docs(dataset_id, tenant_id):
     if not exists or _dataset.status != StatusEnum.VALID.value:
         return get_json_result(code=RetCode.NOT_FOUND, message="Dataset not found.", data=None), RetCode.NOT_FOUND
 
-    if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
+    if getattr(g, "workbuddy_context", None) is None and not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
         logging.error(f"You don't own the dataset {dataset_id}. ")
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}. ")
 
