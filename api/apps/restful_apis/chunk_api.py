@@ -16,6 +16,7 @@
 import base64
 import binascii
 import datetime
+from werkzeug.exceptions import Forbidden
 import logging
 import os
 import re
@@ -26,7 +27,7 @@ from pydantic import BaseModel, Field, validator
 from quart import g, make_response, request
 from werkzeug.exceptions import HTTPException
 
-from api.apps import KNOWLEDGE_RETRIEVE_SCOPE, login_required
+from api.apps import AUTH_WORKBUDDY, DEFAULT_AUTH_TYPES, KNOWLEDGE_RETRIEVE_SCOPE, login_required
 from api.apps.api_key_auth import (
     allowed_dataset_ids,
     consume_retrieval_quota,
@@ -297,10 +298,11 @@ async def stop_parsing(tenant_id, dataset_id):
 
 
 @manager.route("/retrieval", methods=["POST"])  # noqa: F821
-@login_required(api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
+@login_required(auth_types=(*DEFAULT_AUTH_TYPES, AUTH_WORKBUDDY), api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
 @add_tenant_id_to_kwargs
 async def retrieval_test(tenant_id):
     req = await get_request_json()
+    employee = getattr(g, "workbuddy_context", None)
     kb_ids = req.get("dataset_ids")
     scoped_dataset_ids = allowed_dataset_ids()
     if not kb_ids:
@@ -315,9 +317,12 @@ async def retrieval_test(tenant_id):
         return get_error_argument_result(str(error))
     kb_ids = require_dataset_access(kb_ids)
     if not kb_ids:
-        return get_error_data_result("`dataset_ids` is required.")
+        return get_error_data_result("暂未配置可访问知识库" if employee is not None else "`dataset_ids` is required.")
     kb_by_id = None
-    if scoped_dataset_ids is not None:
+    if employee is not None:
+        from api.apps.services.workbuddy_read_service import require_workbuddy_datasets
+        kb_by_id = require_workbuddy_datasets(employee, kb_ids)
+    if scoped_dataset_ids is not None and employee is None:
         kb_by_id = {kb.id: kb for kb in KnowledgebaseService.get_by_ids(kb_ids)}
         if any(
             dataset_id not in kb_by_id or kb_by_id[dataset_id].status != StatusEnum.VALID.value
@@ -325,7 +330,7 @@ async def retrieval_test(tenant_id):
         ):
             return get_result(code=RetCode.NOT_FOUND, message="Dataset not found!"), RetCode.NOT_FOUND
     for id in kb_ids:
-        if not KnowledgebaseService.accessible(kb_id=id, user_id=tenant_id):
+        if employee is None and not KnowledgebaseService.accessible(kb_id=id, user_id=tenant_id):
             return get_error_data_result(f"You don't own the dataset {id}.")
     if kb_by_id is None:
         kb_by_id = {kb.id: kb for kb in KnowledgebaseService.get_by_ids(kb_ids)}
@@ -348,7 +353,12 @@ async def retrieval_test(tenant_id):
     langs = req.get("cross_languages", [])
     if not isinstance(doc_ids, list):
         return get_error_data_result("`documents` should be a list")
-    if doc_ids:
+    if doc_ids and employee is not None:
+        from api.db.db_models import Document
+        doc_ids_list = {d.id for d in Document.select(Document.id).where(Document.kb_id.in_(kb_ids) & (Document.status == "1"))}
+        if any(doc_id not in doc_ids_list for doc_id in doc_ids):
+            raise Forbidden("Document is outside the allowed datasets")
+    elif doc_ids:
         doc_ids_list = KnowledgebaseService.list_documents_by_ids(kb_ids)
         for doc_id in doc_ids:
             if doc_id not in doc_ids_list:
@@ -381,7 +391,7 @@ async def retrieval_test(tenant_id):
     include_metadata, metadata_fields = _resolve_reference_metadata(req)
     try:
         tenant_ids = list(set([kb.tenant_id for kb in kbs]))
-        e, kb = KnowledgebaseService.get_by_id(kb_ids[0])
+        e, kb = (True, kb_by_id[kb_ids[0]]) if employee is not None else KnowledgebaseService.get_by_id(kb_ids[0])
         if not e:
             return get_error_data_result(message="Dataset not found!")
         embd_model_config = get_model_config_from_provider_instance(kb.tenant_id, LLMType.EMBEDDING, kb.embd_id)
@@ -446,18 +456,25 @@ async def retrieval_test(tenant_id):
 
 
 @manager.route("/datasets/<dataset_id>/documents/<document_id>/chunks", methods=["GET"])  # noqa: F821
-@login_required(api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
+@login_required(auth_types=(*DEFAULT_AUTH_TYPES, AUTH_WORKBUDDY), api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
 @add_tenant_id_to_kwargs
 async def list_chunks(tenant_id, dataset_id, document_id):
     require_dataset_access([dataset_id])
 
     from rag.nlp import search
 
-    kb = _get_authorized_kb(dataset_id, tenant_id)
+    employee = getattr(g, "workbuddy_context", None)
+    if employee is not None:
+        from api.apps.services.workbuddy_read_service import require_workbuddy_datasets, require_workbuddy_document, validate_workbuddy_chunk_binding
+        kb = require_workbuddy_datasets(employee, [dataset_id])[dataset_id]
+        doc = [require_workbuddy_document(employee, dataset_id, document_id)]
+    else:
+        kb = _get_authorized_kb(dataset_id, tenant_id)
     if not kb:
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
     dataset_tenant_id = kb.tenant_id
-    doc = DocumentService.query(id=document_id, kb_id=dataset_id)
+    if employee is None:
+        doc = DocumentService.query(id=document_id, kb_id=dataset_id)
     if not doc:
         return get_error_data_result(message=f"You don't own the document {document_id}.")
     doc = doc[0]
@@ -482,6 +499,8 @@ async def list_chunks(tenant_id, dataset_id, document_id):
             return get_result(message=f"Chunk not found: {dataset_id}/{req.get('id')}", code=RetCode.DATA_ERROR)
         if str(chunk.get("doc_id", chunk.get("document_id"))) != str(document_id):
             return get_result(message=f"Chunk not found: {dataset_id}/{req.get('id')}", code=RetCode.DATA_ERROR)
+        if employee is not None:
+            validate_workbuddy_chunk_binding(chunk, dataset_id, document_id)
         _strip_chunk_runtime_fields(chunk)
         res["total"] = 1
         final_chunk = {
@@ -510,6 +529,8 @@ async def list_chunks(tenant_id, dataset_id, document_id):
         )
         res["total"] = sres.total
         for chunk_id in sres.ids:
+            if employee is not None:
+                validate_workbuddy_chunk_binding(sres.field[chunk_id], dataset_id, document_id)
             d = {
                 "id": chunk_id,
                 "content": (
@@ -533,23 +554,34 @@ async def list_chunks(tenant_id, dataset_id, document_id):
 
 
 @manager.route("/datasets/<dataset_id>/documents/<document_id>/chunks/<chunk_id>", methods=["GET"])  # noqa: F821
-@login_required
+@login_required(auth_types=(*DEFAULT_AUTH_TYPES, AUTH_WORKBUDDY), api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
 @add_tenant_id_to_kwargs
 async def get_chunk(tenant_id, dataset_id, document_id, chunk_id):
     from rag.nlp import search
 
-    kb = _get_authorized_kb(dataset_id, tenant_id)
+    employee = getattr(g, "workbuddy_context", None)
+    if employee is not None:
+        from api.apps.services.workbuddy_read_service import require_workbuddy_datasets, require_workbuddy_document, validate_workbuddy_chunk_binding
+        kb = require_workbuddy_datasets(employee, [dataset_id])[dataset_id]
+        doc = [require_workbuddy_document(employee, dataset_id, document_id)]
+    else:
+        kb = _get_authorized_kb(dataset_id, tenant_id)
     if not kb:
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
     dataset_tenant_id = kb.tenant_id
-    doc = DocumentService.query(id=document_id, kb_id=dataset_id)
+    if employee is None:
+        doc = DocumentService.query(id=document_id, kb_id=dataset_id)
     if not doc:
         return get_error_data_result(message=f"You don't own the document {document_id}.")
     try:
         chunk = settings.docStoreConn.get(chunk_id, search.index_name(dataset_tenant_id), [dataset_id])
         if chunk is None or str(chunk.get("doc_id", chunk.get("document_id"))) != str(document_id):
             return get_result(data=False, message="Chunk not found!", code=RetCode.DATA_ERROR)
+        if employee is not None:
+            validate_workbuddy_chunk_binding(chunk, dataset_id, document_id)
         return get_result(data=_strip_chunk_runtime_fields(chunk))
+    except HTTPException:
+        raise
     except Exception as e:
         if str(e).find("NotFoundError") >= 0:
             return get_result(data=False, message="Chunk not found!", code=RetCode.DATA_ERROR)
@@ -557,7 +589,7 @@ async def get_chunk(tenant_id, dataset_id, document_id, chunk_id):
 
 
 @manager.route("/datasets/<dataset_id>/documents/<document_id>/chunks/<chunk_id>/image", methods=["GET"])  # noqa: F821
-@login_required(api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
+@login_required(auth_types=(*DEFAULT_AUTH_TYPES, AUTH_WORKBUDDY), api_scope=KNOWLEDGE_RETRIEVE_SCOPE)
 @add_tenant_id_to_kwargs
 async def get_chunk_image(tenant_id, dataset_id, document_id, chunk_id):
     """Return the raster image bound to an authorized chunk as inline binary content."""
@@ -570,10 +602,17 @@ async def get_chunk_image(tenant_id, dataset_id, document_id, chunk_id):
         return get_result(code=RetCode.NOT_FOUND, message="Chunk image not found."), 404
 
     try:
-        kb = await thread_pool_exec(_get_authorized_kb, dataset_id, tenant_id)
-        if not kb or (allowed_dataset_ids() is not None and kb.tenant_id != tenant_id):
+        employee = getattr(g, "workbuddy_context", None)
+        if employee is not None:
+            from api.apps.services.workbuddy_read_service import require_workbuddy_datasets, require_workbuddy_document
+            kb = require_workbuddy_datasets(employee, [dataset_id])[dataset_id]
+            documents = [require_workbuddy_document(employee, dataset_id, document_id)]
+        else:
+            kb = await thread_pool_exec(_get_authorized_kb, dataset_id, tenant_id)
+        if not kb or (employee is None and allowed_dataset_ids() is not None and kb.tenant_id != tenant_id):
             return not_found()
-        documents = await thread_pool_exec(DocumentService.query, id=document_id, kb_id=dataset_id)
+        if employee is None:
+            documents = await thread_pool_exec(DocumentService.query, id=document_id, kb_id=dataset_id)
         if not documents:
             return not_found()
         chunk = await thread_pool_exec(settings.docStoreConn.get, chunk_id, search.index_name(kb.tenant_id), [dataset_id])

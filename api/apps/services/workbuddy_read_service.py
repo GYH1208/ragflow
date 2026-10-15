@@ -50,3 +50,25 @@ def list_workbuddy_datasets(context,args):
     if page<1 or not 1<=size<=100:
         raise BadRequest('Invalid pagination')
     return {'data':[serialize_dataset(kb) for kb in query.paginate(page,size)],'total':total}
+
+
+def validate_workbuddy_chunk_binding(chunk,dataset_id,document_id):
+    if not isinstance(chunk,dict):
+        raise NotFound('Chunk unavailable')
+    datasets=chunk.get('kb_id',chunk.get('dataset_id'))
+    if isinstance(datasets,str): datasets=[datasets]
+    if not isinstance(datasets,(list,tuple)) or dataset_id not in datasets or str(chunk.get('doc_id',chunk.get('document_id')))!=document_id:
+        raise NotFound('Chunk unavailable')
+    return chunk
+
+
+def require_workbuddy_chunk(context,dataset_id,document_id,chunk_id):
+    import re
+    from common import settings
+    from rag.nlp import search
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',chunk_id):
+        raise BadRequest('Invalid chunk ID')
+    kb=require_workbuddy_datasets(context,[dataset_id])[dataset_id]
+    require_workbuddy_document(context,dataset_id,document_id)
+    chunk=settings.docStoreConn.get(chunk_id,search.index_name(kb.tenant_id),[dataset_id])
+    return validate_workbuddy_chunk_binding(chunk,dataset_id,document_id)
