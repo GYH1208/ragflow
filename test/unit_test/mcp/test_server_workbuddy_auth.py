@@ -96,3 +96,9 @@ async def test_two_concurrent_employees_never_share_credentials(wb_mcp):
     finally:
         await conn.close()
     assert sorted(seen) == ["employee-a", "employee-b"]
+
+
+def test_workbuddy_rejects_legacy_sse_transport(wb_mcp):
+    wb_mcp.TRANSPORT_SSE_ENABLED = True
+    with pytest.raises(ValueError, match="Streamable HTTP"):
+        wb_mcp.create_starlette_app()

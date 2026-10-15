@@ -13,13 +13,12 @@ from common.misc_utils import get_uuid
 class CenterDatasetService:
     @staticmethod
     def sync_departments(enterprise_id, paths):
-        with D._meta.database.atomic():
-            for path in paths:
-                for node in path.hierarchy:
-                    row, created = D.get_or_create(enterprise_id=enterprise_id, department_id=node.id, defaults={"id": get_uuid(), "name": node.name, "parent_id": node.parent_id})
-                    values = {"name": node.name, "parent_id": node.parent_id}
-                    if created or any(getattr(row, k) != v for k, v in values.items()):
-                        D.update(**values, synced_at=datetime.now(UTC).replace(tzinfo=None)).where(D.id == row.id).execute()
+        for path in paths:
+            for node in path.hierarchy:
+                row, created = D.get_or_create(enterprise_id=enterprise_id, department_id=node.id, defaults={"id": get_uuid(), "name": node.name, "parent_id": node.parent_id})
+                values = {"name": node.name, "parent_id": node.parent_id}
+                if created or any(getattr(row, k) != v for k, v in values.items()):
+                    D.update(**values, synced_at=datetime.now(UTC).replace(tzinfo=None)).where(D.id == row.id).execute()
 
     @staticmethod
     def _departments(enterprise_id, lock=False):

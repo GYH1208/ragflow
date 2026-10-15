@@ -48,7 +48,7 @@ beforeEach(() => {
 });
 test('saving_center_replaces_complete_list_including_empty', async () => {
   mount();
-  await screen.findByText('后勤服务中心');
+  await screen.findByRole('option', { name: /后勤服务中心/ });
   fireEvent.change(screen.getByLabelText('admin.workbuddy.center'), {
     target: { value: '2' },
   });
@@ -68,7 +68,7 @@ test('failed_save_does_not_show_success', async () => {
     new Error('failed'),
   );
   mount();
-  await screen.findByText('后勤服务中心');
+  await screen.findByRole('option', { name: /后勤服务中心/ });
   fireEvent.change(screen.getByLabelText('admin.workbuddy.center'), {
     target: { value: '2' },
   });
@@ -85,5 +85,19 @@ test('center_page_is_available_without_commercial_flag', async () => {
   mount();
   expect(
     await screen.findByText('admin.workbuddy.centerAccess'),
+  ).toBeInTheDocument();
+});
+
+test('same_named_centers_show_their_distinct_department_ids', async () => {
+  (service.listWorkBuddyCenters as jest.Mock).mockResolvedValue([
+    { department_id: '2', name: 'Shared center', is_center: true },
+    { department_id: '4', name: 'Shared center', is_center: true },
+  ]);
+  mount();
+  expect(
+    await screen.findByRole('option', { name: 'Shared center (2)' }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole('option', { name: 'Shared center (4)' }),
   ).toBeInTheDocument();
 });

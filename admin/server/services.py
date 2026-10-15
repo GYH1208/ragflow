@@ -142,6 +142,8 @@ class UserMgr:
             raise AdminException(f"Exist more than 1 user: {username}!")
         # check activate status different from new
         usr = user_list[0]
+        if getattr(usr, "account_source", "local") == "workbuddy":
+            raise AdminException("WorkBuddy employees require user_id state management", 403)
         # format activate_status before handle
         _activate_status = activate_status.lower()
         target_status = {

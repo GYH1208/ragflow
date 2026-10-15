@@ -36,7 +36,7 @@ RAGFLOW_MCP_ALLOWED_HOSTS=192.168.1.183:*,127.0.0.1:*,localhost:*
 RAGFLOW_MCP_ALLOWED_ORIGINS=http://192.168.1.183:9396,http://127.0.0.1:9396
 ```
 
-无需为员工填写 `RAGFLOW_MCP_HOST_API_KEY`。新端口需先确认空闲；不覆盖原 9382 API Key 入口或 9395 身份诊断入口。WorkBuddy 管理台仍选“自建应用免授权”，选择原应用，MCP URL 为实际新入口的 `/mcp`，Transport 为 http。服务端验证完成前，初始化/工具发现成功不代表获得知识库授权。
+WorkBuddy 首期仅支持 Streamable HTTP；启用旧 SSE 或关闭 Streamable HTTP 时会拒绝启动。无需为员工填写 `RAGFLOW_MCP_HOST_API_KEY`。新端口需先确认空闲；不覆盖原 9382 API Key 入口或 9395 身份诊断入口。WorkBuddy 管理台仍选“自建应用免授权”，选择原应用，MCP URL 为实际新入口的 `/mcp`，Transport 为 http。服务端验证完成前，初始化/工具发现成功不代表获得知识库授权。
 
 免授权请求不经过浏览器 Login Callback。现有 `http://127.0.0.1:9394/callback` 是先前独立浏览器 OIDC 测试的回调，无需改为 MCP URL。
 
@@ -107,5 +107,9 @@ npm run build
 ## 回滚
 
 出现问题先停止新 WorkBuddy MCP 进程并关闭后端 WorkBuddy 开关，保留原入口。新增表和来源字段保留，避免把员工账号当成本地账号；不要删除真实员工记录、改 KB 所有者或清理已有内容。保持包含账号来源保护的后端/admin 版本，或回滚前明确验证旧代码不会给员工设置密码/授予管理员。旧共享 Key 的撤销单独评估现有调用方。
+
+WorkBuddy 的检索父切片扩展按每个知识库的真实所有者查询，并核对父切片实际库/文档归属；错误或缺失父切片保留已授权的子切片。四个 MCP 工具未提供的 TOC/KG 扩展参数在员工只读 API 中明确拒绝，现有网页/API Key 行为不变。
+
+员工 JSON 与图片响应，以及带员工票据的认证失败响应，都使用 `Cache-Control: private, no-store`。中心选项显示部门 ID，避免同名中心误授。员工启停只能通过 user_id 管理接口记录操作者与时间，旧按邮箱启停入口拒绝员工。
 
 首期每请求校验员工状态、中心与授权；仅 Discovery、应用 token、网络连接可复用。未来缩短调用耗时不能无说明地延长停用或撤权的生效时间。

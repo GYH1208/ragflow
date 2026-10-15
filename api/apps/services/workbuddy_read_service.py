@@ -93,3 +93,76 @@ def require_workbuddy_chunk(context, dataset_id, document_id, chunk_id):
     require_workbuddy_document(context, dataset_id, document_id)
     chunk = settings.docStoreConn.get(chunk_id, search.index_name(kb.tenant_id), [dataset_id])
     return validate_workbuddy_chunk_binding(chunk, dataset_id, document_id)
+
+
+def _rank_dataset(chunk):
+    dataset = chunk.get("kb_id", chunk.get("dataset_id"))
+    if isinstance(dataset, (list, tuple)) and len(dataset) == 1:
+        dataset = dataset[0]
+    if not isinstance(dataset, str):
+        raise Forbidden("Invalid retrieval dataset binding")
+    return dataset
+
+
+def validate_workbuddy_ranks(kbs, chunks, doc_aggs=(), document_ids=None):
+    """Validate index results before optional enrichment can look up a document."""
+    ids = [chunk.get("doc_id", chunk.get("document_id")) for chunk in chunks]
+    ids.extend(agg.get("doc_id") for agg in doc_aggs)
+    if any(not isinstance(value, str) for value in ids):
+        raise Forbidden("Invalid retrieval document binding")
+    documents = {d.id: d for d in Document.select().where(Document.id.in_(ids) & Document.kb_id.in_(list(kbs)) & (Document.status == "1"))}
+    for chunk in chunks:
+        kb_id = _rank_dataset(chunk)
+        doc_id = chunk.get("doc_id", chunk.get("document_id"))
+        doc = documents.get(doc_id)
+        if kb_id not in kbs or doc is None or doc.kb_id != kb_id or document_ids and doc_id not in document_ids:
+            raise Forbidden("Retrieval result is outside the allowed documents")
+    for agg in doc_aggs:
+        doc = documents.get(agg.get("doc_id"))
+        if doc is None or document_ids and doc.id not in document_ids:
+            raise Forbidden("Retrieval aggregation is outside the allowed documents")
+        agg["doc_name"] = doc.name
+
+
+def expand_workbuddy_parents(kbs, chunks):
+    """Parent IDs are content hashes, so fetch and validate per KB and document."""
+    import re
+    from collections import defaultdict
+
+    from common import settings
+    from rag.nlp import search
+
+    groups = defaultdict(list)
+    output = []
+    for chunk in chunks:
+        parent = chunk.get("mom_id")
+        if not isinstance(parent, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", parent):
+            output.append(chunk)
+            continue
+        groups[(_rank_dataset(chunk), chunk["doc_id"], parent)].append(chunk)
+    for (kb_id, doc_id, parent_id), children in groups.items():
+        parent = settings.docStoreConn.get(parent_id, search.index_name(kbs[kb_id].tenant_id), [kb_id])
+        try:
+            validate_workbuddy_chunk_binding(parent, kb_id, doc_id)
+        except NotFound:
+            output.extend(children)
+            continue
+        score = sum(float(child["similarity"]) for child in children) / len(children)
+        merged = {
+            **children[0],
+            "chunk_id": parent_id,
+            "content_with_weight": parent.get("content_with_weight", ""),
+            "content_ltks": " ".join(child.get("content_ltks", "") for child in children),
+            "doc_id": doc_id,
+            "kb_id": kb_id,
+            "docnm_kwd": parent.get("docnm_kwd", children[0].get("docnm_kwd", "")),
+            "important_kwd": [word for child in children for word in child.get("important_kwd", [])],
+            "image_id": parent.get("img_id", ""),
+            "positions": parent.get("position_int", []),
+            "similarity": score,
+            "vector_similarity": score,
+            "term_similarity": score,
+        }
+        merged.pop("mom_id", None)
+        output.append(merged)
+    return sorted(output, key=lambda chunk: float(chunk["similarity"]), reverse=True)

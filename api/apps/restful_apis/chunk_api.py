@@ -303,6 +303,8 @@ async def stop_parsing(tenant_id, dataset_id):
 async def retrieval_test(tenant_id):
     req = await get_request_json()
     employee = getattr(g, "workbuddy_context", None)
+    if employee is not None and (req.get("toc_enhance") or req.get("use_kg")):
+        return get_result(code=RetCode.BAD_REQUEST, message="WorkBuddy retrieval does not support TOC or knowledge graph expansion."), 400
     kb_ids = req.get("dataset_ids")
     scoped_dataset_ids = allowed_dataset_ids()
     if not kb_ids:
@@ -423,7 +425,13 @@ async def retrieval_test(tenant_id):
             cks = await settings.retriever.retrieval_by_toc(question, ranks["chunks"], tenant_ids, LLMBundle(kb.tenant_id, chat_model_config), size)
             if cks:
                 ranks["chunks"] = cks
-        ranks["chunks"] = settings.retriever.retrieval_by_children(ranks["chunks"], tenant_ids)
+        if employee is not None:
+            from api.apps.services.workbuddy_read_service import expand_workbuddy_parents, validate_workbuddy_ranks
+            validate_workbuddy_ranks(kb_by_id, ranks["chunks"], ranks.get("doc_aggs", []), doc_ids)
+            ranks["chunks"] = expand_workbuddy_parents(kb_by_id, ranks["chunks"])
+            validate_workbuddy_ranks(kb_by_id, ranks["chunks"], document_ids=doc_ids)
+        else:
+            ranks["chunks"] = settings.retriever.retrieval_by_children(ranks["chunks"], tenant_ids)
         if use_kg:
             chat_model_config = get_tenant_default_model_by_type(kb.tenant_id, LLMType.CHAT)
             ck = await settings.kg_retriever.retrieval(question, [k.tenant_id for k in kbs], kb_ids, embd_mdl, LLMBundle(kb.tenant_id, chat_model_config))

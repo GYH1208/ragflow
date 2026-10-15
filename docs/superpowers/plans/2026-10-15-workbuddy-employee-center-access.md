@@ -219,7 +219,7 @@ WorkBuddyAccessContext(actor_user_id: str, enterprise_id: str,
 - [x] **3. 完成部署说明。** 核对运行中的后端、admin、前端与 MCP 各自代码版本/启动入口；文档写明备份、增量迁移、服务端 Secret 配置、默认关闭开关、新 WorkBuddy MCP 进程与已知 allowed hosts。保留9395诊断和9382旧 Key 入口，首次新正式联调使用独立空闲端口，不直接覆盖旧服务。Login Callback `http://127.0.0.1:9394/callback` 属于旧浏览器 OIDC 测试，免授权 MCP 不走该回调，不改成 /mcp。失败回滚先关闭新模式，保留新增表/员工来源，不退回会误识别来源的旧读写逻辑。
 - [x] **4. 自动验证绿灯。** 集成测试和 Tasks 1–10 相关单测通过；确认构建产物与新服务使用同一提交。保留无 Secret 的测试记录及命令，不输出运行环境变量全集。
 - [ ] **5. 真实验收。** 部署前完成配置差异和回滚命令，若仍需用户确认则只就具体部署结果请求最终确认。唯一确定“研发结构案例库”ID；若同名库不唯一，提供 owner/ID 请用户选定，不能猜。超管授权已核实中心；由用户在 WorkBuddy 重新连接并调用四工具，两名本企业真实员工分别验证建号、actor 和范围，再撤销授权重试。禁止让用户在聊天中粘贴原始票据/Secret。第二员工或真实环境未验证时如实标记待验收，不能用模拟测试声称已完成。
-- [ ] **6. 提交。** `git commit -m "test: verify WorkBuddy center access end to end"`；记录已执行项、未执行项和生产切换状态。
+- [x] **6. 提交。** `git commit -m "test: verify WorkBuddy center access end to end"`；已提交自动集成验证与部署说明，真实验收和生产切换仍按上项待办记录。
 
 ## 依赖、交付和停止条件
 

@@ -106,7 +106,7 @@ export default function WorkBuddyEmployees() {
               <option value="">{label('all')}</option>
               {centers.data?.map((c) => (
                 <option key={c.department_id} value={c.department_id}>
-                  {c.name}
+                  {c.name} ({c.department_id})
                 </option>
               ))}
             </select>

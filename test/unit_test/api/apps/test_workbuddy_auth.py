@@ -122,3 +122,13 @@ def test_local_disable_grant_revocation_and_move_apply_next_request(monkeypatch)
         with pytest.raises(Forbidden):
             _sync_context(profile)
         assert m.User.get_by_id(user.id).is_active == "0"
+
+
+@pytest.mark.parametrize("ticket", ["valid", "invalid"])
+async def test_employee_responses_are_never_cacheable(guarded_app, ticket):
+    from api.apps.workbuddy_auth import install_workbuddy_lifecycle
+
+    app, _ = guarded_app
+    install_workbuddy_lifecycle(app)
+    res = await app.test_client().get("/read", headers={"x-oneid-access-token": ticket})
+    assert res.headers.get("Cache-Control") == "private, no-store"

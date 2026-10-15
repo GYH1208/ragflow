@@ -58,12 +58,30 @@ def test_migration_on_legacy_schema_twice(database, monkeypatch):
     assert m.EnterpriseDepartment.select().count() == 1
 
 
-def test_concurrent_jit_has_single_mapping_and_no_orphan_user(database):
+def test_concurrent_jit_has_single_mapping_and_no_orphan_user(database, monkeypatch):
     from api.apps.workbuddy_auth import _sync_context
 
     db, m = database
+    from threading import Barrier, local
+    from api.auth.workbuddy.types import DepartmentNode, DepartmentPath
+
+    barrier = Barrier(4)
+    seen = local()
+    original = m.EnterpriseDepartment.get
+
+    def aligned_lookup(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        except m.EnterpriseDepartment.DoesNotExist:
+            if kwargs.get("department_id") == "99901" and not getattr(seen, "aligned", False):
+                seen.aligned = True
+                barrier.wait(timeout=10)
+            raise
+
+    monkeypatch.setattr(m.EnterpriseDepartment, "get", aligned_lookup)
+    shared = replace(profile(), paths=(DepartmentPath("99902", True, True, (DepartmentNode("99901", "Root", None), DepartmentNode("99902", "Leaf", "99901"))),))
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(lambda _: _sync_context(profile())[0].id, range(8)))
+        results = list(pool.map(lambda _: _sync_context(shared)[0].id, range(8)))
     assert len(set(results)) == 1
     assert m.User.select().count() == m.WorkBuddyEmployeeIdentity.select().count() == 1
     assert m.User.get().password is None

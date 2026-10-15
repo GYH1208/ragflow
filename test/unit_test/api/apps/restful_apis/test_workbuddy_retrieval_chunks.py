@@ -92,3 +92,72 @@ async def test_authorized_chunks_and_images_use_original_owner(readonly_client, 
     chunk["kb_id"] = KB_B
     res = await client.get(base + "?id=chunk-a", headers={"x-oneid-access-token": "valid"})
     assert res.status_code == 404
+
+
+@pytest.mark.parametrize("forbidden", [True, False])
+async def test_parent_expansion_checks_actual_binding_and_each_original_owner(readonly_client, monkeypatch, forbidden):
+    from api.apps.restful_apis import chunk_api as route
+    from rag.nlp.search import Dealer
+    from api.db.db_models import Knowledgebase
+
+    client, scope, _ = readonly_client
+    scope["ids"] = frozenset({KB_A, KB_B})
+    chunks = [
+        {
+            "chunk_id": "child-a",
+            "mom_id": "same-parent",
+            "kb_id": KB_A,
+            "doc_id": "doc-a",
+            "docnm_kwd": "a.pdf",
+            "content_with_weight": "allowed child",
+            "content_ltks": "allowed child",
+            "similarity": 0.9,
+        },
+        {
+            "chunk_id": "child-b",
+            "mom_id": "same-parent",
+            "kb_id": KB_B,
+            "doc_id": "doc-b",
+            "docnm_kwd": "b.pdf",
+            "content_with_weight": "allowed child b",
+            "content_ltks": "allowed child b",
+            "similarity": 0.8,
+        },
+    ]
+    seen = []
+
+    def parent(id, index, datasets):
+        seen.append((index, datasets))
+        kb = datasets[0]
+        doc = "doc-a" if kb == KB_A else "doc-b"
+        return {
+            "kb_id": "ungranted-kb" if forbidden else kb,
+            "doc_id": "forbidden-doc" if forbidden else doc,
+            "docnm_kwd": "confidential.pdf" if forbidden else doc + ".pdf",
+            "content_with_weight": "forbidden parent" if forbidden else "approved parent",
+        }
+
+    dealer = Dealer.__new__(Dealer)
+    dealer.dataStore = SimpleNamespace(get=parent)
+    dealer.retrieval = AsyncMock(return_value={"chunks": chunks, "total": 2, "doc_aggs": []})
+    monkeypatch.setattr(route.settings, "retriever", dealer)
+    monkeypatch.setattr(route.settings, "docStoreConn", dealer.dataStore)
+    monkeypatch.setattr(route, "get_model_config_from_provider_instance", lambda *args: {})
+    monkeypatch.setattr(route, "LLMBundle", lambda *args: object())
+    monkeypatch.setattr(route, "label_question", lambda *args: None)
+    res = await client.post("/api/v1/retrieval", json={"question": "test"}, headers={"x-oneid-access-token": "valid"})
+    payload = await res.get_json()
+    assert res.status_code == 200 and payload["code"] == 0, payload
+    assert "forbidden" not in str(payload) and "confidential" not in str(payload)
+    assert {tuple(ids) for _, ids in seen} == {(KB_A,), (KB_B,)}
+    assert any(index.endswith("owner-a") and ids == [KB_A] for index, ids in seen)
+    assert any(index.endswith("owner-b") and ids == [KB_B] for index, ids in seen)
+    if forbidden:
+        assert {c["id"] for c in payload["data"]["chunks"]} == {"child-a", "child-b"}
+
+
+@pytest.mark.parametrize("flag", ["toc_enhance", "use_kg"])
+async def test_employee_retrieval_rejects_unsupported_unbound_expansions(readonly_client, flag):
+    client, _, _ = readonly_client
+    res = await client.post("/api/v1/retrieval", json={"question": "test", flag: True}, headers={"x-oneid-access-token": "valid"})
+    assert res.status_code == 400

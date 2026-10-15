@@ -1113,6 +1113,8 @@ async def call_tool(
 
 
 def create_starlette_app():
+    if AUTH_MODE == "workbuddy" and (TRANSPORT_SSE_ENABLED or not TRANSPORT_STREAMABLE_HTTP_ENABLED):
+        raise ValueError("WorkBuddy requires Streamable HTTP only; disable SSE")
     if AUTH_MODE == "workbuddy" and MODE != LaunchMode.HOST:
         raise ValueError("WorkBuddy authentication requires host mode")
     routes = []

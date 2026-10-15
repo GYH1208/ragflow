@@ -5,7 +5,7 @@ import json
 import logging
 from uuid import uuid4
 
-from quart import current_app, g
+from quart import current_app, g, request
 from werkzeug.exceptions import Forbidden
 
 from api.auth.workbuddy.config import WorkBuddyConfig
@@ -65,6 +65,9 @@ def install_workbuddy_lifecycle(app):
 
     @app.after_request
     async def audit_workbuddy(response):
+        if "x-oneid-access-token" in request.headers:
+            response.headers["Cache-Control"] = "private, no-store"
+            response.vary.add("X-OneID-Access-Token")
         context = getattr(g, "workbuddy_context", None)
         if context is not None:
             logger.info(

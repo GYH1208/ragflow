@@ -95,6 +95,7 @@ def test_legacy_password_promotion_delete_and_key_creation_reject_employees(monk
     monkeypatch.setattr(services.UserService, "query_user_by_email", lambda _: [user])
     for fn, args in [
         (services.UserMgr.delete_user, (user.email,)),
+        (services.UserMgr.update_user_activate_status, (user.email, "off")),
         (services.UserMgr.update_user_password, (user.email, "anything")),
         (services.UserMgr.grant_admin, (user.email,)),
         (services.UserMgr.save_api_key, ({"tenant_id": user.id, "token": "test-key"},)),
