@@ -145,6 +145,9 @@ def mark_retrieval_started() -> None:
 
 
 def allowed_dataset_ids() -> frozenset[str] | None:
+    employee = getattr(g, "workbuddy_context", None) if has_request_context() else None
+    if employee is not None:
+        return employee.allowed_dataset_ids
     context = _current_context()
     if context is None or context.key_type is APIKeyType.FULL_ACCESS:
         return None
@@ -156,4 +159,6 @@ def require_dataset_access(dataset_ids: Iterable[str]) -> list[str]:
     allowlist = allowed_dataset_ids()
     if allowlist is not None and any(dataset_id not in allowlist for dataset_id in requested_ids):
         raise Forbidden("API key does not allow access to the requested dataset.")
+    if has_request_context() and getattr(g, "workbuddy_context", None) is not None:
+        g.workbuddy_checked_dataset_ids = requested_ids
     return requested_ids
