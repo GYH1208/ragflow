@@ -1,4 +1,5 @@
 """Normalized employee identity; credentials never become persisted profile fields."""
+
 from dataclasses import dataclass
 
 
@@ -43,4 +44,4 @@ class WorkBuddyAccessContext:
     enterprise_id: str
     center_id: str | None
     allowed_dataset_ids: frozenset[str]
-    scope: str = 'knowledge:retrieve'
+    scope: str = "knowledge:retrieve"
