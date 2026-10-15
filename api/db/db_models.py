@@ -723,6 +723,7 @@ class User(DataBaseModel, AuthUser):
     SENSITIVE_FIELDS = {"password", "access_token", "email"}
 
     id = CharField(max_length=32, primary_key=True)
+    account_source = CharField(max_length=16, null=False, default="local", index=True)
     access_token = CharField(max_length=255, null=True, index=True)
     nickname = CharField(max_length=100, null=False, help_text="nicky name", index=True)
     password = CharField(max_length=255, null=True, help_text="password", index=True)
@@ -760,6 +761,60 @@ class User(DataBaseModel, AuthUser):
 
     class Meta:
         db_table = "user"
+
+
+class WorkBuddyEmployeeIdentity(DataBaseModel):
+    id = CharField(max_length=32, primary_key=True)
+    user_id = CharField(max_length=32, unique=True)
+    enterprise_id = CharField(max_length=64)
+    union_id = CharField(max_length=128)
+    issuer = CharField(max_length=256)
+    application_id = CharField(max_length=128)
+    name = CharField(max_length=100)
+    alias_id = CharField(max_length=128, null=True)
+    directory_status = CharField(max_length=32, null=True)
+    primary_department_id = CharField(max_length=64, null=True)
+    primary_department_name = CharField(max_length=256, null=True)
+    center_id = CharField(max_length=64, null=True)
+    center_name = CharField(max_length=256, null=True)
+    department_path = TextField(null=True)
+    department_paths = JSONField(default=list)
+    sync_status = CharField(max_length=32, default="pending")
+    profile_synced_at = DateTimeField(null=True)
+    last_seen_at = DateTimeField(null=True)
+    enabled_updated_by = CharField(max_length=32, null=True)
+    enabled_updated_at = DateTimeField(null=True)
+
+    class Meta:
+        indexes = ((('enterprise_id', 'union_id'), True),)
+
+
+class EnterpriseDepartment(DataBaseModel):
+    id = CharField(max_length=32, primary_key=True)
+    enterprise_id = CharField(max_length=64)
+    department_id = CharField(max_length=64)
+    name = CharField(max_length=256)
+    parent_id = CharField(max_length=64, null=True)
+    is_center = BooleanField(default=False)
+    synced_at = DateTimeField(null=True)
+    updated_by = CharField(max_length=32, null=True)
+
+    class Meta:
+        indexes = ((('enterprise_id', 'department_id'), True),)
+
+
+class CenterDatasetGrant(DataBaseModel):
+    id = CharField(max_length=32, primary_key=True)
+    enterprise_id = CharField(max_length=64)
+    center_department_id = CharField(max_length=64)
+    dataset_id = CharField(max_length=32)
+    scope = CharField(max_length=32, default="knowledge:retrieve")
+    enabled = BooleanField(default=True)
+    created_by = CharField(max_length=32)
+    updated_by = CharField(max_length=32)
+
+    class Meta:
+        indexes = ((('enterprise_id', 'center_department_id', 'dataset_id'), True),)
 
 
 class Tenant(DataBaseModel):
@@ -1910,6 +1965,9 @@ def migrate_db():
     logging.disable(logging.NOTSET)
     # this is after re-enabling logging to allow logging changed user emails
     migrate_add_unique_email(migrator)
+    from api.db.workbuddy_migration import migrate_workbuddy_schema
+
+    migrate_workbuddy_schema(migrator)
     try:
         from api.db.team_migration import backfill_default_teams
 
