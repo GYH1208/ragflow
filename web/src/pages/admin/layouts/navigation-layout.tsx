@@ -48,6 +48,11 @@ const AdminNavigationLayout = () => {
         icon: <LucideUserCog className="size-[1em]" />,
       },
       {
+        path: Routes.AdminCenterAccess,
+        name: t('admin.workbuddy.centerAccess'),
+        icon: <LucideUserCog className="size-[1em]" />,
+      },
+      {
         path: Routes.AdminSandboxSettings,
         name: t('admin.sandboxSettings'),
         icon: <LucideZap className="size-[1em]" />,
@@ -148,7 +153,7 @@ const AdminNavigationLayout = () => {
         </div>
       </aside>
 
-      <section className="flex-1 h-full">
+      <section className="min-w-0 flex-1 h-full">
         <Outlet />
       </section>
     </main>

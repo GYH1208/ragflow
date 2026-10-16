@@ -151,8 +151,10 @@ type ResponseData<D = NonNullable<unknown>> = {
 export const login = (params: { email: string; password: string }) =>
   request.post<ResponseData<AdminService.LoginData>>(adminLogin, params);
 export const logout = () => request.get<ResponseData<boolean>>(adminLogout);
-export const listUsers = () =>
-  request.get<ResponseData<AdminService.ListUsersItem[]>>(adminListUsers, {});
+export const listUsers = (account_source?: 'local' | 'workbuddy') =>
+  request.get<ResponseData<AdminService.ListUsersItem[]>>(adminListUsers, {
+    params: { account_source },
+  });
 
 export const createUser = (email: string, password: string) =>
   request.post<ResponseData<boolean>>(adminCreateUser, {
@@ -318,3 +320,84 @@ export const testSandboxConnection = (params: {
     provider_type: params.providerType,
     config: params.config,
   });
+
+const workBuddyBase = '/api/v1/admin/workbuddy';
+async function workBuddyData<T>(
+  promise: Promise<{ data: ResponseData<T> }>,
+): Promise<T> {
+  const { data } = await promise;
+  if (data.code !== 0) throw new Error(data.message || 'Request failed');
+  return data.data;
+}
+export const listWorkBuddyEmployees = (
+  params: {
+    q?: string;
+    center_id?: string;
+    enabled?: boolean;
+    page?: number;
+    page_size?: number;
+  } = {},
+) =>
+  workBuddyData(
+    request.get<ResponseData<AdminService.WorkBuddyEmployeePage>>(
+      `${workBuddyBase}/employees`,
+      { params },
+    ),
+  );
+export const getWorkBuddyEmployee = (id: string) =>
+  workBuddyData(
+    request.get<ResponseData<AdminService.WorkBuddyEmployee>>(
+      `${workBuddyBase}/employees/${encodeURIComponent(id)}`,
+    ),
+  );
+export const setWorkBuddyEmployeeEnabled = (id: string, enabled: boolean) =>
+  workBuddyData(
+    request.put<ResponseData<boolean>>(
+      `${workBuddyBase}/employees/${encodeURIComponent(id)}/enabled`,
+      { enabled },
+    ),
+  );
+export const listWorkBuddyDepartments = () =>
+  workBuddyData(
+    request.get<ResponseData<AdminService.WorkBuddyDepartment[]>>(
+      `${workBuddyBase}/departments`,
+    ),
+  );
+export const listWorkBuddyCenters = () =>
+  workBuddyData(
+    request.get<ResponseData<AdminService.WorkBuddyDepartment[]>>(
+      `${workBuddyBase}/centers`,
+    ),
+  );
+export const setWorkBuddyCenter = (id: string, enabled: boolean) =>
+  workBuddyData(
+    request.put<ResponseData<null>>(
+      `${workBuddyBase}/departments/${encodeURIComponent(id)}/center`,
+      { enabled },
+    ),
+  );
+export const listWorkBuddyDatasets = (
+  params: { q?: string; page?: number; page_size?: number } = {},
+) =>
+  workBuddyData(
+    request.get<ResponseData<AdminService.WorkBuddyDatasetPage>>(
+      `${workBuddyBase}/datasets`,
+      { params },
+    ),
+  );
+export const getWorkBuddyCenterDatasets = (id: string) =>
+  workBuddyData(
+    request.get<ResponseData<{ dataset_ids: string[] }>>(
+      `${workBuddyBase}/centers/${encodeURIComponent(id)}/datasets`,
+    ),
+  );
+export const replaceWorkBuddyCenterDatasets = (
+  id: string,
+  dataset_ids: string[],
+) =>
+  workBuddyData(
+    request.put<ResponseData<{ dataset_ids: string[] }>>(
+      `${workBuddyBase}/centers/${encodeURIComponent(id)}/datasets`,
+      { dataset_ids },
+    ),
+  );

@@ -136,6 +136,12 @@ P = ParamSpec("P")
 AUTH_JWT = "JWT"
 AUTH_API = "API"
 AUTH_BETA = "BETA"
+AUTH_WORKBUDDY = "WORKBUDDY"
+from api.apps.workbuddy_auth import authenticate_workbuddy, extract_oneid_token, install_workbuddy_lifecycle
+from api.auth.workbuddy.types import WorkBuddyAuthenticationError, WorkBuddyProviderUnavailable
+from werkzeug.exceptions import ServiceUnavailable
+
+install_workbuddy_lifecycle(app)
 DEFAULT_AUTH_TYPES = (AUTH_JWT, AUTH_API)
 
 
@@ -185,6 +191,8 @@ def _load_user_from_session():
 
 
 def _load_user(auth_types=None):
+    if "x-oneid-access-token" in request.headers and getattr(g, "workbuddy_context", None) is None:
+        return None
     explicit_auth_types = auth_types is not None
     auth_types = _normalize_auth_types(auth_types)
     if getattr(g, "user", None) and (not explicit_auth_types or getattr(g, "auth_type", None) in auth_types):
@@ -302,7 +310,25 @@ def login_required(func: Callable[P, Awaitable[T]] = None, auth_types=None, api_
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
             timing_enabled = os.getenv("RAGFLOW_API_TIMING")
             t_start = time.perf_counter() if timing_enabled else None
-            user = _load_user(auth_types)
+            if "x-oneid-access-token" in request.headers:
+                g.user = None
+                g.auth_type = None
+                g.api_key_context = None
+                g.workbuddy_context = None
+                if AUTH_WORKBUDDY not in _normalize_auth_types(auth_types) or api_scope != KNOWLEDGE_RETRIEVE_SCOPE:
+                    raise WerkzeugForbidden("Employee identity is not allowed on this route.")
+                try:
+                    token = extract_oneid_token(request.headers)
+                    user, context = await authenticate_workbuddy(token)
+                except WorkBuddyAuthenticationError:
+                    raise WerkzeugUnauthorized("Employee identity validation failed.") from None
+                except WorkBuddyProviderUnavailable:
+                    raise ServiceUnavailable("Employee identity service unavailable.") from None
+                g.user = user
+                g.auth_type = AUTH_WORKBUDDY
+                g.workbuddy_context = context
+            else:
+                user = _load_user(auth_types)
             if timing_enabled:
                 logging.info(
                     "api_timing login_required auth_ms=%.2f path=%s",

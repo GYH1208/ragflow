@@ -54,6 +54,7 @@ BASE_URL = "http://127.0.0.1:9380"
 HOST = "127.0.0.1"
 PORT = "9382"
 HOST_API_KEY = ""
+AUTH_MODE = "api-key"
 MODE = ""
 TRANSPORT_SSE_ENABLED = True
 TRANSPORT_STREAMABLE_HTTP_ENABLED = True
@@ -125,7 +126,10 @@ class RAGFlowConnector:
     _dataset_metadata_cache: OrderedDict[str, tuple[dict, float | int]] = OrderedDict()  # "dataset_id" -> (metadata, expiry_ts)
     _document_metadata_cache: OrderedDict[tuple[str, str], tuple[dict, float | int]] = OrderedDict()
 
-    def __init__(self, base_url: str, version="v1"):
+    def __init__(self, base_url: str, version="v1", auth_mode="api-key"):
+        if auth_mode not in ("api-key", "workbuddy"):
+            raise ValueError("Invalid MCP auth mode")
+        self.auth_mode = auth_mode
         self.base_url = base_url
         self.version = version
         self.api_url = f"{self.base_url}/api/{self.version}"
@@ -153,11 +157,25 @@ class RAGFlowConnector:
             await self._async_client.aclose()
             self._async_client = None
 
+    def _credential_headers(self, credential):
+        return {"x-oneid-access-token": credential} if self.auth_mode == "workbuddy" else {"Authorization": f"Bearer {credential}"}
+
+    def _require_workbuddy_response(self, response):
+        if self.auth_mode != "workbuddy":
+            return
+        if response.status_code >= 400:
+            raise Exception([types.TextContent(type="text", text=_response_error_message(response, "Knowledge base access failed."))])
+        if "application/json" in response.headers.get("content-type", ""):
+            payload = _response_json_object(response)
+            if payload is None or payload.get("code") != 0:
+                raise Exception([types.TextContent(type="text", text=_response_error_message(response, "Knowledge base access failed."))])
+
     async def _post(self, path, json=None, stream=False, files=None, api_key: str = ""):
         if not api_key:
             return None
         client = await self._get_client()
-        res = await client.post(url=self.api_url + path, json=json, headers={"Authorization": f"Bearer {api_key}"})
+        res = await client.post(url=self.api_url + path, json=json, headers=self._credential_headers(api_key))
+        self._require_workbuddy_response(res)
         if res.status_code in (401, 403):
             self._invalidate_cached_dataset_ids(api_key)
         return res
@@ -166,7 +184,8 @@ class RAGFlowConnector:
         if not api_key:
             return None
         client = await self._get_client()
-        res = await client.get(url=self.api_url + path, params=params, headers={"Authorization": f"Bearer {api_key}"})
+        res = await client.get(url=self.api_url + path, params=params, headers=self._credential_headers(api_key))
+        self._require_workbuddy_response(res)
         if res.status_code in (401, 403):
             self._invalidate_cached_dataset_ids(api_key)
         return res
@@ -176,6 +195,8 @@ class RAGFlowConnector:
         return hashlib.sha256(api_key.encode()).digest()
 
     def _get_cached_dataset_ids(self, cache_key: bytes) -> list[str] | None:
+        if self.auth_mode == "workbuddy":
+            return None
         entry = self._dataset_id_cache.get(cache_key)
         if entry is None:
             return None
@@ -191,6 +212,8 @@ class RAGFlowConnector:
         return list(dataset_ids)
 
     def _set_cached_dataset_ids(self, cache_key: bytes, dataset_ids: list[str]) -> None:
+        if self.auth_mode == "workbuddy":
+            return
         self._dataset_id_cache[cache_key] = (tuple(dataset_ids), time.monotonic() + self._DATASET_ID_CACHE_TTL)
         self._dataset_id_cache.move_to_end(cache_key)
         if len(self._dataset_id_cache) > self._MAX_DATASET_ID_CACHE:
@@ -218,6 +241,8 @@ class RAGFlowConnector:
         return time.time() + self._CACHE_TTL + offset
 
     def _get_cached_dataset_metadata(self, dataset_id):
+        if self.auth_mode == "workbuddy":
+            return None
         entry = self._dataset_metadata_cache.get(dataset_id)
         if entry:
             data, ts = entry
@@ -227,12 +252,16 @@ class RAGFlowConnector:
         return None
 
     def _set_cached_dataset_metadata(self, dataset_id, metadata):
+        if self.auth_mode == "workbuddy":
+            return
         self._dataset_metadata_cache[dataset_id] = (metadata, self._get_expiry_timestamp())
         self._dataset_metadata_cache.move_to_end(dataset_id)
         if len(self._dataset_metadata_cache) > self._MAX_DATASET_CACHE:
             self._dataset_metadata_cache.popitem(last=False)
 
     def _get_cached_document_metadata(self, dataset_id, document_id):
+        if self.auth_mode == "workbuddy":
+            return None
         cache_key = (dataset_id, document_id)
         entry = self._document_metadata_cache.get(cache_key)
         if entry:
@@ -244,6 +273,8 @@ class RAGFlowConnector:
         return None
 
     def _set_cached_document_metadata(self, dataset_id, document_id, metadata):
+        if self.auth_mode == "workbuddy":
+            return
         cache_key = (dataset_id, document_id)
         self._document_metadata_cache[cache_key] = (metadata, self._get_expiry_timestamp())
         self._document_metadata_cache.move_to_end(cache_key)
@@ -344,6 +375,9 @@ class RAGFlowConnector:
 
     async def resolve_dataset_ids(self, *, api_key: str):
         """Resolve all accessible dataset IDs for MCP retrieval fallback."""
+        if self.auth_mode == "workbuddy":
+            datasets = await self._fetch_all_datasets(api_key=api_key)
+            return list(dict.fromkeys(item["id"] for item in datasets))
         cache_key = self._dataset_id_cache_key(api_key)
         cached_dataset_ids = self._get_cached_dataset_ids(cache_key)
         if cached_dataset_ids is not None:
@@ -746,6 +780,8 @@ class RAGFlowConnector:
 
         except Exception as e:
             # Gracefully handle metadata cache failures
+            if self.auth_mode == "workbuddy":
+                raise
             logging.error(f"Problem building the document metadata cache: {str(e)}")
             pass
 
@@ -781,7 +817,7 @@ class RAGFlowCtx:
 
 @asynccontextmanager
 async def sse_lifespan(server: Server) -> AsyncIterator[dict]:
-    ctx = RAGFlowCtx(RAGFlowConnector(base_url=BASE_URL))
+    ctx = RAGFlowCtx(RAGFlowConnector(base_url=BASE_URL, auth_mode=AUTH_MODE))
 
     logging.info("Legacy SSE application started with StreamableHTTP session manager!")
     try:
@@ -804,6 +840,16 @@ def _to_text(value: Any) -> str:
 def _extract_token_from_headers(headers: Any) -> str | None:
     if not headers or not hasattr(headers, "get"):
         return None
+
+    if AUTH_MODE == "workbuddy":
+        if hasattr(headers, "getlist"):
+            values = headers.getlist("x-oneid-access-token")
+        else:
+            values = [value for key, value in headers.items() if _to_text(key).lower() == "x-oneid-access-token"]
+        if len(values) != 1:
+            return None
+        token = _to_text(values[0])
+        return token if token and len(token) <= 32768 and "," not in token and not any(c.isspace() for c in token) else None
 
     auth_keys = ("authorization", "Authorization", b"authorization", b"Authorization")
     for key in auth_keys:
@@ -1067,6 +1113,10 @@ async def call_tool(
 
 
 def create_starlette_app():
+    if AUTH_MODE == "workbuddy" and (TRANSPORT_SSE_ENABLED or not TRANSPORT_STREAMABLE_HTTP_ENABLED):
+        raise ValueError("WorkBuddy requires Streamable HTTP only; disable SSE")
+    if AUTH_MODE == "workbuddy" and MODE != LaunchMode.HOST:
+        raise ValueError("WorkBuddy authentication requires host mode")
     routes = []
     middleware = None
     if MODE == LaunchMode.HOST:
@@ -1083,7 +1133,8 @@ def create_starlette_app():
 
                 path = scope["path"]
                 if path.startswith("/messages/") or path.startswith("/sse") or path.startswith("/mcp"):
-                    headers = dict(scope["headers"])
+                    from starlette.datastructures import Headers
+                    headers = Headers(raw=scope["headers"]) if AUTH_MODE == "workbuddy" else dict(scope["headers"])
                     token = _extract_token_from_headers(headers)
 
                     if not token:
@@ -1202,7 +1253,10 @@ def main(base_url, host, port, mode, api_key, transport_sse_enabled, transport_s
         return str(val).strip().lower() in ("1", "true", "yes", "on")
 
     global BASE_URL, HOST, PORT, MODE, HOST_API_KEY, TRANSPORT_SSE_ENABLED, TRANSPORT_STREAMABLE_HTTP_ENABLED, JSON_RESPONSE
-    global STREAMABLE_HTTP_ALLOWED_HOSTS, STREAMABLE_HTTP_ALLOWED_ORIGINS
+    global STREAMABLE_HTTP_ALLOWED_HOSTS, STREAMABLE_HTTP_ALLOWED_ORIGINS, AUTH_MODE
+    AUTH_MODE = os.environ.get("RAGFLOW_MCP_AUTH_MODE", "api-key")
+    if AUTH_MODE not in ("api-key", "workbuddy"):
+        raise click.UsageError("Invalid MCP authentication mode")
     BASE_URL = os.environ.get("RAGFLOW_MCP_BASE_URL", base_url)
     HOST = os.environ.get("RAGFLOW_MCP_HOST", host)
     PORT = os.environ.get("RAGFLOW_MCP_PORT", str(port))
@@ -1214,6 +1268,8 @@ def main(base_url, host, port, mode, api_key, transport_sse_enabled, transport_s
     STREAMABLE_HTTP_ALLOWED_HOSTS = [value.strip() for value in os.environ.get("RAGFLOW_MCP_ALLOWED_HOSTS", ",".join(STREAMABLE_HTTP_ALLOWED_HOSTS)).split(",") if value.strip()]
     STREAMABLE_HTTP_ALLOWED_ORIGINS = [value.strip() for value in os.environ.get("RAGFLOW_MCP_ALLOWED_ORIGINS", ",".join(STREAMABLE_HTTP_ALLOWED_ORIGINS)).split(",") if value.strip()]
 
+    if AUTH_MODE == "workbuddy" and MODE != LaunchMode.HOST:
+        raise click.UsageError("WorkBuddy authentication requires --mode=host")
     if MODE == LaunchMode.SELF_HOST and not HOST_API_KEY:
         raise click.UsageError("--api-key is required when --mode is 'self-host'")
 

@@ -78,7 +78,7 @@ def auth_admin():
 @check_admin_auth
 def list_users():
     try:
-        users = UserMgr.get_all_users()
+        users = UserMgr.get_all_users(request.args.get("account_source"))
         return success_response(users, "Get all users", 0)
     except Exception as e:
         return error_response(str(e), 500)
@@ -689,3 +689,100 @@ def set_logger_level():
             return error_response(f"Invalid log level: {level}", 400)
     except Exception as e:
         return error_response(str(e), 500)
+
+
+# New management routes share the existing superadmin guard and response envelope.
+from admin.server.workbuddy_service import WorkBuddyAdminService as WBAdmin
+from api.db.services.center_dataset_service import CenterDatasetService as WBCenters
+from api.db.services.workbuddy_employee_service import WorkBuddyEmployeeService as WBEmployees
+import os
+
+
+def _wb_enterprise():
+    value=os.environ.get('RAGFLOW_WORKBUDDY_TENANT_ID','')
+    if not value:
+        raise ValueError('WorkBuddy enterprise is not configured')
+    return value
+
+
+def _wb_page():
+    page=int(request.args.get('page',1));size=int(request.args.get('page_size',30))
+    if page<1 or not 1<=size<=100:
+        raise ValueError('Invalid pagination')
+    return dict(page=page,page_size=size)
+
+
+def _wb_response(operation):
+    try:
+        return success_response(operation())
+    except (ValueError,TypeError):
+        return error_response('Invalid request or unavailable WorkBuddy resource',400)
+    except Exception:
+        logging.error('WorkBuddy admin operation failed')
+        return error_response('WorkBuddy management temporarily unavailable',503)
+
+
+@admin_bp.route('/workbuddy/employees',methods=['GET'])
+@login_required
+@check_admin_auth
+def workbuddy_employees():
+    def run():
+        enabled=request.args.get('enabled')
+        if enabled not in (None,'true','false'):
+            raise ValueError('Invalid status')
+        return WBAdmin.employees(_wb_enterprise(),q=request.args.get('q',''),center_id=request.args.get('center_id'),enabled=None if enabled is None else enabled=='true',**_wb_page())
+    return _wb_response(run)
+
+
+@admin_bp.route('/workbuddy/employees/<user_id>',methods=['GET'])
+@login_required
+@check_admin_auth
+def workbuddy_employee(user_id):
+    return _wb_response(lambda: WBAdmin.employee(_wb_enterprise(),user_id))
+
+
+@admin_bp.route('/workbuddy/employees/<user_id>/enabled',methods=['PUT'])
+@login_required
+@check_admin_auth
+def workbuddy_employee_enabled(user_id):
+    def run():
+        WBAdmin.employee(_wb_enterprise(),user_id)
+        WBEmployees.set_enabled(user_id,(request.get_json(silent=True) or {}).get('enabled'),current_user.id)
+        return True
+    return _wb_response(run)
+
+
+@admin_bp.route('/workbuddy/departments',methods=['GET'])
+@admin_bp.route('/workbuddy/centers',methods=['GET'])
+@login_required
+@check_admin_auth
+def workbuddy_departments():
+    return _wb_response(lambda: WBAdmin.departments(_wb_enterprise(),request.path.endswith('/centers')))
+
+
+@admin_bp.route('/workbuddy/departments/<department_id>/center',methods=['PUT'])
+@login_required
+@check_admin_auth
+def workbuddy_center(department_id):
+    return _wb_response(lambda: WBCenters.set_center(_wb_enterprise(),department_id,(request.get_json(silent=True) or {}).get('enabled'),current_user.id))
+
+
+@admin_bp.route('/workbuddy/datasets',methods=['GET'])
+@login_required
+@check_admin_auth
+def workbuddy_datasets():
+    return _wb_response(lambda: WBAdmin.datasets(q=request.args.get('q',''),**_wb_page()))
+
+
+@admin_bp.route('/workbuddy/centers/<center_id>/datasets',methods=['GET','PUT'])
+@login_required
+@check_admin_auth
+def workbuddy_center_datasets(center_id):
+    def run():
+        enterprise=_wb_enterprise()
+        if request.method=='PUT':
+            ids=WBCenters.replace_grants(enterprise,center_id,(request.get_json(silent=True) or {}).get('dataset_ids'),current_user.id)
+        else:
+            ids=WBCenters.allowed_datasets(enterprise,center_id)
+        return {'dataset_ids':sorted(ids)}
+    return _wb_response(run)
