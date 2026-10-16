@@ -1,8 +1,128 @@
+import json
+import logging
 import time
+
 import httpx
 import pytest
 
 ISSUER = "https://oauth2.account.tencent.com/authz/oidc/v2/123"
+
+
+def timing_events(caplog):
+    return [json.loads(record.getMessage().split(" ", 1)[1]) for record in caplog.records if record.getMessage().startswith("workbuddy_token_timing ")]
+
+
+@pytest.mark.parametrize("issued_at", [900, None])
+async def test_temporary_timing_observation_only_records_verified_times(monkeypatch, caplog, issued_at):
+    monkeypatch.setenv("RAGFLOW_WORKBUDDY_TOKEN_TIMING_UNTIL", "2000")
+    monkeypatch.setattr(time, "time", lambda: 1000)
+    caplog.set_level(logging.INFO, logger="api.auth.workbuddy.oneid_client")
+    fields = {"exp": 1500, "unexpected_secret": "must-not-log"}
+    if issued_at is not None:
+        fields["iat"] = issued_at
+    client, _ = make_client(fields)
+    async with client:
+        employee = await client.verify_employee("personal-ticket")
+    assert employee.union_id == "employee-1"
+    assert timing_events(caplog) == [{"observed_at": 1000, "iat": issued_at, "exp": 1500, "remaining_seconds": 500, "lifetime_seconds": 600 if issued_at is not None else None}]
+    for private in ("personal-ticket", "server-secret", "application-secret-token", "employee-1", "must-not-log"):
+        assert private not in caplog.text
+
+
+@pytest.mark.parametrize("setting", [None, "", "invalid", "999", str(10**400)])
+async def test_timing_observation_is_disabled_without_a_future_deadline(monkeypatch, caplog, setting):
+    if setting is None:
+        monkeypatch.delenv("RAGFLOW_WORKBUDDY_TOKEN_TIMING_UNTIL", raising=False)
+    else:
+        monkeypatch.setenv("RAGFLOW_WORKBUDDY_TOKEN_TIMING_UNTIL", setting)
+    monkeypatch.setattr(time, "time", lambda: 1000)
+    caplog.set_level(logging.INFO)
+    client, _ = make_client()
+    async with client:
+        await client.verify_employee("personal-ticket")
+    assert not timing_events(caplog)
+
+
+async def test_timing_observation_stops_at_deadline(monkeypatch, caplog):
+    monkeypatch.setenv("RAGFLOW_WORKBUDDY_TOKEN_TIMING_UNTIL", "1100")
+    monkeypatch.setattr(time, "time", lambda: 1000)
+    caplog.set_level(logging.INFO)
+    client, _ = make_client({"exp": 2000})
+    async with client:
+        await client.verify_employee("personal-ticket")
+        monkeypatch.setattr(time, "time", lambda: 1100)
+        await client.verify_employee("personal-ticket")
+    assert len(timing_events(caplog)) == 1
+
+
+@pytest.mark.parametrize("fields,user", [({"active": False}, {}), ({"exp": 999}, {}), ({}, {"status": "Disabled"})])
+async def test_failed_verification_has_no_timing_event(monkeypatch, caplog, fields, user):
+    from api.auth.workbuddy.types import WorkBuddyAuthenticationError
+
+    monkeypatch.setenv("RAGFLOW_WORKBUDDY_TOKEN_TIMING_UNTIL", "2000")
+    monkeypatch.setattr(time, "time", lambda: 1000)
+    caplog.set_level(logging.INFO)
+    client, _ = make_client(fields, user_overrides=user)
+    async with client:
+        with pytest.raises(WorkBuddyAuthenticationError):
+            await client.verify_employee("personal-ticket")
+    assert not timing_events(caplog)
+
+
+async def test_timing_observation_bounds_volume_and_window(monkeypatch, caplog):
+    monkeypatch.setenv("RAGFLOW_WORKBUDDY_TOKEN_TIMING_UNTIL", "87400")
+    monkeypatch.setattr(time, "time", lambda: 1000)
+    caplog.set_level(logging.INFO)
+    client, calls = make_client({"exp": 9999999999})
+    async with client:
+        for _ in range(102):
+            await client.verify_employee("personal-ticket")
+    assert len(timing_events(caplog)) == 100
+    assert sum(r.url.path.endswith("/introspect") for r in calls) == 102
+    caplog.clear()
+    client, _ = make_client({"exp": 9999999999})
+    async with client:
+        monkeypatch.setattr(time, "time", lambda: 87400)
+        await client.verify_employee("personal-ticket")
+    assert not timing_events(caplog)
+
+
+async def test_far_future_observation_deadline_does_not_rearm_on_restart(monkeypatch, caplog):
+    monkeypatch.setenv("RAGFLOW_WORKBUDDY_TOKEN_TIMING_UNTIL", "9999999999")
+    caplog.set_level(logging.INFO)
+    for now in (1000, 87400):
+        monkeypatch.setattr(time, "time", lambda now=now: now)
+        client, _ = make_client()
+        async with client:
+            await client.verify_employee("personal-ticket")
+    assert not timing_events(caplog)
+
+
+async def test_observation_does_not_break_valid_identity_with_large_expiry(monkeypatch, caplog):
+    monkeypatch.setenv("RAGFLOW_WORKBUDDY_TOKEN_TIMING_UNTIL", "2000")
+    monkeypatch.setattr(time, "time", lambda: 1000.5)
+    caplog.set_level(logging.INFO)
+    client, _ = make_client({"exp": 10**400})
+    async with client:
+        employee = await client.verify_employee("personal-ticket")
+    assert employee.union_id == "employee-1"
+    assert timing_events(caplog)[0]["remaining_seconds"] == 10**400 - 1000
+
+
+async def test_observation_log_failure_does_not_break_authentication(monkeypatch):
+    from api.auth.workbuddy.oneid_client import logger
+
+    monkeypatch.setenv("RAGFLOW_WORKBUDDY_TOKEN_TIMING_UNTIL", "2000")
+    monkeypatch.setattr(time, "time", lambda: 1000)
+    client, _ = make_client()
+
+    def fail_logging(*args, **kwargs):
+        raise OSError("logging unavailable")
+
+    monkeypatch.setattr(logger, "info", fail_logging)
+    async with client:
+        employee = await client.verify_employee("personal-ticket")
+    assert employee.union_id == "employee-1"
 
 
 def make_client(overrides=None, user_overrides=None, dept_overrides=None, redirect=False):

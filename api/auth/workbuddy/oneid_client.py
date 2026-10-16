@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import logging
+import os
 import re
 import time
 
@@ -10,6 +12,7 @@ import httpx
 from .types import DepartmentNode, DepartmentPath, VerifiedEmployee, WorkBuddyAuthenticationError, WorkBuddyProviderUnavailable
 
 CONTACTS = "https://api.account.tencent.com/openapi/v3/contacts/"
+logger = logging.getLogger(__name__)
 
 
 def _numeric(value):
@@ -28,6 +31,20 @@ class OneIDClient:
         self._app_token = ""
         self._app_token_until = 0
         self._lock = asyncio.Lock()
+        # Opt-in, absolute deadline: restarting the service does not re-arm it.
+        try:
+            self._timing_until = int(os.getenv("RAGFLOW_WORKBUDDY_TOKEN_TIMING_UNTIL", "0"))
+            now = time.time()
+            if not now < self._timing_until <= now + 86400:
+                self._timing_until = 0
+        except ValueError:
+            self._timing_until = 0
+        self._timing_count = 0
+        if self._timing_until > time.time():
+            try:
+                logger.info("workbuddy_token_timing_enabled until=%d sample_limit=100", self._timing_until)
+            except Exception:  # noqa: BLE001, S110 -- logging itself may be unavailable
+                pass  # Optional diagnostics must not prevent client startup.
 
     async def __aenter__(self):
         return self
@@ -37,6 +54,27 @@ class OneIDClient:
 
     async def close(self):
         await self._client.aclose()
+
+    def _observe_verified_times(self, info):
+        now = time.time()
+        if now >= self._timing_until or self._timing_count >= 100:
+            return
+        now = int(now)
+        self._timing_count += 1
+        issued = info.get("iat")
+        # Explicit numeric allowlist; never log credentials, identity or raw claims.
+        logger.info(
+            "workbuddy_token_timing %s",
+            json.dumps(
+                {
+                    "observed_at": int(now),
+                    "iat": issued,
+                    "exp": info["exp"],
+                    "remaining_seconds": max(0, info["exp"] - now),
+                    "lifetime_seconds": info["exp"] - issued if issued is not None else None,
+                }
+            ),
+        )
 
     async def _json(self, url, *, token=None, form=None):
         try:
@@ -165,6 +203,10 @@ class OneIDClient:
             alias = user.get("alias_id") or profile.get("alias_id")
             if not isinstance(name, str) or not 0 < len(name) <= 100 or alias is not None and (not isinstance(alias, str) or len(alias) > 128):
                 raise WorkBuddyAuthenticationError("Invalid employee profile")
+            try:
+                self._observe_verified_times(info)
+            except Exception:  # noqa: BLE001, S110 -- keep diagnostics outside the auth decision
+                pass  # A diagnostic/logging failure must not change authentication.
             return VerifiedEmployee(conf.enterprise_id, subject, conf.issuer, conf.application_id, alias, name, user["status"], paths)
         except (KeyError, TypeError, AttributeError, ValueError):
             raise WorkBuddyAuthenticationError("Invalid OneID identity response") from None

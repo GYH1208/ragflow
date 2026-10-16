@@ -70,6 +70,14 @@ WorkBuddy 首期仅支持 Streamable HTTP；启用旧 SSE 或关闭 Streamable H
 
 ## 自动验证
 
+### 临时票据有效期观测
+
+仅在 API 服务设置 `RAGFLOW_WORKBUDDY_TOKEN_TIMING_UNTIL=<Unix 秒时间戳>` 后启用；默认关闭。截止时间必须在启动时未来 24 小时内，否则关闭。到期自动停止，每个 OneID 客户端实例最多记录 100 条。
+
+员工完整 OneID 验证通过后，日志 `workbuddy_token_timing` 只包含 `observed_at`、`iat`、`exp`、`remaining_seconds` 和 `lifetime_seconds`。时间为 UTC Unix 秒，剩余时间按整秒计算；OneID 未提供 `iat` 时，签发时间和完整有效期为 null。它不记录原始票据、密钥、员工标识或完整返回值，不改变身份/权限检查，不实现身份缓存，也不能凭相同到期时间断定是同一张票据。
+
+生产临时启用可使用独立 systemd drop-in `ragflow-server-scoped-v2.service.d/30-token-timing.conf`，仅写入上述环境变量，随后 reload 并重启 API。撤除该 drop-in 后 reload 并重启 API 可提前关闭；不删除原 `20-workbuddy.conf`。从 journal 或 API 日志按上述标记查询。实际调用工具后才有票据样本，初始化和工具列表不产生样本。
+
 新增测试覆盖身份、企业/应用绑定、并发建号、管理 API、中心授权、默认拒绝、四个 MCP 工具、数据所有者、跨库切片/图片和撤权。
 
 Peewee 模型与服务单测使用临时 SQLite；真实数据库测试单独运行。MySQL 集成必须显式设置 `RAGFLOW_WORKBUDDY_RUN_INTEGRATION=1` 和受限环境中的 `RAGFLOW_WORKBUDDY_TEST_DATABASE_URL`，连接库名必须是 `ragflow_wb_test_` 加 16 位十六进制字符。该临时库须由测试管理员预先创建，测试结束删除；禁止指向业务数据库。不要将含密码的 URL 粘贴到终端共享记录、聊天或提交文件。
