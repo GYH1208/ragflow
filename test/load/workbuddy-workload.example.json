@@ -1,0 +1,31 @@
+[
+  {
+    "tool": "search_documents",
+    "arguments": {
+      "query": "软件",
+      "dataset_ids": ["REPLACE_WITH_AUTHORIZED_DATASET_ID"],
+      "limit": 10
+    },
+    "min_results": 1
+  },
+  {
+    "tool": "ragflow_retrieval",
+    "arguments": {
+      "question": "软件相关流程有哪些要求？",
+      "dataset_ids": ["REPLACE_WITH_AUTHORIZED_DATASET_ID"],
+      "page_size": 5,
+      "top_k": 1024
+    },
+    "min_results": 1
+  },
+  {
+    "tool": "get_document_chunks",
+    "arguments": {
+      "dataset_id": "REPLACE_WITH_AUTHORIZED_DATASET_ID",
+      "document_id": "REPLACE_WITH_AUTHORIZED_DOCUMENT_ID",
+      "page": 1,
+      "page_size": 5
+    },
+    "min_results": 1
+  }
+]
