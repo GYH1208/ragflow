@@ -1,4 +1,4 @@
-"""Per-request external authentication and current database authorization."""
+"""Bounded external identity validation and per-request database authorization."""
 
 import asyncio
 import json

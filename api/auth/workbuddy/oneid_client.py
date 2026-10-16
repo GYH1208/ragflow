@@ -1,11 +1,13 @@
-"""Online token validation and live directory lookup against pinned OneID URLs."""
+"""Bounded identity caches backed by online checks against pinned OneID URLs."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import time
+from collections import OrderedDict
 
 import httpx
 
@@ -24,6 +26,8 @@ def _numeric(value):
 
 
 class OneIDClient:
+    CACHE_MAX_ENTRIES = 1024
+
     def __init__(self, config, transport=None):
         self.config = config
         self._client = httpx.AsyncClient(timeout=5, follow_redirects=False, transport=transport)
@@ -31,6 +35,12 @@ class OneIDClient:
         self._app_token = ""
         self._app_token_until = 0
         self._lock = asyncio.Lock()
+        self._tickets = OrderedDict()
+        self._profiles = OrderedDict()
+        # Fixed lock stripes bound memory even for a flood of distinct credentials.
+        # Separate lock sets avoid a token/profile hash collision deadlocking.
+        self._ticket_locks = [asyncio.Lock() for _ in range(256)]
+        self._profile_locks = [asyncio.Lock() for _ in range(256)]
         # Opt-in, absolute deadline: restarting the service does not re-arm it.
         try:
             self._timing_until = int(os.getenv("RAGFLOW_WORKBUDDY_TOKEN_TIMING_UNTIL", "0"))
@@ -53,7 +63,29 @@ class OneIDClient:
         await self.close()
 
     async def close(self):
+        self._tickets.clear()
+        self._profiles.clear()
         await self._client.aclose()
+
+    @staticmethod
+    def _cached(cache, key):
+        entry = cache.get(key)
+        if entry is None:
+            return None
+        deadline, value = entry
+        if time.monotonic() >= deadline:
+            cache.pop(key, None)
+            return None
+        cache.move_to_end(key)
+        return value
+
+    def _remember(self, cache, key, deadline, value):
+        if deadline <= time.monotonic():
+            return
+        cache[key] = (deadline, value)
+        cache.move_to_end(key)
+        while len(cache) > self.CACHE_MAX_ENTRIES:
+            cache.popitem(last=False)
 
     def _observe_verified_times(self, info):
         now = time.time()
@@ -162,51 +194,98 @@ class OneIDClient:
             leaf = str(member.get("department_id", ""))[:64]
         return DepartmentPath(leaf, member.get("is_main_department") is True, complete, tuple(reversed(nodes)))
 
+    async def _verify_ticket(self, token):
+        await self._metadata()
+        conf = self.config
+        info = await self._json(conf.issuer + "/introspect", form={"token": token, "token_type_hint": "access_token", "client_id": conf.application_id, "client_secret": conf.client_secret})
+        now = time.time()
+        if (
+            info.get("active") is not True
+            or info.get("client_id") not in conf.requesting_clients
+            or info.get("aud") not in (conf.application_id, [conf.application_id])
+            or info.get("iss") != conf.issuer
+            or info.get("tid") != conf.enterprise_id
+            or type(info.get("exp")) is not int
+            or info["exp"] <= now
+            or any(type(info[k]) is not int or info[k] > now for k in ("iat", "nbf") if k in info)
+            or str(info.get("token_type", "Bearer")).lower() != "bearer"
+        ):
+            raise WorkBuddyAuthenticationError("Employee credential validation failed")
+        subject = info.get("sub")
+        if not isinstance(subject, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", subject) or subject in conf.requesting_clients or subject == conf.application_id:
+            raise WorkBuddyAuthenticationError("Employee subject required")
+        profile = await self._json(conf.issuer + "/userinfo", token=token)
+        tids = [profile[k] for k in ("tid", "account_id") if k in profile]
+        if profile.get("sub") != subject or not tids or any(t != conf.enterprise_id for t in tids):
+            raise WorkBuddyAuthenticationError("Employee profile mismatch")
+        # Store only the verified identity and bounded fallback display fields.
+        fallback = {key: profile.get(key) for key in ("name", "alias_id") if isinstance(profile.get(key), str)}
+        return {"sub": subject, "exp": info["exp"], "iat": info.get("iat"), "profile": fallback}
+
+    async def _directory_profile(self, ticket):
+        conf = self.config
+        subject, profile = ticket["sub"], ticket["profile"]
+        app = await self._application_token()
+        result = await self._json(CONTACTS + "users/" + subject + "?ignore_status=false", token=app)
+        user = result.get("data", {}).get("user", {})
+        if type(result.get("code")) is not int or result["code"] != 0 or user.get("union_id") != subject or user.get("status") not in ("Enable", "Enabled"):
+            raise WorkBuddyAuthenticationError("Employee directory account is not enabled")
+        members = user.get("departments", [])
+        if not isinstance(members, list) or len(members) > 16 or any(not isinstance(m, dict) for m in members):
+            members = []
+        cache = {}
+        paths = tuple([await self._path(m, app, cache) for m in members])
+        name = user.get("name") or profile.get("name") or subject
+        alias = user.get("alias_id") or profile.get("alias_id")
+        if not isinstance(name, str) or not 0 < len(name) <= 100 or alias is not None and (not isinstance(alias, str) or len(alias) > 128):
+            raise WorkBuddyAuthenticationError("Invalid employee profile")
+        return VerifiedEmployee(conf.enterprise_id, subject, conf.issuer, conf.application_id, alias, name, user["status"], paths)
+
+    async def _employee_profile(self, ticket):
+        key = (self.config.enterprise_id, ticket["sub"])
+        async with self._profile_locks[hash(key) % len(self._profile_locks)]:
+            employee = self._cached(self._profiles, key)
+            if employee is None:
+                deadline = time.monotonic() + self.config.profile_cache_ttl_seconds
+                employee = await self._directory_profile(ticket)
+                # Incomplete lookups are retried on the next request, not frozen for a day.
+                if employee.paths and all(path.complete for path in employee.paths) and sum(path.is_main for path in employee.paths) == 1:
+                    self._remember(self._profiles, key, deadline, employee)
+            return employee
+
     async def verify_employee(self, token):
         if not self.config.enabled or not isinstance(token, str) or not token or len(token) > 32768 or "," in token or any(c.isspace() for c in token):
             raise WorkBuddyAuthenticationError("Invalid employee credential")
-        try:
-            await self._metadata()
-            conf = self.config
-            info = await self._json(conf.issuer + "/introspect", form={"token": token, "token_type_hint": "access_token", "client_id": conf.application_id, "client_secret": conf.client_secret})
-            now = time.time()
-            if (
-                info.get("active") is not True
-                or info.get("client_id") not in conf.requesting_clients
-                or info.get("aud") not in (conf.application_id, [conf.application_id])
-                or info.get("iss") != conf.issuer
-                or info.get("tid") != conf.enterprise_id
-                or type(info.get("exp")) is not int
-                or info["exp"] <= now
-                or any(type(info[k]) is not int or info[k] > now for k in ("iat", "nbf") if k in info)
-                or str(info.get("token_type", "Bearer")).lower() != "bearer"
-            ):
-                raise WorkBuddyAuthenticationError("Employee credential validation failed")
-            subject = info.get("sub")
-            if not isinstance(subject, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", subject) or subject in conf.requesting_clients or subject == conf.application_id:
-                raise WorkBuddyAuthenticationError("Employee subject required")
-            profile = await self._json(conf.issuer + "/userinfo", token=token)
-            tids = [profile[k] for k in ("tid", "account_id") if k in profile]
-            if profile.get("sub") != subject or not tids or any(t != conf.enterprise_id for t in tids):
-                raise WorkBuddyAuthenticationError("Employee profile mismatch")
-            app = await self._application_token()
-            result = await self._json(CONTACTS + "users/" + subject + "?ignore_status=false", token=app)
-            user = result.get("data", {}).get("user", {})
-            if type(result.get("code")) is not int or result["code"] != 0 or user.get("union_id") != subject or user.get("status") not in ("Enable", "Enabled"):
-                raise WorkBuddyAuthenticationError("Employee directory account is not enabled")
-            members = user.get("departments", [])
-            if not isinstance(members, list) or len(members) > 16 or any(not isinstance(m, dict) for m in members):
-                members = []
-            cache = {}
-            paths = tuple([await self._path(m, app, cache) for m in members])
-            name = user.get("name") or profile.get("name") or subject
-            alias = user.get("alias_id") or profile.get("alias_id")
-            if not isinstance(name, str) or not 0 < len(name) <= 100 or alias is not None and (not isinstance(alias, str) or len(alias) > 128):
-                raise WorkBuddyAuthenticationError("Invalid employee profile")
+        # Original credentials never become cache keys or cache values.
+        key = hashlib.sha256(token.encode()).digest()
+        async with self._ticket_locks[key[0]]:
             try:
-                self._observe_verified_times(info)
-            except Exception:  # noqa: BLE001, S110 -- keep diagnostics outside the auth decision
-                pass  # A diagnostic/logging failure must not change authentication.
-            return VerifiedEmployee(conf.enterprise_id, subject, conf.issuer, conf.application_id, alias, name, user["status"], paths)
-        except (KeyError, TypeError, AttributeError, ValueError):
-            raise WorkBuddyAuthenticationError("Invalid OneID identity response") from None
+                ticket = self._cached(self._tickets, key)
+                if ticket is not None and ticket["exp"] <= time.time():
+                    self._tickets.pop(key, None)
+                    ticket = None
+                fresh = ticket is None
+                if not fresh:
+                    deadline = self._tickets[key][0]
+                if fresh:
+                    started = time.monotonic()
+                    ticket = await self._verify_ticket(token)
+                    # Compare before subtraction to avoid converting huge integer exp to float.
+                    ttl = self.config.token_cache_ttl_seconds
+                    wall = time.time()
+                    remaining = ttl if ticket["exp"] >= wall + ttl else max(0, ticket["exp"] - wall)
+                    deadline = min(started + ttl, time.monotonic() + remaining)
+                employee = await self._employee_profile(ticket)
+                # Recheck after any queued/network work; no stale credential may be returned.
+                if ticket["exp"] <= time.time() or (self.config.token_cache_ttl_seconds > 0 and time.monotonic() >= deadline):
+                    self._tickets.pop(key, None)
+                    raise WorkBuddyAuthenticationError("Employee credential expired")
+                if fresh:
+                    self._remember(self._tickets, key, deadline, ticket)
+                    try:
+                        self._observe_verified_times(ticket)
+                    except Exception:  # noqa: BLE001, S110 -- diagnostics do not decide authentication
+                        pass
+                return employee
+            except (KeyError, TypeError, AttributeError, ValueError):
+                raise WorkBuddyAuthenticationError("Invalid OneID identity response") from None

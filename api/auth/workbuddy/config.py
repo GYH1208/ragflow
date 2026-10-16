@@ -13,8 +13,12 @@ class WorkBuddyConfig:
     application_id: str = ""
     client_secret: str = field(default="", repr=False)
     requesting_clients: frozenset[str] = frozenset({"codebuddy"})
+    token_cache_ttl_seconds: int = 86400
+    profile_cache_ttl_seconds: int = 86400
 
     def __post_init__(self):
+        if any(type(ttl) is not int or not 0 <= ttl <= 86400 for ttl in (self.token_cache_ttl_seconds, self.profile_cache_ttl_seconds)):
+            raise ValueError("WorkBuddy cache TTL must be an integer between 0 and 86400 seconds")
         if self.enabled and (
             not re.fullmatch(r"[0-9]{1,20}", self.enterprise_id)
             or self.issuer != "https://oauth2.account.tencent.com/authz/oidc/v2/" + self.enterprise_id
@@ -37,4 +41,6 @@ class WorkBuddyConfig:
             os.getenv("RAGFLOW_WORKBUDDY_APPLICATION_ID", ""),
             os.getenv("RAGFLOW_WORKBUDDY_CLIENT_SECRET", ""),
             frozenset(x.strip() for x in os.getenv("RAGFLOW_WORKBUDDY_REQUESTING_CLIENTS", "codebuddy").split(",") if x.strip()),
+            int(os.getenv("RAGFLOW_WORKBUDDY_TOKEN_CACHE_TTL_SECONDS", "86400")),
+            int(os.getenv("RAGFLOW_WORKBUDDY_PROFILE_CACHE_TTL_SECONDS", "86400")),
         )

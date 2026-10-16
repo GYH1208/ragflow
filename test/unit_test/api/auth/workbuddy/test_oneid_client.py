@@ -159,7 +159,9 @@ def make_client(overrides=None, user_overrides=None, dept_overrides=None, redire
             data = dict(code=0, data=dict(department=node))
         return httpx.Response(200, json=data)
 
-    conf = WorkBuddyConfig(True, ISSUER, "123", "i-test", "server-secret", frozenset({"codebuddy"}))
+    # These tests exercise every online validation and diagnostic event.
+    # Cache-enabled behavior is covered separately in test_identity_cache.py.
+    conf = WorkBuddyConfig(True, ISSUER, "123", "i-test", "server-secret", frozenset({"codebuddy"}), token_cache_ttl_seconds=0, profile_cache_ttl_seconds=0)
     return OneIDClient(conf, transport=httpx.MockTransport(handler)), calls
 
 
