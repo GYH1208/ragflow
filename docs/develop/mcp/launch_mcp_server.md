@@ -68,6 +68,35 @@ For deployments that use only Streamable HTTP, pass `--no-transport-sse-enabled`
 
 When running from source, the server loads `.env` from its script directory or the nearest parent directory. A local `mcp/server/.env` can contain `RAGFLOW_MCP_TRANSPORT_SSE_ENABLED=false`. Environment values override command-line transport flags; an existing process environment value takes precedence over `.env`. Keep this local deployment file outside version control.
 
+### Cumulative tool call counts
+
+The server saves one cumulative integer per tool in
+`logs/mcp-tool-counts-<port>.json` under the project directory. For example,
+port 9396 uses `logs/mcp-tool-counts-9396.json`. Override the file location with
+`RAGFLOW_MCP_TOOL_COUNTS_FILE`; use a persistent mounted directory in Docker
+and include this file in backups. Do not delete it during log cleanup.
+
+Each known tool call that enters the execution handler adds one, including
+calls that subsequently fail. Initialization, tool discovery, notifications,
+unknown tools, and requests rejected before execution do not count. Only tool
+names and counts are stored, without arguments, identities, timestamps, or
+durations. These are lifetime totals, not daily history, and start at zero when
+the feature is enabled; earlier HTTP access logs cannot supply historical totals.
+
+The request handler increments memory only. A background task writes changed
+counts every 10 seconds using an atomic replacement; a graceful shutdown also
+flushes pending counts. Restarting reloads the saved totals. A process crash or
+power loss can lose increments since the last successful save; failed writes
+are logged and retried without blocking tool execution. Invalid existing data
+causes startup to fail rather than silently resetting the counts.
+
+Use one file per server process. A file lock prevents simultaneous writers to
+the same file (Unix hosts). Read the latest persisted totals with:
+
+```bash
+python -m json.tool logs/mcp-tool-counts-9396.json
+```
+
 ### Launch from Docker
 
 #### 1. Enable MCP server

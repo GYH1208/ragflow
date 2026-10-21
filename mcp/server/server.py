@@ -22,12 +22,14 @@ import logging
 import os
 import random
 import re
+import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from enum import StrEnum
 from functools import wraps
+from pathlib import Path
 from typing import Any
 
 import click
@@ -62,6 +64,94 @@ JSON_RESPONSE = True
 STREAMABLE_HTTP_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 STREAMABLE_HTTP_ALLOWED_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
 MCP_IMAGE_MAX_BYTES = int(os.environ.get("RAGFLOW_MCP_IMAGE_MAX_BYTES", str(10 * 1024 * 1024)))
+TOOL_COUNTS_FILE = None
+TOOL_CALL_COUNTS = None
+TOOL_NAMES = ("ragflow_retrieval", "search_documents", "get_document_chunks", "get_chunk_image")
+logger = logging.getLogger(__name__)
+
+
+class ToolCallCounts:
+    """Single-process counters; all increments and snapshots run on the event loop."""
+
+    def __init__(self, path, interval=10):
+        self.path = Path(path)
+        self.interval = interval
+        self.counts = dict.fromkeys(TOOL_NAMES, 0)
+        self._saved = None
+        self._stop = asyncio.Event()
+        self._flush_lock = asyncio.Lock()
+
+    async def __aenter__(self):
+        import fcntl
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file_lock = self.path.with_suffix(self.path.suffix + ".lock").open("a")
+        try:
+            fcntl.flock(self._file_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if self.path.exists():
+                saved = json.loads(self.path.read_text())
+                if not isinstance(saved, dict) or any(not isinstance(k, str) or type(v) is not int or v < 0 for k, v in saved.items()):
+                    raise ValueError(f"Invalid MCP tool counts file: {self.path}")
+                self.counts.update(saved)
+            # Validate storage before accepting requests; never silently reset bad data.
+            snapshot = self.counts.copy()
+            await asyncio.to_thread(self._write, snapshot)
+            self._saved = snapshot
+            self._task = asyncio.create_task(self._run())
+        except BaseException:
+            self._file_lock.close()
+            raise
+        return self
+
+    def increment(self, name):
+        if name in TOOL_NAMES:
+            self.counts[name] += 1
+
+    def _write(self, snapshot):
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=self.path.parent, prefix=self.path.name + ".", delete=False) as output:
+                temporary = Path(output.name)
+                json.dump(snapshot, output, indent=2)
+                output.write("\n")
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, self.path)
+            directory = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    async def flush(self):
+        async with self._flush_lock:
+            snapshot = self.counts.copy()
+            if snapshot == self._saved:
+                return
+            try:
+                await asyncio.to_thread(self._write, snapshot)
+            except OSError:
+                logger.exception("Unable to save MCP tool counts to %s; counts remain in memory for retry", self.path)
+            else:
+                self._saved = snapshot
+
+    async def _run(self):
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.interval)
+            except TimeoutError:
+                await self.flush()
+
+    async def __aexit__(self, *exc):
+        try:
+            self._stop.set()
+            await self._task
+            await self.flush()
+        finally:
+            self._file_lock.close()
 
 
 _CREDENTIAL_MESSAGE_PATTERN = re.compile(
@@ -1059,6 +1149,8 @@ async def call_tool(
     connector: RAGFlowConnector,
     api_key: str,
 ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+    if TOOL_CALL_COUNTS is not None:
+        TOOL_CALL_COUNTS.increment(name)
     if name == "ragflow_retrieval":
         document_ids = arguments.get("document_ids", [])
         dataset_ids = arguments.get("dataset_ids", [])
@@ -1206,11 +1298,24 @@ def create_starlette_app():
             ]
         )
 
+    @asynccontextmanager
+    async def application_lifespan(starlette_app):
+        global TOOL_CALL_COUNTS
+        try:
+            async with AsyncExitStack() as stack:
+                if TOOL_COUNTS_FILE is not None:
+                    TOOL_CALL_COUNTS = await stack.enter_async_context(ToolCallCounts(TOOL_COUNTS_FILE))
+                if streamablehttp_lifespan is not None:
+                    await stack.enter_async_context(streamablehttp_lifespan(starlette_app))
+                yield
+        finally:
+            TOOL_CALL_COUNTS = None
+
     return Starlette(
         debug=False,
         routes=routes,
         middleware=middleware,
-        lifespan=streamablehttp_lifespan,
+        lifespan=application_lifespan,
     )
 
 
@@ -1253,13 +1358,14 @@ def main(base_url, host, port, mode, api_key, transport_sse_enabled, transport_s
         return str(val).strip().lower() in ("1", "true", "yes", "on")
 
     global BASE_URL, HOST, PORT, MODE, HOST_API_KEY, TRANSPORT_SSE_ENABLED, TRANSPORT_STREAMABLE_HTTP_ENABLED, JSON_RESPONSE
-    global STREAMABLE_HTTP_ALLOWED_HOSTS, STREAMABLE_HTTP_ALLOWED_ORIGINS, AUTH_MODE
+    global STREAMABLE_HTTP_ALLOWED_HOSTS, STREAMABLE_HTTP_ALLOWED_ORIGINS, AUTH_MODE, TOOL_COUNTS_FILE
     AUTH_MODE = os.environ.get("RAGFLOW_MCP_AUTH_MODE", "api-key")
     if AUTH_MODE not in ("api-key", "workbuddy"):
         raise click.UsageError("Invalid MCP authentication mode")
     BASE_URL = os.environ.get("RAGFLOW_MCP_BASE_URL", base_url)
     HOST = os.environ.get("RAGFLOW_MCP_HOST", host)
     PORT = os.environ.get("RAGFLOW_MCP_PORT", str(port))
+    TOOL_COUNTS_FILE = Path(os.environ.get("RAGFLOW_MCP_TOOL_COUNTS_FILE", str(Path(__file__).resolve().parents[2] / "logs" / f"mcp-tool-counts-{PORT}.json")))
     MODE = os.environ.get("RAGFLOW_MCP_LAUNCH_MODE", mode)
     HOST_API_KEY = os.environ.get("RAGFLOW_MCP_HOST_API_KEY", api_key)
     TRANSPORT_SSE_ENABLED = parse_bool_flag("RAGFLOW_MCP_TRANSPORT_SSE_ENABLED", transport_sse_enabled)

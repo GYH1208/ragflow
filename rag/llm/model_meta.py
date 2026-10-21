@@ -57,6 +57,35 @@ class Base(ABC):
         return self._format_model_list(raw_model_list)
 
 
+class DeepSeek(Base):
+    _FACTORY_NAME = "DeepSeek"
+
+    def _get_model_list_url(self):
+        return (self.base_url or "https://api.deepseek.com").rstrip("/") + "/models"
+
+    def _format_model_list(self, raw_model_list):
+        models = raw_model_list.get("data") if isinstance(raw_model_list, dict) else None
+        if not isinstance(models, list):
+            return []
+        result = []
+        for model in models:
+            if not isinstance(model, dict) or not model.get("id"):
+                continue
+            model_types = [LLMType.CHAT.value]
+            if "image" in (model.get("input_modalities") or []):
+                model_types.append(LLMType.IMAGE2TEXT.value)
+            features = ["is_tools"]
+            if (model.get("effort") or {}).get("supported_levels"):
+                features.append("thinking")
+            result.append({
+                "name": model["id"],
+                "model_types": model_types,
+                "features": features,
+                "max_tokens": model.get("context_window") or 8192,
+            })
+        return result
+
+
 class VolcEngine(Base):
     _FACTORY_NAME = "VolcEngine"
 

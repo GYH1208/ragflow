@@ -1188,6 +1188,14 @@
             "url": "https://api.deepseek.com/v1",
             "llm": [
                 {
+                    "llm_name": "deepseek-flash",
+                    "tags": "LLM,CHAT,IMAGE2TEXT,",
+                    "max_tokens": 1048576,
+                    "model_type": ["chat", "image2text"],
+                    "is_tools": true,
+                    "thinking": true
+                },
+                {
                     "llm_name": "deepseek-v4-flash",
                     "tags": "LLM,CHAT,",
                     "max_tokens": 1000000,
