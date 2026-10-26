@@ -150,6 +150,53 @@ def test_team_member_parse_documents_uses_dataset_owner_tenant(document_api_modu
     assert deleted == [({"doc_id": "doc-1"}, "idx-owner-1", "kb-1")]
 
 
+def test_ingest_continues_after_one_pdf_fails_to_queue(document_api_module, monkeypatch):
+    module = document_api_module
+    docs = {name: _Document(module.TaskStatus.UNSTART.value, document_id=name) for name in ("bad", "good")}
+    updates = []
+    queued = []
+    monkeypatch.setattr(module.DocumentService, "accessible", lambda *_args: True)
+    monkeypatch.setattr(module.DocumentService, "get_tenant_id", lambda *_args: "owner-1")
+    monkeypatch.setattr(module.DocumentService, "get_by_id", lambda doc_id: (True, docs[doc_id]))
+    monkeypatch.setattr(module.DocumentService, "try_start_parse", lambda *_args: True)
+    monkeypatch.setattr(module.DocumentService, "update_by_id", lambda doc_id, data: updates.append((doc_id, data)))
+    monkeypatch.setattr(module.DocumentService, "run", lambda _tenant, doc, _map: (_ for _ in ()).throw(ValueError("PDF has no readable pages")) if doc["id"] == "bad" else queued.append(doc["id"]))
+    monkeypatch.setattr(module.TaskService, "filter_delete", lambda *_args: None)
+    monkeypatch.setattr(module.settings, "docStoreConn", SimpleNamespace(index_exist=lambda *_args: False))
+
+    code, message = module._run_sync("owner-1", {"doc_ids": ["bad", "good"], "run": 1})
+
+    assert queued == ["good"]
+    assert code == module.RetCode.DATA_ERROR
+    assert "PDF has no readable pages" in message
+    assert any(doc_id == "bad" and data.get("run") == module.TaskStatus.FAIL.value for doc_id, data in updates)
+
+
+def test_dataset_parse_reports_bad_pdf_and_queues_other_document(document_api_module, monkeypatch):
+    module = document_api_module
+    docs = {name: _Document(module.TaskStatus.UNSTART.value, document_id=name) for name in ("bad", "good")}
+    updates = []
+    queued = []
+    _allow_team_member(monkeypatch, module)
+    monkeypatch.setattr(module, "get_request_json", lambda: _AwaitableValue({"document_ids": ["bad", "good"]}))
+    monkeypatch.setattr(module, "thread_pool_exec", _run_inline)
+    monkeypatch.setattr(module.DocumentService, "query", lambda **kwargs: [docs[kwargs["id"]]])
+    monkeypatch.setattr(module.DocumentService, "get_by_id", lambda doc_id: (True, docs[doc_id]))
+    monkeypatch.setattr(module.DocumentService, "try_start_parse", lambda *_args: True)
+    monkeypatch.setattr(module.DocumentService, "update_by_id", lambda doc_id, data: updates.append((doc_id, data)))
+    monkeypatch.setattr(module.DocumentService, "run", lambda _tenant, doc, _map: (_ for _ in ()).throw(ValueError("PDF has no readable pages")) if doc["id"] == "bad" else queued.append(doc["id"]))
+    monkeypatch.setattr(module.TaskService, "filter_delete", lambda *_args: None)
+    monkeypatch.setattr(module.settings, "docStoreConn", SimpleNamespace(index_exist=lambda *_args: False))
+
+    result = _run(module.parse_documents("member-2", "kb-1"))
+
+    assert result["code"] == 0
+    assert result["data"]["success_count"] == 1
+    assert "PDF has no readable pages" in result["data"]["errors"][0]
+    assert queued == ["good"]
+    assert any(doc_id == "bad" and data.get("run") == module.TaskStatus.FAIL.value for doc_id, data in updates)
+
+
 def test_team_member_stop_parse_documents_cleans_owner_index(document_api_module, monkeypatch):
     module = document_api_module
     document = _Document(module.TaskStatus.RUNNING.value)

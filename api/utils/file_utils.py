@@ -54,10 +54,12 @@ def normalize_knowledge_upload_path(raw_path: str, expected_filename: str, *, ma
 
     normalized = raw_path.replace("\\", "/")
     raw_segments = normalized.split("/")
-    if any(segment in {".", ".."} for segment in raw_segments):
+    segments = [segment.strip() for segment in raw_segments[:-1] if segment]
+    if any(segment in {".", ".."} for segment in segments) or raw_segments[-1] in {".", ".."}:
         raise ValueError("Upload path contains traversal segments.")
-
-    segments = [segment for segment in raw_segments if segment]
+    if any(not segment for segment in segments):
+        raise ValueError("Upload path contains an empty folder name.")
+    segments.append(raw_segments[-1])
     if not segments or segments[-1] != expected_filename:
         raise ValueError("Upload path basename does not match the uploaded filename.")
     if len(segments) - 1 > max_depth:

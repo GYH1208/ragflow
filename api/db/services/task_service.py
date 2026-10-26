@@ -418,8 +418,8 @@ def queue_tasks(
     if doc["type"] == FileType.PDF.value:
         file_bin = settings.STORAGE_IMPL.get(bucket, name)
         pages = PdfParser.total_page_number(doc["name"], file_bin)
-        if pages is None:
-            pages = 0
+        if pages is None or pages <= 0:
+            raise ValueError("PDF has no readable pages.")
         page_size = doc["parser_config"].get("task_page_size") or 12
         if doc["parser_id"] == "paper":
             page_size = doc["parser_config"].get("task_page_size") or 22
@@ -435,6 +435,8 @@ def queue_tasks(
                 task["from_page"] = p
                 task["to_page"] = min(p + page_size, e)
                 parse_task_array.append(task)
+        if not parse_task_array:
+            raise ValueError("PDF page selection contains no readable pages.")
 
     elif doc["parser_id"] == "table":
         file_bin = settings.STORAGE_IMPL.get(bucket, name)

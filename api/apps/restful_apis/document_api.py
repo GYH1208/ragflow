@@ -1438,6 +1438,7 @@ def _run_sync(user_id:str, req):
             return RetCode.AUTHENTICATION_ERROR, "No authorization."
 
     kb_table_num_map = {}
+    parse_errors = []
     for doc_id in req["doc_ids"]:
         info = {"run": str(req["run"]), "progress": 0}
         rerun_with_delete = str(req["run"]) == TaskStatus.RUNNING.value and req.get("delete", False)
@@ -1483,8 +1484,19 @@ def _run_sync(user_id:str, req):
                 doc.parser_config["metadata"] = kb.parser_config.get("metadata", {})
                 DocumentService.update_parser_config(doc.id, doc.parser_config)
             doc_dict = doc.to_dict()
-            DocumentService.run(doc_tenant_id, doc_dict, kb_table_num_map)
+            try:
+                DocumentService.run(doc_tenant_id, doc_dict, kb_table_num_map)
+            except Exception as exc:
+                logging.getLogger(__name__).exception("Failed to start parsing document %s", doc_id)
+                DocumentService.update_by_id(doc_id, {
+                    "run": TaskStatus.FAIL.value,
+                    "progress": -1,
+                    "progress_msg": str(exc),
+                })
+                parse_errors.append(f"{getattr(doc, 'name', doc_id)}: {exc}")
 
+    if parse_errors:
+        return RetCode.DATA_ERROR, "; ".join(parse_errors)
     return None, None
 
 
@@ -1589,7 +1601,17 @@ async def parse_documents(tenant_id, dataset_id):
                     settings.docStoreConn.delete({"doc_id": doc_id}, search.index_name(dataset_tenant_id), doc.kb_id)
 
                 doc_dict = doc.to_dict()
-                DocumentService.run(dataset_tenant_id, doc_dict, kb_table_num_map)
+                try:
+                    DocumentService.run(dataset_tenant_id, doc_dict, kb_table_num_map)
+                except Exception as exc:
+                    logging.getLogger(__name__).exception("Failed to start parsing document %s", doc_id)
+                    DocumentService.update_by_id(doc_id, {
+                        "run": TaskStatus.FAIL.value,
+                        "progress": -1,
+                        "progress_msg": str(exc),
+                    })
+                    errors.append(f"{getattr(doc, 'name', doc_id)}: {exc}")
+                    continue
                 success_count += 1
 
             result = {"success_count": success_count}

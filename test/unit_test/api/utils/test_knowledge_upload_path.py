@@ -26,6 +26,17 @@ def test_preserves_unicode_folder_names():
     ) == ["2、二级文件", "制度文件", "审批流程.docx"]
 
 
+def test_trims_line_breaks_around_folder_names():
+    assert normalize_knowledge_upload_path(
+        "01 换能器与阵列设计\r\n/论文.pdf", "论文.pdf"
+    ) == ["01 换能器与阵列设计", "论文.pdf"]
+
+
+def test_rejects_traversal_after_folder_name_trimming():
+    with pytest.raises(ValueError, match="traversal"):
+        normalize_knowledge_upload_path("safe/..\r\n/file.txt", "file.txt")
+
+
 def test_normalizes_backslashes_and_duplicate_separators():
     assert normalize_knowledge_upload_path(
         r"一级\二级//file.txt",

@@ -18,6 +18,7 @@ import importlib.util
 import sys
 import types
 
+import pytest
 import xxhash
 
 
@@ -68,3 +69,17 @@ def test_changed_content_version_produces_a_fresh_digest():
     new_digest = build_document_task_digest(config.copy(), task, content_version="new-fingerprint")
 
     assert new_digest != old_digest
+
+
+def test_unreadable_pdf_does_not_enter_running_state(monkeypatch):
+    from api.db.services import task_service
+
+    monkeypatch.setattr(task_service.settings, "STORAGE_IMPL", types.SimpleNamespace(get=lambda *_args: b"broken"))
+    monkeypatch.setattr(task_service.PdfParser, "total_page_number", lambda *_args: None)
+    monkeypatch.setattr(task_service.DocumentService, "begin2parse", lambda *_args: pytest.fail("invalid PDF was queued"))
+
+    with pytest.raises(ValueError, match="PDF.*page"):
+        task_service.queue_tasks(
+            {"id": "broken", "name": "broken.pdf", "type": task_service.FileType.PDF.value, "parser_id": "naive", "parser_config": {}},
+            "bucket", "broken.pdf", 0,
+        )
