@@ -139,31 +139,40 @@ jest.mock('../knowledge-entry-action-cell', () => ({
   KnowledgeEntryActionCell: () => <div>actions</div>,
 }));
 
-test('opens folders and only exposes move/delete when a folder is selected', () => {
-  render(React.createElement(KnowledgeFileBrowser));
+// jsdom does not apply Tailwind breakpoints, so both responsive layouts exist.
+test.each([
+  ['mobile', 0],
+  ['desktop', 1],
+] as const)(
+  'opens folders and only exposes move/delete in the %s layout',
+  (_layout, index) => {
+    render(React.createElement(KnowledgeFileBrowser));
 
-  expect(screen.getByText('制度文件')).toBeInTheDocument();
-  expect(screen.getByText('A.docx')).toBeInTheDocument();
-  expect(screen.getAllByRole('switch')).toHaveLength(1);
+    expect(screen.getAllByText('制度文件')).toHaveLength(2);
+    expect(screen.getAllByText('A.docx')).toHaveLength(2);
+    expect(screen.getAllByRole('switch')).toHaveLength(2);
 
-  fireEvent.click(screen.getByText('制度文件'));
-  expect(mockQueryParams.at(-1)).toEqual(
-    expect.objectContaining({ datasetId: 'kb-1', folderId: 'folder-1' }),
-  );
-  expect(mockUploadFolderIds.at(-1)).toBe('folder-1');
+    fireEvent.click(screen.getAllByRole('button', { name: '制度文件' })[index]);
+    expect(mockQueryParams.at(-1)).toEqual(
+      expect.objectContaining({ datasetId: 'kb-1', folderId: 'folder-1' }),
+    );
+    expect(mockUploadFolderIds.at(-1)).toBe('folder-1');
 
-  fireEvent.click(screen.getByRole('button', { name: '知识库根目录' }));
-  expect(mockQueryParams.at(-1)).toEqual(
-    expect.objectContaining({ datasetId: 'kb-1', folderId: 'root' }),
-  );
-  expect(mockUploadFolderIds.at(-1)).toBe('root');
+    fireEvent.click(screen.getByRole('button', { name: '知识库根目录' }));
+    expect(mockQueryParams.at(-1)).toEqual(
+      expect.objectContaining({ datasetId: 'kb-1', folderId: 'root' }),
+    );
+    expect(mockUploadFolderIds.at(-1)).toBe('root');
 
-  fireEvent.click(screen.getAllByLabelText('Select row')[0]);
-  const actions = screen.getByTestId('bulk-actions');
-  expect(actions).toHaveTextContent('common.move');
-  expect(actions).toHaveTextContent('common.delete');
-  expect(actions).not.toHaveTextContent('knowledgeDetails.run');
-});
+    fireEvent.click(
+      screen.getAllByLabelText('Select row')[index * mockEntries.length],
+    );
+    const actions = screen.getByTestId('bulk-actions');
+    expect(actions).toHaveTextContent('common.move');
+    expect(actions).toHaveTextContent('common.delete');
+    expect(actions).not.toHaveTextContent('knowledgeDetails.run');
+  },
+);
 
 test('keeps pagination visible while the file table owns the scroll area', () => {
   render(React.createElement(KnowledgeFileBrowser));

@@ -178,34 +178,43 @@ export function KnowledgeFileBrowser() {
   return (
     <Card
       as="article"
-      className="mb-5 mr-5 flex min-h-0 min-w-[880px] flex-col overflow-hidden bg-transparent shadow-none"
+      className="mb-5 flex min-h-0 min-w-0 flex-col overflow-hidden bg-transparent shadow-none lg:mr-5"
     >
-      <CardHeader className="shrink-0 space-y-4 p-5">
-        <div className="flex items-start justify-between gap-4">
+      <CardHeader className="shrink-0 space-y-4 p-4 lg:p-5">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
           <div>
             <h1 className="font-medium">{t('knowledgeDetails.subbarFiles')}</h1>
             <p className="text-sm text-text-secondary">
               {t('knowledgeDetails.datasetDescription')}
             </p>
           </div>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setCreatingFolder(true)}>
+          <div className="flex w-full gap-2 sm:w-auto">
+            <Button
+              className="min-w-0 flex-1 sm:flex-none"
+              variant="outline"
+              onClick={() => setCreatingFolder(true)}
+            >
               <Folder className="size-4" />
               {t('knowledgeFolder.newFolder')}
             </Button>
-            <Button onClick={showDocumentUploadModal}>
+            <Button
+              className="min-w-0 flex-1 sm:flex-none"
+              onClick={showDocumentUploadModal}
+            >
               <Upload className="size-4" />
               {t('fileManager.uploadFile')}
             </Button>
           </div>
         </div>
-        <div className="flex items-center justify-between gap-4">
-          <KnowledgeFileBreadcrumb
-            ancestors={ancestors.data || []}
-            rootName={query.data?.parent_folder.name}
-            onNavigate={navigateFolder}
-          />
-          <div className="relative w-72">
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+          <div className="min-w-0 overflow-x-auto whitespace-nowrap">
+            <KnowledgeFileBreadcrumb
+              ancestors={ancestors.data || []}
+              rootName={query.data?.parent_folder.name}
+              onNavigate={navigateFolder}
+            />
+          </div>
+          <div className="relative w-full shrink-0 sm:w-72">
             <Search className="absolute left-3 top-2.5 size-4 text-text-disabled" />
             <Input
               role="searchbox"
@@ -221,8 +230,120 @@ export function KnowledgeFileBrowser() {
         )}
       </CardHeader>
 
-      <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden px-5 py-0">
-        <Table rootClassName="min-h-0 flex-1 overflow-auto">
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden px-4 py-0 lg:px-5">
+        <div className="mb-3 flex items-center gap-2 lg:hidden">
+          <Checkbox
+            aria-label="Select all"
+            checked={
+              entries.length > 0 && selectedIds.length === entries.length
+            }
+            onCheckedChange={(checked) =>
+              setSelectedIds(
+                checked ? entries.map((entry) => entry.file_id) : [],
+              )
+            }
+          />
+          <span className="text-sm text-text-secondary">
+            {t('knowledgeDetails.name')}
+          </span>
+        </div>
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto lg:hidden">
+          {entries.length ? (
+            entries.map((entry) => (
+              <div
+                key={entry.file_id}
+                className="rounded-lg border border-border-button bg-bg-card p-3"
+              >
+                <div className="flex min-w-0 items-start gap-3">
+                  <Checkbox
+                    aria-label="Select row"
+                    checked={selectedIds.includes(entry.file_id)}
+                    onCheckedChange={(checked) =>
+                      toggleSelection(entry.file_id, Boolean(checked))
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-start gap-2 text-left"
+                    onClick={
+                      entry.entry_type === 'folder'
+                        ? () => navigateFolder(entry.id)
+                        : navigateToChunkParsedResult(
+                            entry.id,
+                            entry.dataset_id,
+                          )
+                    }
+                  >
+                    {entry.entry_type === 'folder' ? (
+                      <Folder className="size-5 shrink-0 text-amber-500" />
+                    ) : (
+                      <FileIcon name={entry.name} />
+                    )}
+                    <span className="min-w-0 break-all text-sm font-medium">
+                      {entry.name}
+                    </span>
+                  </button>
+                </div>
+                {keywords && (
+                  <button
+                    type="button"
+                    className="mt-1 block max-w-full truncate text-left text-xs text-text-secondary"
+                    onClick={() => {
+                      setKeywords('');
+                      navigateFolder(entry.parent_id);
+                    }}
+                  >
+                    {entry.relative_path}
+                  </button>
+                )}
+                {entry.entry_type === 'document' && (
+                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-secondary">
+                    <span>{formatDate(entry.create_time)}</span>
+                    <span>
+                      {t('knowledgeDetails.chunkNumber')}: {entry.chunk_count}
+                    </span>
+                    <Switch
+                      checked={entry.status === '1'}
+                      onCheckedChange={async (status) => {
+                        await setDocumentStatus({
+                          status,
+                          documentId: entry.id,
+                          datasetId,
+                        });
+                        query.refetch();
+                      }}
+                    />
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={async () => {
+                        await runDocumentByIds({
+                          documentIds: [entry.id],
+                          run: 1,
+                        });
+                        query.refetch();
+                      }}
+                    >
+                      <Play className="size-4" />
+                      {t('knowledgeDetails.run')}
+                    </Button>
+                  </div>
+                )}
+                <div className="mt-2 flex justify-end">
+                  <KnowledgeEntryActionCell
+                    entry={entry}
+                    onRename={setRenameEntry}
+                    onMove={(item) => setMoveIds([item.file_id])}
+                    onDelete={(item) => handleDelete([item.file_id])}
+                  />
+                </div>
+              </div>
+            ))
+          ) : (
+            <Empty type={EmptyType.Data} />
+          )}
+        </div>
+        <Table rootClassName="hidden min-h-0 flex-1 overflow-auto lg:block">
           <TableHeader>
             <TableRow>
               <TableHead className="w-10">
@@ -350,7 +471,7 @@ export function KnowledgeFileBrowser() {
             )}
           </TableBody>
         </Table>
-        <div className="flex shrink-0 justify-end py-4">
+        <div className="flex shrink-0 justify-end overflow-x-auto py-4">
           <RAGFlowPagination
             current={page}
             pageSize={pageSize}

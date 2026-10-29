@@ -3,6 +3,7 @@ import { KnowledgeEntry } from '@/interfaces/database/knowledge-file';
 import { downloadDatasetDocument } from '@/services/file-manager-service';
 import { downloadFileFromBlob } from '@/utils/file-util';
 import { Download, FolderInput, PenLine, Trash2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 interface KnowledgeEntryActionCellProps {
   entry: KnowledgeEntry;
@@ -17,6 +18,7 @@ export function KnowledgeEntryActionCell({
   onMove,
   onDelete,
 }: KnowledgeEntryActionCellProps) {
+  const { t } = useTranslation();
   const download = async () => {
     if (entry.entry_type !== 'document') return;
     const extension = entry.name.split('.').pop()?.toLowerCase() || 'bin';
@@ -29,19 +31,43 @@ export function KnowledgeEntryActionCell({
   };
 
   return (
-    <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-      <Button size="icon-xs" variant="ghost" onClick={() => onRename(entry)}>
+    <div className="flex items-center gap-1 opacity-100 transition-opacity lg:opacity-0 lg:group-hover:opacity-100 lg:group-focus-within:opacity-100">
+      <Button
+        aria-label={t('common.rename')}
+        size="icon-xs"
+        className="size-10 lg:size-6"
+        variant="ghost"
+        onClick={() => onRename(entry)}
+      >
         <PenLine className="size-4" />
       </Button>
-      <Button size="icon-xs" variant="ghost" onClick={() => onMove(entry)}>
+      <Button
+        aria-label={t('common.move')}
+        size="icon-xs"
+        className="size-10 lg:size-6"
+        variant="ghost"
+        onClick={() => onMove(entry)}
+      >
         <FolderInput className="size-4" />
       </Button>
       {entry.entry_type === 'document' && (
-        <Button size="icon-xs" variant="ghost" onClick={download}>
+        <Button
+          aria-label={t('common.download')}
+          size="icon-xs"
+          className="size-10 lg:size-6"
+          variant="ghost"
+          onClick={download}
+        >
           <Download className="size-4" />
         </Button>
       )}
-      <Button size="icon-xs" variant="ghost" onClick={() => onDelete(entry)}>
+      <Button
+        aria-label={t('common.delete')}
+        size="icon-xs"
+        className="size-10 lg:size-6"
+        variant="ghost"
+        onClick={() => onDelete(entry)}
+      >
         <Trash2 className="size-4" />
       </Button>
     </div>

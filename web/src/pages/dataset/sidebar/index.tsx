@@ -75,9 +75,9 @@ export function SideBar({ dataset: data }: PropType) {
   }, [t, routerData, isOwner]);
 
   return (
-    <aside className="flex flex-col w-64 relative">
+    <aside className="relative flex w-full shrink-0 flex-col border-b border-border-button lg:w-64 lg:border-b-0">
       <header
-        className="px-5 pb-4 grid grid-cols-[auto_1fr] grid-rows-[auto_auto] gap-x-3"
+        className="grid grid-cols-[auto_1fr] grid-rows-[auto_auto] gap-x-3 px-4 pb-2 lg:px-5 lg:pb-4"
         style={{
           gridTemplateAreas: '"avatar title" "avatar stats"',
         }}
@@ -85,19 +85,19 @@ export function SideBar({ dataset: data }: PropType) {
         <RAGFlowAvatar
           avatar={data.avatar}
           name={data.name}
-          className="size-16"
+          className="size-10 lg:size-16"
           style={{ gridArea: 'avatar' }}
         />
 
         <h3
-          className="text-lg font-semibold line-clamp-1 text-text-primary text-ellipsis overflow-hidden"
+          className="overflow-hidden text-ellipsis text-base font-semibold text-text-primary line-clamp-1 lg:text-lg"
           style={{ gridArea: 'title' }}
         >
           {data.name}
         </h3>
 
         <div
-          className="self-end text-text-secondary text-xs overflow-hidden"
+          className="hidden self-end overflow-hidden text-xs text-text-secondary lg:block"
           style={{ gridArea: 'stats' }}
         >
           <div className="flex justify-between">
@@ -113,19 +113,19 @@ export function SideBar({ dataset: data }: PropType) {
         </div>
       </header>
 
-      <nav className="px-5 pt-1 pb-5 overflow-y-auto">
-        <ul className="space-y-5">
+      <nav className="overflow-x-auto px-4 pb-2 pt-1 lg:overflow-y-auto lg:px-5 lg:pb-5">
+        <ul className="flex gap-1 lg:block lg:space-y-5">
           {items.map((item) => {
             const active = '/' + pathName === item.key;
 
             return (
-              <li key={item.key}>
+              <li key={item.key} className="shrink-0">
                 <Button
                   asLink
                   block
                   variant="ghost"
                   className={cn(
-                    'justify-start gap-2.5 px-3 relative h-10 text-base',
+                    'relative h-10 w-auto justify-start gap-2.5 px-3 text-sm lg:w-full lg:text-base',
                     active && 'bg-bg-card text-text-primary',
                   )}
                   to={`${Routes.DatasetBase}${item.key}/${id}`}
