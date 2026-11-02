@@ -56,7 +56,7 @@ async def test_list_tools_exposes_static_document_tools_without_fetching_dataset
 
     tools = await mcp_server.list_tools.__wrapped__(connector=connector, api_key="unit-key")
 
-    assert [tool.name for tool in tools] == ["ragflow_retrieval", "search_documents", "get_document_chunks", "get_chunk_image"]
+    assert [tool.name for tool in tools] == ["ragflow_retrieval", "search_documents", "get_document_chunks", "get_chunk_image", "list_knowledge_bases", "list_documents", "export_document_catalog"]
     search_schema = tools[1].inputSchema
     assert search_schema["required"] == ["query"]
     assert search_schema["properties"]["query"]["minLength"] == 1
@@ -377,10 +377,7 @@ async def test_search_documents_caps_pages_and_reports_truncated_scan(monkeypatc
     async def _get(_path, params=None, api_key=""):
         requested_pages.append(params["page"])
         offset = (params["page"] - 1) * 100
-        docs = [
-            {"id": f"document-{offset + index}", "name": f"制度-{offset + index}.pdf", "update_date": "2026-09-29"}
-            for index in range(100)
-        ]
+        docs = [{"id": f"document-{offset + index}", "name": f"制度-{offset + index}.pdf", "update_date": "2026-09-29"} for index in range(100)]
         return _FakeResponse({"code": 0, "data": {"total": 1000, "docs": docs}})
 
     monkeypatch.setattr(connector, "_get", _get)

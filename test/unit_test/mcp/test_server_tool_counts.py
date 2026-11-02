@@ -28,6 +28,9 @@ async def test_counts_survive_restart_and_flush_on_shutdown(server, tmp_path):
         "search_documents": 1,
         "get_document_chunks": 0,
         "get_chunk_image": 0,
+        "list_knowledge_bases": 0,
+        "list_documents": 0,
+        "export_document_catalog": 0,
     }
     async with server.ToolCallCounts(path, interval=3600) as counts:
         counts.increment("ragflow_retrieval")
@@ -100,6 +103,12 @@ async def test_second_writer_cannot_overwrite_counts(server, tmp_path):
 @pytest.mark.asyncio
 async def test_dispatch_counts_tools_including_errors_but_not_list_or_unknown(server, tmp_path):
     class Connector:
+        async def list_knowledge_bases(self, **kwargs):
+            return []
+
+        async def list_documents(self, **kwargs):
+            return []
+
         async def retrieval(self, **kwargs):
             return []
 
@@ -117,7 +126,7 @@ async def test_dispatch_counts_tools_including_errors_but_not_list_or_unknown(se
         server.TOOL_CALL_COUNTS = counts
         connector = Connector()
         await server.list_tools.__wrapped__(connector=connector, api_key="test")
-        for name in ("ragflow_retrieval", "get_document_chunks", "get_chunk_image"):
+        for name in ("ragflow_retrieval", "get_document_chunks", "get_chunk_image", "list_knowledge_bases", "list_documents"):
             await server.call_tool.__wrapped__(name, {}, connector=connector, api_key="test")
         with pytest.raises(RuntimeError):
             await server.call_tool.__wrapped__("search_documents", {}, connector=connector, api_key="test")
@@ -128,6 +137,9 @@ async def test_dispatch_counts_tools_including_errors_but_not_list_or_unknown(se
         "search_documents": 1,
         "get_document_chunks": 1,
         "get_chunk_image": 1,
+        "list_knowledge_bases": 1,
+        "list_documents": 1,
+        "export_document_catalog": 0,
     }
 
 

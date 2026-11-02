@@ -17,20 +17,25 @@
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import logging
 import os
 import random
 import re
+import secrets
 import tempfile
+import threading
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import wraps
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 import click
 import httpx
@@ -66,8 +71,255 @@ STREAMABLE_HTTP_ALLOWED_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "
 MCP_IMAGE_MAX_BYTES = int(os.environ.get("RAGFLOW_MCP_IMAGE_MAX_BYTES", str(10 * 1024 * 1024)))
 TOOL_COUNTS_FILE = None
 TOOL_CALL_COUNTS = None
-TOOL_NAMES = ("ragflow_retrieval", "search_documents", "get_document_chunks", "get_chunk_image")
+TOOL_NAMES = ("ragflow_retrieval", "search_documents", "get_document_chunks", "get_chunk_image", "list_knowledge_bases", "list_documents", "export_document_catalog")
 logger = logging.getLogger(__name__)
+
+
+CATALOG_EXPORTS = None
+CATALOG_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+class CatalogExportError(ValueError):
+    """An export failure safe to report without backend details or credentials."""
+
+
+class CatalogDownloadLogFilter(logging.Filter):
+    def filter(self, record):
+        if isinstance(record.args, tuple) and len(record.args) == 5:
+            client, method, path, version, status = record.args
+            if isinstance(path, str) and "/mcp/catalog-download/" in path:
+                record.args = (client, method, "/mcp/catalog-download/[redacted]", version, status)
+        return True
+
+
+def _build_catalog_workbook(dataset_id, dataset_name, documents, exported_at, cancel_event=None):
+    from openpyxl import Workbook
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE, Cell
+    from openpyxl.styles import Font, PatternFill
+
+    def check_cancelled():
+        if cancel_event is not None and cancel_event.is_set():
+            raise CatalogExportError("Catalog workbook generation cancelled.")
+
+    check_cancelled()
+
+    def append_literal(tab, values):
+        check_cancelled()
+        cells = []
+        for value in values:
+            cell = Cell(tab, value=ILLEGAL_CHARACTERS_RE.sub("", value) if isinstance(value, str) else value)
+            if isinstance(value, str):
+                cell.data_type = "s"
+            cells.append(cell)
+        tab.append(cells)
+
+    workbook = Workbook()
+    overview = workbook.active
+    overview.title = "导出说明"
+    for row in [
+        ["项目", "内容"],
+        ["知识库", dataset_name],
+        ["知识库 ID", dataset_id],
+        ["文献总数", len(documents)],
+        ["导出时间（UTC）", exported_at],
+        ["说明", "本文件为导出期间读取的文献元数据清单，不包含文献正文；不是数据库事务快照。"],
+        ["路径说明", "仅保留数据源明确提供的原始路径；空白表示未知，不根据存储位置推断目录。"],
+    ]:
+        append_literal(overview, row)
+    sheet = workbook.create_sheet("文献目录")
+    sheet.append(["序号", "文献名称", "文件类型", "解析状态", "更新时间", "原始路径", "文档 ID", "知识库 ID"])
+    statuses = {"UNSTART": "未开始", "RUNNING": "解析中", "CANCEL": "已取消", "DONE": "已完成", "FAIL": "失败"}
+    for index, doc in enumerate(documents, 1):
+        append_literal(sheet, [index, doc["name"], doc["type"], statuses.get(doc["run"], doc["run"]), doc["update_date"], doc["path"], doc["document_id"], dataset_id])
+    # Metadata strings are literal cells, including names beginning with '=' or '+'.
+    for tab in (overview, sheet):
+        tab.freeze_panes = "A2"
+        for cell in tab[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="24557A")
+    overview.column_dimensions["A"].width = 24
+    overview.column_dimensions["B"].width = 100
+    for column, width in zip("ABCDEFGH", [10, 65, 14, 16, 24, 60, 38, 38], strict=True):
+        sheet.column_dimensions[column].width = width
+    sheet.auto_filter.ref = f"A1:H{len(documents) + 1}"
+    output = io.BytesIO()
+    check_cancelled()
+    workbook.save(output)
+    workbook.close()
+    check_cancelled()
+    return output.getvalue()
+
+
+class CatalogExports:
+    """Bounded per-process jobs and short-lived, file-scoped download capabilities."""
+
+    TTL = 15 * 60
+    MAX_DOCUMENTS = 50_000
+    MAX_ACTIVE = 2
+    MAX_JOBS = 16
+    MAX_BYTES = 64 * 1024 * 1024
+    MAX_FILE_BYTES = 10 * 1024 * 1024
+    TIMEOUT = 120
+
+    def __init__(self):
+        self.jobs = {}
+
+    async def __aenter__(self):
+        self._cleaner = asyncio.create_task(self._cleanup_loop())
+        return self
+
+    async def __aexit__(self, *exc):
+        tasks = [self._cleaner, *(job["task"] for job in self.jobs.values())]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.jobs.clear()
+
+    def _prune(self):
+        for export_id, job in list(self.jobs.items()):
+            if job["expires_at"] <= time.monotonic() and job["task"].done():
+                del self.jobs[export_id]
+
+    async def _cleanup_loop(self):
+        while True:
+            await asyncio.sleep(60)
+            self._prune()
+
+    @staticmethod
+    async def _authorize(connector, api_key, dataset_id):
+        payload = await connector._fetch_datasets_page(api_key=api_key, page=1, page_size=1, id=dataset_id)
+        items = payload["data"]
+        if len(items) != 1 or items[0].get("id") != dataset_id:
+            raise CatalogExportError("Knowledge base is unavailable or access was denied.")
+        return items[0]
+
+    async def request(self, connector, *, api_key, dataset_id, export_id, base_url):
+        self._prune()
+        owner = hashlib.sha256(f"{connector.auth_mode}:{api_key}".encode()).hexdigest()
+        if export_id:
+            job = self.jobs.get(export_id)
+            if job is None or job["owner"] != owner or job["dataset_id"] != dataset_id:
+                raise CatalogExportError("Export is unavailable or expired. Start a new export without export_id.")
+        dataset = await self._authorize(connector, api_key, dataset_id)
+        if not export_id:
+            if len(self.jobs) >= self.MAX_JOBS or sum(job["status"] == "processing" for job in self.jobs.values()) >= self.MAX_ACTIVE:
+                raise CatalogExportError("Catalog export capacity is busy. Retry later.")
+            export_id = secrets.token_urlsafe(24)
+            job = {"owner": owner, "dataset_id": dataset_id, "status": "processing", "expires_at": time.monotonic() + self.TTL}
+            self.jobs[export_id] = job
+            # A worker owns its connector: the stateless MCP request may close its own connector now.
+            job["task"] = asyncio.create_task(self._run(job, connector.base_url, connector.version, connector.auth_mode, api_key, dataset))
+        result = {"export_id": export_id, "dataset_id": dataset_id, "status": job["status"]}
+        if job["status"] == "processing":
+            result["retry_after_seconds"] = 2
+        elif job["status"] == "failed":
+            result["message"] = job["message"]
+        else:
+            result.update(job["summary"])
+            result["download_url"] = f"{base_url}/catalog-download/{job['download_token']}"
+            result["delivery_instructions"] = (
+                "Download download_url as a binary file into the WorkBuddy workspace using the returned filename. "
+                "Use the client's available file presentation tool (such as present_files) with that verified local file. "
+                "If file download or presentation is unavailable, provide the download link to the user. "
+                "Do not treat the remote URL as a local path or reproduce the full catalog in the answer."
+            )
+        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+
+    async def _run(self, job, backend_url, version, auth_mode, api_key, dataset):
+        connector = RAGFlowConnector(backend_url, version=version, auth_mode=auth_mode)
+        try:
+            async with asyncio.timeout(self.TIMEOUT):
+                documents = []
+                seen = set()
+                total = None
+                page = 1
+                while True:
+                    content = await connector.list_documents(api_key=api_key, dataset_id=job["dataset_id"], page=page, page_size=100)
+                    payload = json.loads(content[0].text)
+                    current_total = payload["pagination"]["total"]
+                    if total is None:
+                        total = current_total
+                        if total > self.MAX_DOCUMENTS:
+                            raise CatalogExportError(f"Catalog exceeds the {self.MAX_DOCUMENTS:,}-document export limit; no partial file was created.")
+                    if current_total != total:
+                        raise CatalogExportError("The document count changed during export. Retry to generate a complete catalog.")
+                    batch = payload["documents"]
+                    if len(batch) != min(100, total - len(documents)):
+                        raise CatalogExportError("The backend returned an incomplete document page. No partial file was created.")
+                    for doc in batch:
+                        if doc["document_id"] in seen:
+                            raise CatalogExportError("Duplicate documents appeared during pagination. Retry the export.")
+                        seen.add(doc["document_id"])
+                        documents.append(doc)
+                    if len(documents) == total:
+                        break
+                    page += 1
+                exported_at = datetime.now(UTC).isoformat()
+                stop_builder = threading.Event()
+                builder = asyncio.create_task(asyncio.to_thread(_build_catalog_workbook, job["dataset_id"], dataset.get("name") or "知识库", documents, exported_at, stop_builder))
+                try:
+                    data = await asyncio.shield(builder)
+                except asyncio.CancelledError:
+                    # Cancelling to_thread's await cannot stop its thread. Signal row construction,
+                    # then retain this job's capacity and lifetime until the builder really exits.
+                    stop_builder.set()
+                    cleanup = asyncio.gather(builder, return_exceptions=True)
+                    while not cleanup.done():
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            continue
+                    raise
+                # Recheck grants after all pages and workbook generation, before publishing bytes.
+                await self._authorize(connector, api_key, job["dataset_id"])
+                self._prune()
+                if len(data) > self.MAX_FILE_BYTES or len(data) + sum(len(item.get("data", b"")) for item in self.jobs.values()) > self.MAX_BYTES:
+                    raise CatalogExportError("Catalog file storage limit exceeded. Retry later; no partial file was published.")
+                safe_name = re.sub(r"[^\w .-]", "_", dataset.get("name") or "知识库")[:80].strip(" .") or "知识库"
+                expires = datetime.now(UTC) + timedelta(seconds=self.TTL)
+                job.update(
+                    status="ready",
+                    data=data,
+                    download_token=secrets.token_urlsafe(32),
+                    expires_at=time.monotonic() + self.TTL,
+                    summary={
+                        "filename": f"{safe_name}_文献目录.xlsx",
+                        "knowledge_base_name": dataset.get("name") or "知识库",
+                        "document_count": total,
+                        "exported_at": exported_at,
+                        "expires_at": expires.isoformat(),
+                        "mime_type": CATALOG_MIME_TYPE,
+                        "size_bytes": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                        "preview": [{key: doc[key] for key in ("name", "type", "run")} for doc in documents[:5]],
+                    },
+                )
+        except TimeoutError:
+            job.update(status="failed", message="Catalog export timed out. No partial file was published; retry later.")
+        except Exception as exc:  # noqa: BLE001 - isolate background failures; report no backend details
+            job.update(status="failed", message=str(exc) if isinstance(exc, CatalogExportError) else "Catalog export failed. Verify access and retry; no partial file was published.")
+            logger.warning("Catalog export failed (%s)", type(exc).__name__)
+        finally:
+            await connector.close()
+
+    async def download(self, request):
+        self._prune()
+        token = request.path_params["token"]
+        job = next((item for item in self.jobs.values() if item["status"] == "ready" and secrets.compare_digest(item["download_token"].encode(), token.encode())), None)
+        response_headers = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
+        if job is None:
+            return Response("Export unavailable or expired.", status_code=404, headers=response_headers)
+        response_headers["Content-Disposition"] = f"attachment; filename=\"catalog.xlsx\"; filename*=UTF-8''{quote(job['summary']['filename'])}"
+        return Response(job["data"], media_type=CATALOG_MIME_TYPE, headers=response_headers)
+
+
+def _catalog_base_url():
+    request = getattr(app.request_context, "request", None)
+    value = os.environ.get("RAGFLOW_MCP_PUBLIC_URL") or (str(request.url) if request is not None else "")
+    parsed = urlsplit(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise CatalogExportError("Configure RAGFLOW_MCP_PUBLIC_URL with the client-reachable MCP endpoint URL.")
+    return value.rstrip("/")
 
 
 class ToolCallCounts:
@@ -512,6 +764,75 @@ class RAGFlowConnector:
         logging.info("resolve_dataset_ids resolved %s accessible dataset IDs", len(resolved))
         return resolved
 
+    @staticmethod
+    def _directory_pagination(page, page_size, total):
+        if type(total) is not int or total < 0:
+            raise ValueError("Invalid directory total returned by backend.")
+        return {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": (total + page_size - 1) // page_size,
+            "has_more": page * page_size < total,
+        }
+
+    async def list_knowledge_bases(self, *, api_key: str, page: int = 1, page_size: int = 20, name: str | None = None):
+        """Return one authorized page without caching or enumerating other pages."""
+        payload = await self._fetch_datasets_page(api_key=api_key, page=page, page_size=page_size, name=name, desc=False)
+        pagination = self._directory_pagination(page, page_size, payload.get("total"))
+        if any(not isinstance(item.get("id"), str) or not item["id"] for item in payload["data"]):
+            raise ValueError("Invalid knowledge base entry returned by backend.")
+        result = {
+            "knowledge_bases": [
+                {
+                    "dataset_id": item["id"],
+                    "name": item.get("name") or "",
+                    "description": item.get("description") or "",
+                    "document_count": item.get("document_count"),
+                }
+                for item in payload["data"]
+            ],
+            "pagination": pagination,
+        }
+        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+
+    async def list_documents(self, *, api_key: str, dataset_id: str, page: int = 1, page_size: int = 20):
+        """Browse documents without requiring a filename query or semantic search."""
+        if not isinstance(dataset_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", dataset_id):
+            raise ValueError("Invalid dataset_id.")
+        response = await self._get(
+            f"/datasets/{dataset_id}/documents",
+            params={"page": page, "page_size": page_size, "orderby": "id", "desc": False},
+            api_key=api_key,
+        )
+        payload = _response_json_object(response)
+        if response is None or response.status_code != 200 or payload is None or type(payload.get("code")) is not int or payload["code"] != 0:
+            raise ValueError(_response_error_message(response, "Cannot list documents."))
+        data = payload.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("docs"), list):
+            raise TypeError("Invalid document list returned by backend.")
+        pagination = self._directory_pagination(page, page_size, data.get("total"))
+        documents = []
+        for doc in data["docs"]:
+            if not isinstance(doc, dict) or not isinstance(doc.get("id"), str) or not doc["id"] or doc.get("dataset_id", dataset_id) != dataset_id:
+                raise ValueError("Invalid document entry returned by backend.")
+            documents.append(
+                {
+                    "dataset_id": dataset_id,
+                    "document_id": doc["id"],
+                    "name": doc.get("name") or "",
+                    "type": doc.get("type") or "",
+                    "run": doc.get("run"),
+                    "chunk_count": doc.get("chunk_count"),
+                    "update_date": doc.get("update_date") or "",
+                    # location is an object-storage key, not necessarily a source folder path.
+                    "location": doc.get("location") or "",
+                    "path": doc.get("path") or "",
+                }
+            )
+        result = {"documents": documents, "pagination": pagination}
+        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+
     async def search_documents(self, *, api_key: str, query: str, dataset_ids=None, metadata=None, limit: int = 20):
         """Find documents by filename without running semantic retrieval."""
         query = query.strip()
@@ -654,11 +975,7 @@ class RAGFlowConnector:
         document = data["doc"]
         document_summary = {
             "document_id": document.get("document_id", document.get("id")),
-            **{
-                field: document[field]
-                for field in ("name", "location", "type", "chunk_count", "token_count", "update_date", "meta_fields")
-                if field in document
-            },
+            **{field: document[field] for field in ("name", "location", "type", "chunk_count", "token_count", "update_date", "meta_fields") if field in document},
         }
         chunk_fields = ("id", "content", "document_id", "dataset_id", "positions", "image_id", "important_keywords", "questions", "available")
         chunks = [{field: chunk[field] for field in chunk_fields if field in chunk} for chunk in data["chunks"]]
@@ -1012,6 +1329,7 @@ async def list_tools(*, connector: RAGFlowConnector, api_key: str) -> list[types
             name="ragflow_retrieval",
             description=(
                 "Semantically retrieve relevant chunks when you do not know which document contains the answer. "
+                "To browse what a knowledge base contains, use list_knowledge_bases then list_documents. "
                 "To locate a known or named file, call search_documents first. After obtaining a document_id, use "
                 "get_document_chunks to read the original text instead of repeatedly calling this tool. You can "
                 "optionally specify dataset_ids to search only specific datasets, or omit dataset_ids entirely to "
@@ -1081,8 +1399,9 @@ async def list_tools(*, connector: RAGFlowConnector, api_key: str) -> list[types
         types.Tool(
             name="search_documents",
             description=(
-                "Find documents by filename keyword without semantic content retrieval. Use this first when the user "
-                "names or describes a specific file. The result returns dataset_id and document_id; then call "
+                "Find documents by filename keyword without semantic content retrieval. Use this when the user names or "
+                "describes a specific file; use list_knowledge_bases and list_documents for browsing without a filename. "
+                "The result returns dataset_id and document_id; then call "
                 "get_document_chunks to read that document. Do not repeatedly call ragflow_retrieval after a document "
                 "has been identified. Omit dataset_ids to search all datasets accessible to the current API key."
             ),
@@ -1137,6 +1456,75 @@ async def list_tools(*, connector: RAGFlowConnector, api_key: str) -> list[types
                 "additionalProperties": False,
             },
         ),
+        types.Tool(
+            name="list_knowledge_bases",
+            description=(
+                "List knowledge bases accessible to the current user, with IDs, names, descriptions and document counts. "
+                "Use this first to find a named knowledge base or discover available libraries. The optional name is an "
+                "exact name filter; omit it to browse. Use list_documents for a preview, or export_document_catalog "
+                "with the chosen dataset_id when the user wants all documents or a complete directory."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "description": "Optional exact knowledge base name."},
+                    "page": {"type": "integer", "default": 1, "minimum": 1},
+                    "page_size": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="list_documents",
+            description=(
+                "List one page of documents in a knowledge base, without requiring a search query. Use dataset_id from "
+                "list_knowledge_bases. Returns document IDs, names, types, parsing status, and pagination. Default to one "
+                "preview page; fetch more only when needed. For a COMPLETE directory, use export_document_catalog "
+                "instead of sending all pages into context. One page is not the full catalog. path is empty when "
+                "no source path is available; location is a storage key, not a folder hierarchy. Use get_document_chunks "
+                "to read a selected document, or ragflow_retrieval with dataset_ids to answer a content question."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$", "description": "Knowledge base ID from list_knowledge_bases."},
+                    "page": {"type": "integer", "default": 1, "minimum": 1},
+                    "page_size": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+                },
+                "required": ["dataset_id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="export_document_catalog",
+            description=(
+                "Export a COMPLETE Excel document catalog for one authorized knowledge base. Use this when the user "
+                "asks which/all papers or documents a library contains, especially for large libraries; first use "
+                "list_knowledge_bases to obtain dataset_id. Call with dataset_id to start. If status is processing, "
+                "wait retry_after_seconds and call again with the same dataset_id and export_id until ready or failed. "
+                "Do not start a new export on each poll. Ready returns document_count, a small preview and download_url "
+                "valid for 15 minutes. Download the Excel into the WorkBuddy workspace and present the verified file "
+                "with the client's file tool (such as present_files), or provide the download link if unavailable. "
+                "The URL grants access to this file until expiry; do not publish it outside the user's conversation. "
+                "Do not put the full catalog or base64 into the answer; show total and clearly labelled preview. "
+                "This exports metadata only, not document bodies or chapter tables of contents."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$", "description": "Knowledge base ID returned by list_knowledge_bases."},
+                    "export_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                        "pattern": "^[A-Za-z0-9_-]+$",
+                        "description": "Omit to start; use the returned export_id to poll the same export.",
+                    },
+                },
+                "required": ["dataset_id"],
+                "additionalProperties": False,
+            },
+        ),
     ]
 
 
@@ -1151,6 +1539,30 @@ async def call_tool(
 ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
     if TOOL_CALL_COUNTS is not None:
         TOOL_CALL_COUNTS.increment(name)
+    if name == "export_document_catalog":
+        if CATALOG_EXPORTS is None:
+            raise CatalogExportError("Catalog export service is unavailable.")
+        return await CATALOG_EXPORTS.request(
+            connector,
+            api_key=api_key,
+            dataset_id=arguments.get("dataset_id", ""),
+            export_id=arguments.get("export_id"),
+            base_url=_catalog_base_url(),
+        )
+    if name == "list_knowledge_bases":
+        return await connector.list_knowledge_bases(
+            api_key=api_key,
+            page=arguments.get("page", 1),
+            page_size=arguments.get("page_size", 20),
+            name=arguments.get("name"),
+        )
+    if name == "list_documents":
+        return await connector.list_documents(
+            api_key=api_key,
+            dataset_id=arguments.get("dataset_id", ""),
+            page=arguments.get("page", 1),
+            page_size=arguments.get("page_size", 20),
+        )
     if name == "ragflow_retrieval":
         document_ids = arguments.get("document_ids", [])
         dataset_ids = arguments.get("dataset_ids", [])
@@ -1209,7 +1621,11 @@ def create_starlette_app():
         raise ValueError("WorkBuddy requires Streamable HTTP only; disable SSE")
     if AUTH_MODE == "workbuddy" and MODE != LaunchMode.HOST:
         raise ValueError("WorkBuddy authentication requires host mode")
-    routes = []
+    exports = CatalogExports()
+    routes = [Route("/mcp/catalog-download/{token}", endpoint=exports.download, methods=["GET"])]
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, CatalogDownloadLogFilter) for item in access_logger.filters):
+        access_logger.addFilter(CatalogDownloadLogFilter())
     middleware = None
     if MODE == LaunchMode.HOST:
         from starlette.types import ASGIApp, Receive, Scope, Send
@@ -1224,8 +1640,13 @@ def create_starlette_app():
                     return
 
                 path = scope["path"]
+                if path.startswith("/mcp/catalog-download/") and scope["method"] in ("GET", "HEAD"):
+                    await self.app(scope, receive, send)
+                    return
+
                 if path.startswith("/messages/") or path.startswith("/sse") or path.startswith("/mcp"):
                     from starlette.datastructures import Headers
+
                     headers = Headers(raw=scope["headers"]) if AUTH_MODE == "workbuddy" else dict(scope["headers"])
                     token = _extract_token_from_headers(headers)
 
@@ -1300,9 +1721,10 @@ def create_starlette_app():
 
     @asynccontextmanager
     async def application_lifespan(starlette_app):
-        global TOOL_CALL_COUNTS
+        global TOOL_CALL_COUNTS, CATALOG_EXPORTS
         try:
             async with AsyncExitStack() as stack:
+                CATALOG_EXPORTS = await stack.enter_async_context(exports)
                 if TOOL_COUNTS_FILE is not None:
                     TOOL_CALL_COUNTS = await stack.enter_async_context(ToolCallCounts(TOOL_COUNTS_FILE))
                 if streamablehttp_lifespan is not None:
@@ -1310,6 +1732,7 @@ def create_starlette_app():
                 yield
         finally:
             TOOL_CALL_COUNTS = None
+            CATALOG_EXPORTS = None
 
     return Starlette(
         debug=False,

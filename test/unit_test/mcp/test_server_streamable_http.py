@@ -139,6 +139,9 @@ async def test_host_streamable_http_lists_static_tools_without_fetching_datasets
         "search_documents",
         "get_document_chunks",
         "get_chunk_image",
+        "list_knowledge_bases",
+        "list_documents",
+        "export_document_catalog",
     ]
 
 

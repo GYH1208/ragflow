@@ -28,7 +28,7 @@ async def test_workbuddy_streamable_http_forwards_ticket_without_api_key(wb_mcp)
         res = await client.post("/mcp", headers=headers("personal-ticket"), json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         assert res.status_code == 200
         tools = res.json()["result"]["tools"]
-        assert len(tools) == 4
+        assert len(tools) == 7
         assert all("api_key" not in t["inputSchema"]["properties"] for t in tools)
     seen = []
 
