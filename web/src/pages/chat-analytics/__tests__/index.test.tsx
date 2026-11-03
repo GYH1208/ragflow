@@ -1,4 +1,4 @@
-import { useChatAnalytics } from '@/hooks/use-chat-analytics';
+import { useChatAnalytics, useMcpAnalytics } from '@/hooks/use-chat-analytics';
 import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ChatAnalyticsPage from '..';
@@ -8,6 +8,7 @@ const React = jest.requireActual<typeof import('react')>('react');
 
 jest.mock('@/hooks/use-chat-analytics', () => ({
   useChatAnalytics: jest.fn(),
+  useMcpAnalytics: jest.fn(),
 }));
 jest.mock('react-router', () => ({
   Link: ({ children }: { children: any }) => <>{children}</>,
@@ -55,7 +56,25 @@ jest.mock('recharts', () => ({
 }));
 
 const mockUseChatAnalytics = jest.mocked(useChatAnalytics);
+const mockUseMcpAnalytics = jest.mocked(useMcpAnalytics);
 const refetch = jest.fn();
+const mcpRefetch = jest.fn();
+const mcpFixture = {
+  authorized: true as const,
+  available: true as const,
+  total_count: 231,
+  categories: { retrieval: 152, content: 69, other: 10 },
+  tools: [
+    { name: 'search_documents', count: 79 },
+    { name: 'ragflow_retrieval', count: 73 },
+    { name: 'get_document_chunks', count: 69 },
+    { name: 'list_documents', count: 5 },
+    { name: 'get_chunk_image', count: 2 },
+    { name: 'export_document_catalog', count: 2 },
+    { name: 'list_knowledge_bases', count: 1 },
+  ],
+  updated_at: '2026-11-02T07:11:47+00:00',
+};
 
 const fixture = {
   total_count: 1149,
@@ -79,12 +98,107 @@ const renderDashboard = () => render(<ChatAnalyticsPage />);
 
 beforeEach(() => {
   refetch.mockReset();
+  mcpRefetch.mockReset();
+  mockUseMcpAnalytics.mockReturnValue({
+    data: mcpFixture,
+    loading: false,
+    error: null,
+    refetch: mcpRefetch,
+  });
   mockUseChatAnalytics.mockReturnValue({
     data: fixture,
     loading: false,
     error: null,
     refetch,
   });
+});
+
+it('shows real cumulative MCP statistics in a separate tab and refreshes them', async () => {
+  const user = userEvent.setup();
+  renderDashboard();
+  await user.click(screen.getByRole('tab', { name: 'MCP 调用' }));
+  expect(screen.getByText('231')).toBeInTheDocument();
+  expect(screen.getByText('152')).toBeInTheDocument();
+  expect(screen.getByText(/累计统计/)).toBeInTheDocument();
+  expect(screen.getByText('search_documents')).toBeInTheDocument();
+  expect(screen.getByText('34.2%')).toBeInTheDocument();
+  expect(screen.queryByTestId('trend-chart')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '刷新 MCP 数据' }));
+  expect(mcpRefetch).toHaveBeenCalledTimes(1);
+  expect(refetch).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('tab', { name: '聊天问答' }));
+  expect(screen.getByTestId('trend-chart')).toBeInTheDocument();
+});
+
+it('shows a read failure instead of zero counts and still allows chat analysis', async () => {
+  mockUseMcpAnalytics.mockReturnValue({
+    data: { authorized: true, available: false },
+    loading: false,
+    error: null,
+    refetch: mcpRefetch,
+  });
+  const user = userEvent.setup();
+  renderDashboard();
+  await user.click(screen.getByRole('tab', { name: 'MCP 调用' }));
+  expect(screen.getByRole('alert')).toHaveTextContent(
+    '暂时无法读取 MCP 调用数据',
+  );
+  expect(screen.queryByText('0')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '重试' }));
+  expect(mcpRefetch).toHaveBeenCalledTimes(1);
+});
+
+it('shows a real zero-data state', async () => {
+  mockUseMcpAnalytics.mockReturnValue({
+    data: {
+      ...mcpFixture,
+      total_count: 0,
+      categories: { retrieval: 0, content: 0, other: 0 },
+      tools: mcpFixture.tools.map((tool) => ({ ...tool, count: 0 })),
+    },
+    loading: false,
+    error: null,
+    refetch: mcpRefetch,
+  });
+  const user = userEvent.setup();
+  renderDashboard();
+  await user.click(screen.getByRole('tab', { name: 'MCP 调用' }));
+  expect(screen.getByText('暂无 MCP 调用记录')).toBeInTheDocument();
+});
+
+it('does not show global statistics to an ordinary user', async () => {
+  mockUseMcpAnalytics.mockReturnValue({
+    data: { authorized: false },
+    loading: false,
+    error: null,
+    refetch: mcpRefetch,
+  });
+  const user = userEvent.setup();
+  renderDashboard();
+  await user.click(screen.getByRole('tab', { name: 'MCP 调用' }));
+  expect(
+    screen.getByText('仅超级管理员可查看 MCP 服务汇总数据'),
+  ).toBeInTheDocument();
+  expect(screen.queryByText('231')).not.toBeInTheDocument();
+});
+
+it('renders an unknown tool even when its name matches an object prototype property', async () => {
+  mockUseMcpAnalytics.mockReturnValue({
+    data: {
+      ...mcpFixture,
+      total_count: 234,
+      categories: { retrieval: 152, content: 69, other: 13 },
+      tools: [...mcpFixture.tools, { name: '__proto__', count: 3 }],
+    },
+    loading: false,
+    error: null,
+    refetch: mcpRefetch,
+  });
+  const user = userEvent.setup();
+  renderDashboard();
+  await user.click(screen.getByRole('tab', { name: 'MCP 调用' }));
+  expect(screen.getAllByText('__proto__')).toHaveLength(2);
+  expect(screen.getByText('234')).toBeInTheDocument();
 });
 
 afterEach(() => {

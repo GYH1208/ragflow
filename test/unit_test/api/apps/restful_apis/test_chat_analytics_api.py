@@ -24,16 +24,8 @@ def chat_analytics_api_module(monkeypatch):
     apps_stub.current_user = SimpleNamespace(id="user-1")
     apps_stub.login_required = lambda function: function
     monkeypatch.setitem(sys.modules, "api.apps", apps_stub)
-    module_path = (
-        Path(__file__).resolve().parents[5]
-        / "api"
-        / "apps"
-        / "restful_apis"
-        / "chat_analytics_api.py"
-    )
-    spec = importlib.util.spec_from_file_location(
-        "test_chat_analytics_api_unit", module_path
-    )
+    module_path = Path(__file__).resolve().parents[5] / "api" / "apps" / "restful_apis" / "chat_analytics_api.py"
+    spec = importlib.util.spec_from_file_location("test_chat_analytics_api_unit", module_path)
     module = importlib.util.module_from_spec(spec)
     module.manager = _DummyManager()
     spec.loader.exec_module(module)
@@ -51,9 +43,7 @@ def _empty_dashboard():
     }
 
 
-def test_chat_analytics_uses_current_tenant_and_defaults(
-    chat_analytics_api_module, monkeypatch
-):
+def test_chat_analytics_uses_current_tenant_and_defaults(chat_analytics_api_module, monkeypatch):
     module = chat_analytics_api_module
     seen = {}
     monkeypatch.setattr(
@@ -89,9 +79,7 @@ def test_chat_analytics_uses_current_tenant_and_defaults(
         {"from_date": "2026-09-25", "to_date": "2026-09-24"},
     ],
 )
-def test_chat_analytics_rejects_invalid_params(
-    chat_analytics_api_module, monkeypatch, args
-):
+def test_chat_analytics_rejects_invalid_params(chat_analytics_api_module, monkeypatch, args):
     module = chat_analytics_api_module
     monkeypatch.setattr(module, "request", SimpleNamespace(args=args))
 
@@ -100,9 +88,7 @@ def test_chat_analytics_rejects_invalid_params(
     assert result["code"] == RetCode.DATA_ERROR
 
 
-def test_chat_analytics_rejects_assistant_outside_tenant(
-    chat_analytics_api_module, monkeypatch
-):
+def test_chat_analytics_rejects_assistant_outside_tenant(chat_analytics_api_module, monkeypatch):
     module = chat_analytics_api_module
     monkeypatch.setattr(
         module.UserTenantService,
@@ -112,9 +98,7 @@ def test_chat_analytics_rejects_assistant_outside_tenant(
     monkeypatch.setattr(
         module.ChatAnalyticsService,
         "dashboard",
-        lambda **kwargs: (_ for _ in ()).throw(
-            ValueError("Chat assistant not found")
-        ),
+        lambda **kwargs: (_ for _ in ()).throw(ValueError("Chat assistant not found")),
     )
     monkeypatch.setattr(
         module,
@@ -127,3 +111,24 @@ def test_chat_analytics_rejects_assistant_outside_tenant(
     assert result["code"] == RetCode.DATA_ERROR
     assert result["message"] == "Chat assistant not found"
     assert "data" not in result
+
+
+def test_mcp_analytics_never_reads_counts_for_non_superuser(chat_analytics_api_module, monkeypatch):
+    module = chat_analytics_api_module
+    monkeypatch.setattr(module, "current_user", SimpleNamespace(id="user-1", is_superuser=False))
+    monkeypatch.setattr(module.MCPAnalyticsService, "dashboard", lambda: pytest.fail("Global counts must not be read"))
+    result = _run(module.mcp_analytics())
+    assert result["code"] == 0
+    assert result["data"] == {"authorized": False}
+
+
+def test_mcp_analytics_returns_counts_only_to_superuser(chat_analytics_api_module, monkeypatch, tmp_path):
+    module = chat_analytics_api_module
+    monkeypatch.setattr(module, "current_user", SimpleNamespace(id="admin", is_superuser=True))
+    path = tmp_path / "counts.json"
+    path.write_text('{"ragflow_retrieval": 4, "get_document_chunks": 2}')
+    monkeypatch.setenv("RAGFLOW_MCP_ANALYTICS_COUNTS_FILE", str(path))
+    result = _run(module.mcp_analytics())
+    assert result["code"] == 0
+    assert result["data"]["authorized"] is True
+    assert result["data"]["total_count"] == 6

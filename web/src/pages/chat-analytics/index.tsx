@@ -7,6 +7,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useChatAnalytics } from '@/hooks/use-chat-analytics';
 import { ChatAnalyticsGranularity } from '@/interfaces/chat-analytics';
 import { format, startOfDay, subDays } from 'date-fns';
@@ -14,6 +15,7 @@ import { useMemo, useState } from 'react';
 import { DateRange } from 'react-day-picker';
 import { useTranslation } from 'react-i18next';
 import { AssistantDonutChart } from './assistant-donut-chart';
+import { McpDashboard } from './mcp-dashboard';
 import { SummaryCards } from './summary-cards';
 import { TrendChart } from './trend-chart';
 
@@ -45,88 +47,104 @@ export default function ChatAnalyticsPage() {
           {t('chatAnalytics.title')}
         </h1>
 
-        <SummaryCards
-          total={query.data.total_count}
-          last30Days={query.data.last_30_days_count}
-          today={query.data.today_count}
-          loading={query.loading}
-        />
-
-        {query.error ? (
-          <section
-            className="flex min-h-64 flex-col items-center justify-center gap-4 rounded-lg border-0.5 border-border-button bg-bg-input"
-            role="alert"
+        <Tabs defaultValue="chat">
+          <TabsList aria-label="统计类型" className="mb-4">
+            <TabsTrigger value="chat">聊天问答</TabsTrigger>
+            <TabsTrigger value="mcp">MCP 调用</TabsTrigger>
+          </TabsList>
+          <TabsContent
+            value="chat"
+            className="flex flex-col gap-4 data-[state=inactive]:hidden"
           >
-            <p className="text-text-secondary">
-              {t('chatAnalytics.loadError')}
-            </p>
-            <Button
-              type="button"
-              variant="accent"
-              onClick={() => query.refetch()}
-            >
-              {t('chatAnalytics.retry')}
-            </Button>
-          </section>
-        ) : (
-          <>
-            <TrendChart
-              data={query.data.trend}
-              granularity={granularity}
-              onGranularityChange={setGranularity}
+            <SummaryCards
+              total={query.data.total_count}
+              last30Days={query.data.last_30_days_count}
+              today={query.data.today_count}
+              loading={query.loading}
             />
 
-            <section className="flex flex-wrap items-center gap-3 rounded-lg border-0.5 border-border-button bg-bg-input px-4 py-3 shadow-sm">
-              <label
-                className="text-sm font-medium text-text-primary"
-                htmlFor="chat-analytics-assistant"
+            {query.error ? (
+              <section
+                className="flex min-h-64 flex-col items-center justify-center gap-4 rounded-lg border-0.5 border-border-button bg-bg-input"
+                role="alert"
               >
-                {t('chatAnalytics.assistant')}
-              </label>
-              <Select
-                value={dialogId ?? allAssistantsValue}
-                onValueChange={(value) =>
-                  setDialogId(value === allAssistantsValue ? undefined : value)
-                }
-              >
-                <SelectTrigger
-                  id="chat-analytics-assistant"
-                  className="w-56"
-                  aria-label={t('chatAnalytics.assistant')}
+                <p className="text-text-secondary">
+                  {t('chatAnalytics.loadError')}
+                </p>
+                <Button
+                  type="button"
+                  variant="accent"
+                  onClick={() => query.refetch()}
                 >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={allAssistantsValue}>
-                    {t('chatAnalytics.allAssistants')}
-                  </SelectItem>
-                  {query.data.assistant_options.map((assistant) => (
-                    <SelectItem key={assistant.id} value={assistant.id}>
-                      {assistant.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                  {t('chatAnalytics.retry')}
+                </Button>
+              </section>
+            ) : (
+              <>
+                <TrendChart
+                  data={query.data.trend}
+                  granularity={granularity}
+                  onGranularityChange={setGranularity}
+                />
 
-              <span className="ml-0 text-sm font-medium text-text-primary sm:ml-3">
-                {t('chatAnalytics.dateRange')}
-              </span>
-              <DatePickerWithRange
-                required
-                selected={range}
-                onSelect={(nextRange, selectedDay) => {
-                  if (range.to) {
-                    setRange({ from: selectedDay, to: undefined });
-                    return;
-                  }
-                  setRange(nextRange);
-                }}
-              />
-            </section>
+                <section className="flex flex-wrap items-center gap-3 rounded-lg border-0.5 border-border-button bg-bg-input px-4 py-3 shadow-sm">
+                  <label
+                    className="text-sm font-medium text-text-primary"
+                    htmlFor="chat-analytics-assistant"
+                  >
+                    {t('chatAnalytics.assistant')}
+                  </label>
+                  <Select
+                    value={dialogId ?? allAssistantsValue}
+                    onValueChange={(value) =>
+                      setDialogId(
+                        value === allAssistantsValue ? undefined : value,
+                      )
+                    }
+                  >
+                    <SelectTrigger
+                      id="chat-analytics-assistant"
+                      className="w-56"
+                      aria-label={t('chatAnalytics.assistant')}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={allAssistantsValue}>
+                        {t('chatAnalytics.allAssistants')}
+                      </SelectItem>
+                      {query.data.assistant_options.map((assistant) => (
+                        <SelectItem key={assistant.id} value={assistant.id}>
+                          {assistant.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
 
-            <AssistantDonutChart assistants={query.data.assistants} />
-          </>
-        )}
+                  <span className="ml-0 text-sm font-medium text-text-primary sm:ml-3">
+                    {t('chatAnalytics.dateRange')}
+                  </span>
+                  <DatePickerWithRange
+                    required
+                    selected={range}
+                    onSelect={(nextRange, selectedDay) => {
+                      if (range.to) {
+                        setRange({ from: selectedDay, to: undefined });
+                        return;
+                      }
+                      setRange(nextRange);
+                    }}
+                  />
+                </section>
+
+                <AssistantDonutChart assistants={query.data.assistants} />
+              </>
+            )}
+          </TabsContent>
+          <TabsContent value="mcp">
+            <McpDashboard />
+          </TabsContent>
+        </Tabs>
       </div>
     </main>
   );

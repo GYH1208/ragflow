@@ -117,6 +117,7 @@ export default {
 
   // chat analytics
   chatAnalytics: `${restAPIv1}/chat-analytics`,
+  mcpAnalytics: `${restAPIv1}/mcp-analytics`,
 
   // plugin
   llmTools: `${restAPIv1}/plugin/tools`,

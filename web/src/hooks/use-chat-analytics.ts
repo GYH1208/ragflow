@@ -1,6 +1,7 @@
 import {
   ChatAnalyticsParams,
   ChatAnalyticsResponse,
+  McpAnalyticsResponse,
 } from '@/interfaces/chat-analytics';
 import chatAnalyticsService from '@/services/chat-analytics-service';
 import { useQuery } from '@tanstack/react-query';
@@ -14,22 +15,42 @@ const emptyAnalytics: ChatAnalyticsResponse = {
   assistant_options: [],
 };
 
+export const useMcpAnalytics = () => {
+  const query = useQuery<McpAnalyticsResponse, Error>({
+    queryKey: ['mcpAnalytics'],
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: false,
+    queryFn: async () => {
+      const response = await chatAnalyticsService.getMcpDashboard();
+      const payload = response.data;
+      if (payload.code !== 0) {
+        throw new Error(payload.message || 'Unable to load MCP analytics');
+      }
+      return payload.data;
+    },
+  });
+  return {
+    data: query.data,
+    loading: query.isFetching,
+    error: query.error,
+    refetch: query.refetch,
+  };
+};
+
 export const useChatAnalytics = (params: ChatAnalyticsParams) => {
   const query = useQuery<ChatAnalyticsResponse, Error>({
     queryKey: ['chatAnalytics', params],
     initialData: emptyAnalytics,
     refetchOnWindowFocus: false,
     queryFn: async () => {
-      const response = await chatAnalyticsService.getDashboard(
-        {
-          params: {
-            dialog_id: params.dialogId,
-            from_date: params.fromDate,
-            to_date: params.toDate,
-            granularity: params.granularity,
-          },
+      const response = await chatAnalyticsService.getDashboard({
+        params: {
+          dialog_id: params.dialogId,
+          from_date: params.fromDate,
+          to_date: params.toDate,
+          granularity: params.granularity,
         },
-      );
+      });
       const payload = response.data;
       if (payload.code !== 0) {
         throw new Error(payload.message || 'Unable to load chat analytics');

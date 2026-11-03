@@ -15,3 +15,15 @@ export interface ChatAnalyticsResponse {
   assistants: Array<{ id: string; name: string; count: number }>;
   assistant_options: Array<{ id: string; name: string }>;
 }
+
+export type McpAnalyticsResponse =
+  | { authorized: false }
+  | { authorized: true; available: false }
+  | {
+      authorized: true;
+      available: true;
+      total_count: number;
+      categories: { retrieval: number; content: number; other: number };
+      tools: Array<{ name: string; count: number }>;
+      updated_at: string;
+    };

@@ -4,11 +4,11 @@ import { createElement } from 'react';
 
 import chatAnalyticsService from '@/services/chat-analytics-service';
 
-import { useChatAnalytics } from '../use-chat-analytics';
+import { useChatAnalytics, useMcpAnalytics } from '../use-chat-analytics';
 
 jest.mock('@/services/chat-analytics-service', () => ({
   __esModule: true,
-  default: { getDashboard: jest.fn() },
+  default: { getDashboard: jest.fn(), getMcpDashboard: jest.fn() },
 }));
 
 const mockedGetDashboard = jest.mocked(chatAnalyticsService.getDashboard);
@@ -81,4 +81,45 @@ test('exposes request errors and keeps a retry function', async () => {
     toDate: '2026-09-24',
     granularity: 'week',
   });
+});
+
+test('loads cumulative MCP data independently of chat date filters', async () => {
+  const snapshot = {
+    authorized: true,
+    available: true,
+    total_count: 6,
+    categories: { retrieval: 4, content: 2, other: 0 },
+    tools: [
+      { name: 'ragflow_retrieval', count: 4 },
+      { name: 'get_document_chunks', count: 2 },
+    ],
+    updated_at: '2026-11-02T07:00:00+00:00',
+  };
+  jest
+    .mocked(chatAnalyticsService.getMcpDashboard)
+    .mockResolvedValue({ data: { code: 0, data: snapshot } } as never);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const wrapper = ({ children }: { children?: React.ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+  const { result } = renderHook(() => useMcpAnalytics(), { wrapper });
+  await waitFor(() => expect(result.current.data).toEqual(snapshot));
+  expect(result.current.error).toBeNull();
+});
+
+test('surfaces MCP API errors instead of inventing zero totals', async () => {
+  jest.mocked(chatAnalyticsService.getMcpDashboard).mockResolvedValue({
+    data: { code: 100, message: 'Unavailable' },
+  } as never);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const wrapper = ({ children }: { children?: React.ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+  const { result } = renderHook(() => useMcpAnalytics(), { wrapper });
+  await waitFor(() =>
+    expect(result.current.error?.message).toBe('Unavailable'),
+  );
+  expect(result.current.data).toBeUndefined();
 });

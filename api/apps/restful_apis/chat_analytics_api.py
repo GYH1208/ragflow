@@ -14,12 +14,14 @@
 #  limitations under the License.
 #
 
+from asyncio import to_thread
 from datetime import UTC, date, datetime, time, timedelta
 
 from quart import request
 
 from api.apps import current_user, login_required
 from api.db.services.chat_analytics_service import ChatAnalyticsService
+from api.db.services.mcp_analytics_service import MCPAnalyticsService
 from api.db.services.user_service import UserTenantService
 from api.utils.api_utils import (
     get_data_error_result,
@@ -69,3 +71,13 @@ async def chat_analytics():
         return get_data_error_result(message=str(error))
     except Exception as error:  # noqa: BLE001
         return server_error_response(error)
+
+
+@manager.route("/mcp-analytics", methods=["GET"])  # noqa: F821
+@login_required
+async def mcp_analytics():
+    # These counters cover the whole MCP process, rather than the user's tenant.
+    if not getattr(current_user, "is_superuser", False):
+        return get_json_result(data={"authorized": False})
+    result = await to_thread(MCPAnalyticsService.dashboard)
+    return get_json_result(data={"authorized": True, **result})
