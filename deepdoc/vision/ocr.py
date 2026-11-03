@@ -114,7 +114,7 @@ def load_model(model_dir, nm, device_id: int | None = None):
         }
         sess = ort.InferenceSession(
             model_file_path,
-            options=options,
+            sess_options=options,
             providers=['CUDAExecutionProvider'],
             provider_options=[cuda_provider_options]
             )
@@ -127,9 +127,9 @@ def load_model(model_dir, nm, device_id: int | None = None):
     else:
         sess = ort.InferenceSession(
             model_file_path,
-            options=options,
+            sess_options=options,
             providers=['CPUExecutionProvider'])
-        run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", "cpu")
+        # CPU arena allocation is disabled, so there is no arena to shrink.
         logging.info(f"load_model {model_file_path} uses CPU")
     loaded_model = (sess, run_options)
     loaded_models[model_cached_tag] = loaded_model
