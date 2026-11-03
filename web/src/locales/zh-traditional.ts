@@ -134,6 +134,7 @@ export default {
       filesSelected: '選定的文件',
       upload: '上傳',
       run: '解析',
+      parsed: '已解析',
       runningStatus0: '未解析',
       runningStatus1: '解析中',
       runningStatus2: '取消',

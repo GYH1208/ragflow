@@ -578,6 +578,7 @@ Example: A 1 KB message with 1024-dim embedding uses ~9 KB. The 5 MB default lim
       filesSelected: 'Files selected',
       upload: 'Upload',
       run: 'Parse',
+      parsed: 'Parsed',
       runningStatus0: 'Pending',
       runningStatus1: 'Parsing',
       runningStatus2: 'Cancelled',

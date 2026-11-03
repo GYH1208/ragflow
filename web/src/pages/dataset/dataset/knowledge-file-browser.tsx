@@ -4,6 +4,7 @@ import Empty from '@/components/empty/empty';
 import { FileUploadDialog } from '@/components/file-upload-dialog';
 import { FileIcon } from '@/components/icon-font';
 import { RenameDialog } from '@/components/rename-dialog';
+import { badgeVariants } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -18,6 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { RunningStatus, RunningStatusOld } from '@/constants/knowledge';
 import { useNavigatePage } from '@/hooks/logic-hooks/navigate-hooks';
 import {
   useRunDocument,
@@ -35,6 +37,7 @@ import {
 import { KnowledgeEntry } from '@/interfaces/database/knowledge-file';
 import { formatDate } from '@/utils/date';
 import {
+  CircleCheck,
   Folder,
   FolderInput,
   Play,
@@ -51,6 +54,28 @@ import { KnowledgeEntryActionCell } from './knowledge-entry-action-cell';
 import { KnowledgeFileBreadcrumb } from './knowledge-file-breadcrumb';
 import { KnowledgeMoveDialog } from './knowledge-move-dialog';
 import { useHandleUploadDocument } from './use-upload-document';
+
+function ParsedBadge({ entry }: { entry: KnowledgeEntry }) {
+  const { t } = useTranslation();
+  if (
+    entry.entry_type !== 'document' ||
+    ![RunningStatus.DONE, RunningStatusOld.DONE].includes(entry.run)
+  ) {
+    return null;
+  }
+
+  return (
+    <span
+      className={badgeVariants({
+        variant: 'success',
+        className: 'shrink-0 gap-1 whitespace-nowrap',
+      })}
+    >
+      <CircleCheck className="size-3" aria-hidden="true" />
+      {t('knowledgeDetails.parsed')}
+    </span>
+  );
+}
 
 export function KnowledgeFileBrowser() {
   const { t } = useTranslation();
@@ -282,6 +307,7 @@ export function KnowledgeFileBrowser() {
                     <span className="min-w-0 break-all text-sm font-medium">
                       {entry.name}
                     </span>
+                    <ParsedBadge entry={entry} />
                   </button>
                 </div>
                 {keywords && (
@@ -413,6 +439,7 @@ export function KnowledgeFileBrowser() {
                           </span>
                         )}
                       </span>
+                      <ParsedBadge entry={entry} />
                     </button>
                   </TableCell>
                   <TableCell>{formatDate(entry.create_time)}</TableCell>

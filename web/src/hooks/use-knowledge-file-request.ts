@@ -1,3 +1,4 @@
+import { RunningStatus, RunningStatusOld } from '@/constants/knowledge';
 import { DocumentApiAction } from '@/hooks/use-document-request';
 import {
   KnowledgeDeleteResult,
@@ -43,6 +44,19 @@ export function useKnowledgeEntries(params: KnowledgeEntriesQuery) {
   return useQuery<KnowledgeEntriesResult>({
     queryKey: [KnowledgeFileApiAction.List, params],
     enabled: Boolean(datasetId),
+    refetchInterval: (query) =>
+      query.state.data?.entries.some(
+        (entry) =>
+          entry.entry_type === 'document' &&
+          [
+            RunningStatus.RUNNING,
+            RunningStatus.SCHEDULE,
+            RunningStatusOld.RUNNING,
+            RunningStatusOld.SCHEDULE,
+          ].includes(entry.run),
+      )
+        ? 5000
+        : false,
     queryFn: async () => {
       const response = await listKnowledgeEntries(datasetId, {
         parent_id: folderId,

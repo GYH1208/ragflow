@@ -197,3 +197,58 @@ test('keeps pagination visible while the file table owns the scroll area', () =>
   );
   expect(screen.getByText('pagination').parentElement).toHaveClass('shrink-0');
 });
+
+test.each(['3', 'DONE'])(
+  'marks completed documents beside their names in both layouts (%s)',
+  (run) => {
+    const document = mockEntries[1];
+    const originalRun = document.run;
+    document.run = run;
+    try {
+      render(React.createElement(KnowledgeFileBrowser));
+
+      const names = screen.getAllByRole('button', {
+        name: /A\.docx.*knowledgeDetails\.parsed/,
+      });
+      expect(names).toHaveLength(2);
+      expect(screen.getAllByText('knowledgeDetails.parsed')).toHaveLength(2);
+      expect(screen.getAllByRole('button', { name: '制度文件' })).toHaveLength(
+        2,
+      );
+      expect(
+        screen.getAllByRole('button', { name: 'knowledgeDetails.run' }),
+      ).toHaveLength(2);
+    } finally {
+      document.run = originalRun;
+    }
+  },
+);
+
+test.each([
+  '0',
+  '1',
+  '2',
+  '4',
+  '5',
+  'UNSTART',
+  'RUNNING',
+  'CANCEL',
+  'FAIL',
+  'SCHEDULE',
+])(
+  'does not mark documents as parsed for status %s even with existing chunks',
+  (run) => {
+    const document = mockEntries[1];
+    const originalRun = document.run;
+    document.run = run;
+    try {
+      render(React.createElement(KnowledgeFileBrowser));
+
+      expect(
+        screen.queryByText('knowledgeDetails.parsed'),
+      ).not.toBeInTheDocument();
+    } finally {
+      document.run = originalRun;
+    }
+  },
+);
