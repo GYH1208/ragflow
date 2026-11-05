@@ -2027,6 +2027,23 @@ Example: Virtual Hosted Style`,
       hint: 'hint',
     },
     fileManager: {
+      backgroundUploadHint:
+        'Select multiple files (including 100 at once) or a folder. Save starts a background upload so you can keep using the platform. Keep this page open without refreshing until uploading finishes.',
+      backgroundUploadTitle: 'Background upload: {{count}} files',
+      backgroundUploadQueued:
+        'Queued for background upload. You can keep using the platform. Keep this page open until uploading finishes.',
+      backgroundUploadProgress:
+        'Uploaded {{completed}} / {{total}} files. You can keep using the platform.',
+      backgroundParseProgress:
+        'Files saved. Submitting parsing tasks: {{completed}} / {{total}}.',
+      backgroundUploadComplete:
+        'All files uploaded. The document list has been updated.',
+      backgroundUploadParsing:
+        'All files uploaded and parsing tasks submitted. Check parsing progress in the document list.',
+      backgroundParseFailed:
+        'Files uploaded, but some parsing tasks were not submitted. Start parsing from the document list without uploading again.',
+      backgroundUploadFailed:
+        'Confirmed {{completed}} / {{total}} files uploaded. The task did not fully complete. Files in failed requests may already be saved. Check the document list before uploading missing files.',
       uploadFolderTitle: 'Upload folder',
       folder: 'Folder',
       files: 'Files',

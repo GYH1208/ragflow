@@ -29,12 +29,12 @@ import { ManageMetadataModal } from '../components/metedata/manage-modal';
 import { useKnowledgeBaseContext } from '../contexts/knowledge-base-context';
 import { DatasetTable } from './dataset-table';
 import Generate from './generate-button/generate';
+import { KnowledgeFileBrowser } from './knowledge-file-browser';
 import { ReparseDialog } from './reparse-dialog';
 import { useBulkOperateDataset } from './use-bulk-operate-dataset';
 import { useCreateEmptyDocument } from './use-create-empty-document';
 import { useSelectDatasetFilters } from './use-select-filters';
 import { useHandleUploadDocument } from './use-upload-document';
-import { KnowledgeFileBrowser } from './knowledge-file-browser';
 
 export default function Dataset() {
   return <KnowledgeFileBrowser />;
@@ -243,6 +243,7 @@ export function LegacyDataset() {
 
         {documentUploadVisible && (
           <FileUploadDialog
+            backgroundUpload
             hideModal={hideDocumentUploadModal}
             onOk={onDocumentUploadOk}
             loading={documentUploadLoading}

@@ -1711,6 +1711,22 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取实体和关系
       hint: '提示',
     },
     fileManager: {
+      backgroundUploadHint:
+        '支持一次选择 100 份等多个文件或整个文件夹。保存后自动在后台上传，可继续操作平台；上传完成前请勿刷新或关闭网页。',
+      backgroundUploadTitle: '后台上传：{{count}} 个文件',
+      backgroundUploadQueued:
+        '已加入后台上传队列，可继续操作平台。上传完成前请保留此网页。',
+      backgroundUploadProgress:
+        '已上传 {{completed}} / {{total}} 个文件，可继续操作平台。',
+      backgroundParseProgress:
+        '文件已保存，正在提交解析任务：{{completed}} / {{total}}。',
+      backgroundUploadComplete: '全部文件上传完成，文件列表已更新。',
+      backgroundUploadParsing:
+        '全部文件上传完成，解析任务已提交，可在文件列表查看解析进度。',
+      backgroundParseFailed:
+        '文件已上传，但解析任务未全部提交。请在文件列表启动解析，无需重新上传。',
+      backgroundUploadFailed:
+        '已确认上传 {{completed}} / {{total}} 个文件，本次任务未全部完成。失败请求中的文件也可能已保存，请先核对文件列表，再补传缺失文件。',
       uploadFolderTitle: '上传文件夹',
       folder: '文件夹',
       files: '文件',

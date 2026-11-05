@@ -552,6 +552,7 @@ export function KnowledgeFileBrowser() {
       )}
       {documentUploadVisible && (
         <FileUploadDialog
+          backgroundUpload
           hideModal={hideDocumentUploadModal}
           onOk={onDocumentUploadOk}
           loading={documentUploadLoading}

@@ -67,11 +67,13 @@ type UploadFormProps = {
   submit: (values?: UploadFormSchemaType) => void;
   showParseOnCreation?: boolean;
   isTableParser?: boolean;
+  backgroundUpload?: boolean;
 };
 function UploadForm({
   submit,
   showParseOnCreation,
   isTableParser,
+  backgroundUpload,
 }: UploadFormProps) {
   const { t } = useTranslation();
   const FormSchema = buildUploadFormSchema(t);
@@ -168,6 +170,11 @@ function UploadForm({
                 field.onChange(files);
                 handleFilesChange(files);
               }}
+              description={
+                backgroundUpload
+                  ? t('fileManager.backgroundUploadHint')
+                  : undefined
+              }
               accept={{}}
               data-testid="dataset-upload-dropzone"
             />
@@ -251,13 +258,17 @@ function UploadForm({
 }
 
 type FileUploadDialogProps = IModalProps<UploadFormSchemaType> &
-  Pick<UploadFormProps, 'showParseOnCreation' | 'isTableParser'>;
+  Pick<
+    UploadFormProps,
+    'showParseOnCreation' | 'isTableParser' | 'backgroundUpload'
+  >;
 export function FileUploadDialog({
   hideModal,
   onOk,
   loading,
   showParseOnCreation = false,
   isTableParser = false,
+  backgroundUpload = false,
 }: FileUploadDialogProps) {
   const { t } = useTranslation();
 
@@ -272,6 +283,7 @@ export function FileUploadDialog({
         </DialogHeader>
         <UploadForm
           submit={onOk!}
+          backgroundUpload={backgroundUpload}
           showParseOnCreation={showParseOnCreation}
           isTableParser={isTableParser}
         />

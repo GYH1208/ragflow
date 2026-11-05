@@ -1,13 +1,11 @@
 import { UploadFormSchemaType } from '@/components/file-upload-dialog';
 import { useSetModalState } from '@/hooks/common-hooks';
-import {
-  useRunDocument,
-  useUploadDocument,
-} from '@/hooks/use-document-request';
-import { getUnSupportedFilesCount } from '@/utils/document-util';
-import { useCallback, useRef, useState } from 'react';
-
-const ParseSubmissionBatchSize = 50;
+import { DocumentApiAction } from '@/hooks/use-document-request';
+import { KnowledgeFileApiAction } from '@/hooks/use-knowledge-file-request';
+import { startBackgroundKnowledgeUpload } from '@/utils/background-knowledge-upload';
+import { useQueryClient } from '@tanstack/react-query';
+import { useCallback, useRef } from 'react';
+import { useParams } from 'react-router';
 
 export const useHandleUploadDocument = (
   parentFolderId?: string,
@@ -15,13 +13,16 @@ export const useHandleUploadDocument = (
 ) => {
   const {
     visible: documentUploadVisible,
-    hideModal: hideDocumentUploadModal,
-    showModal: showDocumentUploadModal,
+    hideModal,
+    showModal,
   } = useSetModalState();
-  const { uploadDocument, loading } = useUploadDocument();
-  const { runDocumentByIds } = useRunDocument();
-  const submittingRef = useRef(false);
-  const [submitting, setSubmitting] = useState(false);
+  const { id: datasetId } = useParams();
+  const queryClient = useQueryClient();
+  const submittedRef = useRef(false);
+  const showDocumentUploadModal = useCallback(() => {
+    submittedRef.current = false;
+    showModal();
+  }, [showModal]);
 
   const onDocumentUploadOk = useCallback(
     async ({
@@ -30,93 +31,51 @@ export const useHandleUploadDocument = (
       tableColumnMode,
       tableColumnRoles,
     }: UploadFormSchemaType) => {
-      if (submittingRef.current || fileList.length === 0) return;
-
-      submittingRef.current = true;
-      setSubmitting(true);
-      try {
-        // Build parser_config if column roles are configured
-        let parserConfig: Record<string, any> | undefined;
-        if (
-          tableColumnMode === 'manual' &&
-          tableColumnRoles &&
-          Object.keys(tableColumnRoles).length > 0
-        ) {
-          parserConfig = {
-            table_column_mode: 'manual',
-            table_column_roles: tableColumnRoles,
-          };
-        }
-
-        const ret = await uploadDocument(
-          fileList as File[],
-          parserConfig,
-          parentFolderId,
-        );
-
-        // Check for success (code === 0) or partial success (code === 500 with some files)
-        const isSuccess = ret?.code === 0;
-        const isPartialSuccess = ret?.code === 500 && ret?.message;
-
-        if (!isSuccess && !isPartialSuccess) {
-          return;
-        }
-
-        if (isSuccess && parseOnCreation) {
-          const documentIds = ret.data.map((x: any) => x.id);
-          let parseCode = 0;
-          for (
-            let offset = 0;
-            offset < documentIds.length;
-            offset += ParseSubmissionBatchSize
-          ) {
-            parseCode = await runDocumentByIds({
-              documentIds: documentIds.slice(
-                offset,
-                offset + ParseSubmissionBatchSize,
-              ),
-              run: 1,
-            });
-            if (parseCode !== 0) break;
-          }
+      if (submittedRef.current || fileList.length === 0 || !datasetId) return;
+      submittedRef.current = true;
+      const parserConfig =
+        tableColumnMode === 'manual' &&
+        tableColumnRoles &&
+        Object.keys(tableColumnRoles).length
+          ? {
+              table_column_mode: 'manual',
+              table_column_roles: { ...tableColumnRoles },
+            }
+          : undefined;
+      // Capture the destination now. React Query mutation observers can change
+      // their options when navigating to another dataset during an upload.
+      void startBackgroundKnowledgeUpload({
+        datasetId,
+        parentFolderId,
+        files: [...fileList],
+        parserConfig,
+        parseOnCreation,
+        onSettled: async () => {
+          await Promise.all([
+            queryClient.invalidateQueries({
+              queryKey: [DocumentApiAction.FetchDocumentList],
+            }),
+            queryClient.invalidateQueries({
+              queryKey: [KnowledgeFileApiAction.List],
+            }),
+            queryClient.invalidateQueries({
+              queryKey: [KnowledgeFileApiAction.Ancestors],
+            }),
+          ]);
           await onUploadComplete?.();
-          if (parseCode !== 0) return parseCode;
-        }
-
-        if (isSuccess) {
-          if (!parseOnCreation) await onUploadComplete?.();
-          hideDocumentUploadModal();
-          return 0;
-        }
-
-        // For partial success (code 500), check if any files were uploaded
-        const count = getUnSupportedFilesCount(ret?.message);
-        if (count !== fileList.length) {
-          await onUploadComplete?.();
-          hideDocumentUploadModal();
-          return 0;
-        }
-
-        return ret?.code;
-      } finally {
-        submittingRef.current = false;
-        setSubmitting(false);
-      }
+        },
+      });
+      hideModal();
+      return 0;
     },
-    [
-      uploadDocument,
-      runDocumentByIds,
-      onUploadComplete,
-      hideDocumentUploadModal,
-      parentFolderId,
-    ],
+    [datasetId, parentFolderId, queryClient, onUploadComplete, hideModal],
   );
 
   return {
-    documentUploadLoading: loading || submitting,
+    documentUploadLoading: false,
     onDocumentUploadOk,
     documentUploadVisible,
-    hideDocumentUploadModal,
+    hideDocumentUploadModal: hideModal,
     showDocumentUploadModal,
   };
 };
