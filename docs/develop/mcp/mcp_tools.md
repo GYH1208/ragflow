@@ -17,7 +17,7 @@ The MCP server exposes seven tools:
 | `ragflow_retrieval` | Retrieve relevant chunks by question. Omit `dataset_ids` to search datasets accessible to the current key. |
 | `search_documents` | Find documents by filename and return their dataset and document IDs. |
 | `get_document_chunks` | Read an identified document's chunks in source order, with pagination. |
-| `get_chunk_image` | Read one authorized chunk's image and return native MCP `ImageContent` with source IDs. |
+| `get_chunk_image` | Read one authorized chunk's image and return native MCP `ImageContent`, source IDs and a short-lived file download link. |
 
 Tool discovery returns static schemas without fetching dataset lists. Retrieval and document reading return image IDs as metadata; images are fetched only through `get_chunk_image`.
 
@@ -112,9 +112,48 @@ Fetch images on demand rather than fetching every retrieval result, avoid fetchi
 
 ### WorkBuddy image attachments
 
-The tested WorkBuddy client displays native MCP images in tool results and can attach them to the final answer through `present_files`, using the corresponding readable image file in its local client cache. This does not establish support for inline images in the answer body. The model may see the image without receiving its Base64 data as readable text.
+`get_chunk_image` still returns native MCP image content. Its first text block
+retains `dataset_id`, `document_id`, and `chunk_id`, and adds `download_url`,
+`filename`, `mime_type`, `size_bytes`, `sha256`, `expires_at`, and
+`delivery_instructions` when file delivery is available. Download the URL as
+binary bytes into a known file in the **client workspace**, verify size and
+SHA-256, then pass that local path to `present_files`. Do not scan client cache
+or temporary directories, reconstruct Base64 with the model, or pass a URL as
+a local attachment. Preserve the returned file format. If downloading or file
+presentation is unavailable, show the download link and identify its source.
 
-A WorkBuddy Skill can guide this flow: retrieve relevant chunks, call `get_chunk_image` on demand, confirm a readable client cache file actually corresponds to that returned image, and use `present_files` to attach it with the document source. Do not guess cache paths or substitute images extracted from local documents. Repeated calls can reuse the same cached file, so modification time alone does not establish which image it contains. Preserve the stored format rather than assuming PNG. If the cache file cannot be identified or read, report the limitation. A path on the remote MCP server is not a local WorkBuddy file path.
+This avoids relying on WorkBuddy's internal blob cache layout. Native image
+rendering and attachment presentation remain client-dependent. If metadata
+contains `download_error`, the native image is still returned; report the file
+delivery problem instead of treating it as a knowledge-base permission denial.
+See [WorkBuddy image download instructions](../../guides/workbuddy-image-download.md)
+for replacement Skill rules and the end-to-end acceptance check.
+
+### Image download deployment and limits
+
+The route is `GET /mcp/image-download/{token}` (also supports HEAD). Restart the
+MCP server and refresh its tools after deployment; no tool arguments or backend
+changes are required. Behind a proxy set `RAGFLOW_MCP_PUBLIC_URL` to the exact
+client-reachable MCP endpoint, such as `https://mcp.example.com/prefix/mcp`, and
+forward `/prefix/mcp/image-download/*` to the same MCP process. Prefixes must be
+stripped or exposed as an ASGI root path. Direct Streamable HTTP requests at
+`/mcp` use their request URL by default; legacy SSE needs the explicit public
+endpoint. Both WorkBuddy's connector and its file downloader must reach it.
+
+The link is a random **bearer capability** for one authorized image snapshot,
+valid for 15 minutes. It contains no employee credentials. Anyone holding it
+can download that snapshot until expiry, including after permissions are
+revoked; new `get_chunk_image` calls always recheck backend access. Keep links
+private. Responses are attachments with `private, no-store`; the MCP access log
+redacts image tokens. Configure reverse proxies to redact or omit these paths.
+
+The per-process cache holds at most 128 images and 64 MiB; expired entries are
+pruned on use and every minute, and shutdown clears it. Valid links are not
+evicted to make room. If the cache is full or the public endpoint is invalid,
+the tool returns native image content with `download_error` and no URL. Expired,
+unknown and pre-restart links return 404. Multi-worker deployments need sticky
+routing or shared storage. Existing backend/MCP image size and format checks
+still apply. File names use document/chunk IDs and the detected extension.
 
 ## Limits and errors
 

@@ -76,6 +76,7 @@ logger = logging.getLogger(__name__)
 
 
 CATALOG_EXPORTS = None
+IMAGE_DOWNLOADS = None
 CATALOG_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -87,9 +88,91 @@ class CatalogDownloadLogFilter(logging.Filter):
     def filter(self, record):
         if isinstance(record.args, tuple) and len(record.args) == 5:
             client, method, path, version, status = record.args
-            if isinstance(path, str) and "/mcp/catalog-download/" in path:
-                record.args = (client, method, "/mcp/catalog-download/[redacted]", version, status)
+            if isinstance(path, str):
+                for route in ("catalog-download", "image-download"):
+                    if f"/mcp/{route}/" in path:
+                        record.args = (client, method, f"/mcp/{route}/[redacted]", version, status)
+                        break
         return True
+
+
+class ImageDownloadError(ValueError):
+    """Safe failure of optional image file delivery, not native image delivery."""
+
+
+class ImageDownloads:
+    """Bounded, per-process snapshots authorized before issuing a capability."""
+
+    TTL = 15 * 60
+    MAX_IMAGES = 128
+    MAX_BYTES = 64 * 1024 * 1024
+
+    def __init__(self):
+        self.images = {}
+
+    async def __aenter__(self):
+        self._cleaner = asyncio.create_task(self._cleanup_loop())
+        return self
+
+    async def __aexit__(self, *exc):
+        self._cleaner.cancel()
+        await asyncio.gather(self._cleaner, return_exceptions=True)
+        self.images.clear()
+
+    def _prune(self):
+        now = time.monotonic()
+        for token, entry in list(self.images.items()):
+            if entry["expires_at"] <= now:
+                del self.images[token]
+
+    async def _cleanup_loop(self):
+        while True:
+            await asyncio.sleep(60)
+            self._prune()
+
+    def publish(self, data, mime_type, source, base_url):
+        # No await between capacity check and insertion: atomic on the app loop.
+        self._prune()
+        if len(self.images) >= self.MAX_IMAGES or sum(len(item["data"]) for item in self.images.values()) + len(data) > self.MAX_BYTES:
+            raise ImageDownloadError("Image download capacity is busy; native image is still available. Try again after existing links expire.")
+        extension = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp", "image/bmp": "bmp"}[mime_type]
+        filename = f"{source['document_id'][:64]}_{source['chunk_id']}.{extension}"
+        token = secrets.token_urlsafe(32)
+        self.images[token] = {"data": data, "mime_type": mime_type, "filename": filename, "expires_at": time.monotonic() + self.TTL}
+        return {
+            "download_url": f"{base_url}/image-download/{token}",
+            "filename": filename,
+            "mime_type": mime_type,
+            "size_bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "expires_at": (datetime.now(UTC) + timedelta(seconds=self.TTL)).isoformat(),
+            "delivery_instructions": (
+                "Download download_url as binary bytes into a known file path in the client workspace using filename. "
+                "Verify size_bytes and sha256, then call present_files (or the client's file presentation tool) with that local path. "
+                "Do not scan cache or temporary directories, reconstruct base64 text, or use a remote URL as a local file path. "
+                "If downloading or presenting files is unavailable, give the user the download link. "
+                "The link grants access to this image until expires_at; keep it private. Include the document source."
+            ),
+        }
+
+    async def download(self, request):
+        self._prune()
+        entry = self.images.get(request.path_params["token"])
+        headers = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
+        if entry is None:
+            return Response("Image download unavailable or expired.", status_code=404, headers=headers)
+        headers["Content-Disposition"] = f"attachment; filename=\"{entry['filename']}\""
+        return Response(entry["data"], media_type=entry["mime_type"], headers=headers)
+
+
+def _image_download_base_url():
+    try:
+        endpoint = _catalog_base_url()
+    except (CatalogExportError, LookupError, ValueError):
+        raise ImageDownloadError("Configure RAGFLOW_MCP_PUBLIC_URL with the client-reachable MCP endpoint for image downloads.") from None
+    if not os.environ.get("RAGFLOW_MCP_PUBLIC_URL") and not urlsplit(endpoint).path.endswith("/mcp"):
+        raise ImageDownloadError("Configure RAGFLOW_MCP_PUBLIC_URL with the client-reachable MCP endpoint for image downloads.")
+    return endpoint
 
 
 def _build_catalog_workbook(dataset_id, dataset_name, documents, exported_at, cancel_event=None):
@@ -1443,6 +1526,9 @@ async def list_tools(*, connector: RAGFlowConnector, api_key: str) -> list[types
                 "Call only for a relevant chunk with a non-empty image_id when the user asks to see the image, screenshot, "
                 "diagram, or chart, or when it helps explain the answer. Fetch images on demand; do not fetch every result "
                 "or repeatedly fetch the same chunk within one answer. Include the image's source when presenting it. "
+                "The source text also includes a short-lived download_url, filename, size_bytes and sha256 when file delivery is available. "
+                "Download that URL directly into the client workspace, verify the file and present its local path; never scan cache directories. "
+                "If download_error is returned, native image content remains available; report the file delivery limitation. "
                 "Authorization is handled by the server; never put credentials in tool arguments or display an authenticated image URL."
             ),
             inputSchema={
@@ -1607,12 +1693,21 @@ async def call_tool(
             page_size=arguments.get("page_size", 10),
         )
     if name == "get_chunk_image":
-        return await connector.get_chunk_image(
+        content = await connector.get_chunk_image(
             api_key=api_key,
             dataset_id=arguments.get("dataset_id", ""),
             document_id=arguments.get("document_id", ""),
             chunk_id=arguments.get("chunk_id", ""),
         )
+        if IMAGE_DOWNLOADS is not None:
+            source = json.loads(content[0].text)
+            try:
+                base_url = _image_download_base_url()
+                source.update(IMAGE_DOWNLOADS.publish(base64.b64decode(content[1].data), content[1].mimeType, source, base_url))
+            except ImageDownloadError as exc:
+                source["download_error"] = str(exc)
+            content[0] = types.TextContent(type="text", text=json.dumps(source, ensure_ascii=False))
+        return content
     raise ValueError(f"Tool not found: {name}")
 
 
@@ -1622,7 +1717,11 @@ def create_starlette_app():
     if AUTH_MODE == "workbuddy" and MODE != LaunchMode.HOST:
         raise ValueError("WorkBuddy authentication requires host mode")
     exports = CatalogExports()
-    routes = [Route("/mcp/catalog-download/{token}", endpoint=exports.download, methods=["GET"])]
+    images = ImageDownloads()
+    routes = [
+        Route("/mcp/catalog-download/{token}", endpoint=exports.download, methods=["GET"]),
+        Route("/mcp/image-download/{token}", endpoint=images.download, methods=["GET"]),
+    ]
     access_logger = logging.getLogger("uvicorn.access")
     if not any(isinstance(item, CatalogDownloadLogFilter) for item in access_logger.filters):
         access_logger.addFilter(CatalogDownloadLogFilter())
@@ -1640,7 +1739,7 @@ def create_starlette_app():
                     return
 
                 path = scope["path"]
-                if path.startswith("/mcp/catalog-download/") and scope["method"] in ("GET", "HEAD"):
+                if path.startswith(("/mcp/catalog-download/", "/mcp/image-download/")) and scope["method"] in ("GET", "HEAD"):
                     await self.app(scope, receive, send)
                     return
 
@@ -1721,10 +1820,11 @@ def create_starlette_app():
 
     @asynccontextmanager
     async def application_lifespan(starlette_app):
-        global TOOL_CALL_COUNTS, CATALOG_EXPORTS
+        global TOOL_CALL_COUNTS, CATALOG_EXPORTS, IMAGE_DOWNLOADS
         try:
             async with AsyncExitStack() as stack:
                 CATALOG_EXPORTS = await stack.enter_async_context(exports)
+                IMAGE_DOWNLOADS = await stack.enter_async_context(images)
                 if TOOL_COUNTS_FILE is not None:
                     TOOL_CALL_COUNTS = await stack.enter_async_context(ToolCallCounts(TOOL_COUNTS_FILE))
                 if streamablehttp_lifespan is not None:
@@ -1733,6 +1833,7 @@ def create_starlette_app():
         finally:
             TOOL_CALL_COUNTS = None
             CATALOG_EXPORTS = None
+            IMAGE_DOWNLOADS = None
 
     return Starlette(
         debug=False,
