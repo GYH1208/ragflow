@@ -36,6 +36,7 @@ from api.db.services.document_service import DocumentService
 from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.langfuse_service import TenantLangfuseService
 from api.db.services.llm_service import LLMBundle
+from api.db.services.supplemental_retrieval import retry_empty_retrieval
 from common.metadata_utils import apply_meta_data_filter
 from api.utils.reference_metadata_utils import (
     enrich_chunks_with_document_metadata,
@@ -56,6 +57,7 @@ from rag.prompts.multiturn import (
     normalize_message_content,
     refine_multiturn_question,
 )
+from rag.prompts.template import load_prompt
 from common.token_utils import num_tokens_from_string
 from rag.utils.tavily_conn import Tavily
 from rag.utils.tts_cache import synthesize_with_cache
@@ -923,9 +925,13 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         raise ValueError("The current user message has no textual content.")
 
     prompt_config = dialog.prompt_config
+    lightweight_qa = prompt_config.get("lightweight_qa") is True
     generation_question = current_question
     if prompt_config.get("refine_multiturn"):
-        decision = await refine_multiturn_question(chat_mdl, messages)
+        if lightweight_qa:
+            decision = await refine_multiturn_question(chat_mdl, messages, lightweight=True)
+        else:
+            decision = await refine_multiturn_question(chat_mdl, messages)
         logger.info(
             "Multiturn refinement action=%s confidence_bucket=%s "
             "unresolved_count=%d fallback=%s",
@@ -1104,26 +1110,48 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
 
         else:
             if embd_mdl:
-                kbinfos = await retriever.retrieval(
-                    " ".join(questions),
-                    embd_mdl,
-                    tenant_ids,
-                    dialog.kb_ids,
-                    1,
-                    dialog.top_n,
-                    dialog.similarity_threshold,
-                    dialog.vector_similarity_weight,
-                    doc_ids=attachments,
-                    top=dialog.top_k,
-                    aggs=True,
-                    rerank_mdl=rerank_mdl,
-                    rank_feature=label_question(" ".join(questions), kbs),
+                async def retrieve_question(question):
+                    return await retriever.retrieval(
+                        question,
+                        embd_mdl,
+                        tenant_ids,
+                        dialog.kb_ids,
+                        1,
+                        dialog.top_n,
+                        dialog.similarity_threshold,
+                        dialog.vector_similarity_weight,
+                        doc_ids=attachments,
+                        top=dialog.top_k,
+                        aggs=True,
+                        rerank_mdl=rerank_mdl,
+                        rank_feature=label_question(question, kbs),
+                    )
+
+                primary_query = " ".join(questions)
+                kbinfos = await retrieve_question(primary_query)
+                retry_needed = (
+                    lightweight_qa
+                    and not kbinfos.get("chunks")
+                    and " ".join(primary_query.split()) != " ".join(generation_question.split())
                 )
-                if prompt_config.get("toc_enhance"):
-                    cks = await retriever.retrieval_by_toc(" ".join(questions), kbinfos["chunks"], tenant_ids, chat_mdl, dialog.top_n)
-                    if cks:
-                        kbinfos["chunks"] = cks
-                kbinfos["chunks"] = retriever.retrieval_by_children(kbinfos["chunks"], tenant_ids)
+                if retry_needed:
+                    async def retrieve_fallback(question):
+                        result = await retrieve_question(question)
+                        result["chunks"] = retriever.retrieval_by_children(result["chunks"], tenant_ids)
+                        return result
+
+                    kbinfos = await retry_empty_retrieval(
+                        kbinfos,
+                        primary_query=primary_query,
+                        fallback_query=generation_question,
+                        retrieve=retrieve_fallback,
+                    )
+                else:
+                    if prompt_config.get("toc_enhance"):
+                        cks = await retriever.retrieval_by_toc(primary_query, kbinfos["chunks"], tenant_ids, chat_mdl, dialog.top_n)
+                        if cks:
+                            kbinfos["chunks"] = cks
+                    kbinfos["chunks"] = retriever.retrieval_by_children(kbinfos["chunks"], tenant_ids)
             if use_web_search:
                 tav = Tavily(prompt_config["tavily_api_key"])
                 tav_res = tav.retrieve_chunks(" ".join(questions))
@@ -1160,6 +1188,8 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     if knowledge_text:
         kwargs["knowledge"] = "\n------\n" + knowledge_text
     system_content = prompt_config["system"].format(**kwargs) + attachments_
+    if lightweight_qa:
+        system_content += "\n\n" + load_prompt("lightweight_qa")
     # If knowledge was retrieved but the template has no {knowledge}
     # placeholder, auto-append it so the LLM still sees the context.
     if knowledges and "{knowledge}" not in prompt_config.get("system", ""):

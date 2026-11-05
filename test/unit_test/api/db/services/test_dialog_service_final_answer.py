@@ -228,6 +228,10 @@ class _RecordingChatModel(_StreamingChatModel):
         self.chat_calls.append((system_prompt, deepcopy(messages), gen_conf, kwargs))
         return self.answer
 
+    async def async_chat_streamly_delta(self, system_prompt, messages, gen_conf, **kwargs):
+        self.chat_calls.append((system_prompt, deepcopy(messages), gen_conf, kwargs))
+        yield self.answer
+
 
 class _FakePropagateAttributesContext:
     """No-op context manager for fake propagate_attributes."""
@@ -426,12 +430,13 @@ def _run_reference_async_chat(
     dialog_llm_setting=None,
     prompt_config_overrides=None,
     async_chat_kwargs=None,
+    retriever_override=None,
 ):
     chat_mdl = _RecordingChatModel(answer)
     chat_mdl.refinement_messages = []
     chat_mdl.refinement_calls = 0
     chat_mdl.sql_questions = []
-    retriever = _ReferenceRetriever(kbinfos, inserted_indices)
+    retriever = retriever_override or _ReferenceRetriever(kbinfos, inserted_indices)
 
     monkeypatch.setattr(
         dialog_service,
@@ -483,7 +488,7 @@ def _run_reference_async_chat(
     monkeypatch.setattr(
         dialog_service,
         "kb_prompt",
-        lambda _kbinfos, _max_tokens, **_kwargs: ["当前知识块"],
+        lambda _kbinfos, _max_tokens, **_kwargs: ["当前知识块"] if _kbinfos.get("chunks") else [],
     )
     if refinement_decision is not None:
         async def fake_refine_multiturn_question(
@@ -1974,3 +1979,131 @@ def test_missing_exact_document_identifier_returns_no_evidence_response(
     }
     assert chat_mdl.chat_calls == []
     assert retriever.retrieval_calls == []
+
+
+class _RecoveringRetriever(_ReferenceRetriever):
+    def __init__(self, *, fail_retry=False):
+        super().__init__(_make_reference_kbinfos())
+        self.fail_retry = fail_retry
+        self.toc_calls = 0
+
+    async def retrieval(self, *args, **kwargs):
+        self.retrieval_calls.append((args, kwargs))
+        if len(self.retrieval_calls) == 1:
+            return {"chunks": [], "doc_aggs": [], "total": 0}
+        if self.fail_retry:
+            raise RuntimeError("provider unavailable")
+        return deepcopy(self.kbinfos)
+
+    async def retrieval_by_toc(self, *args):
+        self.toc_calls += 1
+        return []
+
+
+def _expanded_keywords(monkeypatch):
+    async def keywords(*args):
+        return "扩展词"
+    monkeypatch.setattr(dialog_service, "keyword_extraction", keywords)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_lightweight_retry_preserves_scope_and_streaming_citations(monkeypatch, stream):
+    _expanded_keywords(monkeypatch)
+    retriever = _RecoveringRetriever()
+    result, model, _ = _run_reference_async_chat(
+        monkeypatch,
+        answer="按流程办理 [ID:0]。",
+        kbinfos={},
+        messages=[{"role": "user", "content": "证照借用流程"}],
+        retriever_override=retriever,
+        document_code_scope=(["DOC-001"], ["doc-1"]),
+        prompt_config_overrides={"lightweight_qa": True, "keyword": True, "toc_enhance": True},
+        stream=stream,
+    )
+    final = result[-1] if stream else result
+    visible_answer = "".join(event["answer"] for event in result) if stream else final["answer"]
+    assert "按流程办理" in visible_answer
+    assert "[ID:0]" in visible_answer
+    assert final["reference"]["chunks"]
+    assert len(model.chat_calls) == 1
+    assert len(retriever.retrieval_calls) == 2
+    primary, fallback = retriever.retrieval_calls
+    assert primary[0][0] == "证照借用流程,扩展词"
+    assert fallback[0][0] == "证照借用流程"
+    assert fallback[0][1:] == primary[0][1:]
+    assert fallback[1] == primary[1]
+    assert fallback[1]["doc_ids"] == ["doc-1"]
+    assert retriever.toc_calls == 0
+    assert model.chat_calls[0][1] == [{"role": "user", "content": "证照借用流程"}]
+
+
+@pytest.mark.parametrize("flag", [None, False, "true", "false", 1])
+def test_lightweight_disabled_never_retries_empty_results(monkeypatch, flag):
+    _expanded_keywords(monkeypatch)
+    retriever = _RecoveringRetriever()
+    final, model, _ = _run_reference_async_chat(
+        monkeypatch, answer="不应生成", kbinfos={}, retriever_override=retriever,
+        prompt_config_overrides={"lightweight_qa": flag, "keyword": True, "empty_response": "暂无依据"},
+    )
+    assert final["answer"] == "暂无依据"
+    assert len(retriever.retrieval_calls) == 1
+    assert model.chat_calls == []
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_lightweight_normal_answer_has_one_retrieval_and_one_generation(monkeypatch, stream):
+    result, model, retriever = _run_reference_async_chat(
+        monkeypatch, answer="有依据的回答 [ID:0]。", kbinfos=_make_reference_kbinfos(),
+        prompt_config_overrides={"lightweight_qa": True}, stream=stream,
+    )
+    final = result[-1] if stream else result
+    visible_answer = "".join(event["answer"] for event in result) if stream else final["answer"]
+    assert "有依据的回答" in visible_answer
+    assert len(retriever.retrieval_calls) == 1
+    assert len(model.chat_calls) == 1
+
+
+def test_lightweight_failed_retry_keeps_no_evidence_response(monkeypatch):
+    _expanded_keywords(monkeypatch)
+    retriever = _RecoveringRetriever(fail_retry=True)
+    final, model, _ = _run_reference_async_chat(
+        monkeypatch, answer="不应生成", kbinfos={}, retriever_override=retriever,
+        prompt_config_overrides={"lightweight_qa": True, "keyword": True, "empty_response": "暂无依据"},
+    )
+    assert final["answer"] == "暂无依据"
+    assert final["reference"]["chunks"] == []
+    assert len(retriever.retrieval_calls) == 2
+    assert model.chat_calls == []
+
+
+def test_lightweight_does_not_repeat_identical_empty_query(monkeypatch):
+    retriever = _RecoveringRetriever()
+    final, model, _ = _run_reference_async_chat(
+        monkeypatch, answer="不应生成", kbinfos={}, retriever_override=retriever,
+        prompt_config_overrides={"lightweight_qa": True, "empty_response": "暂无依据"},
+    )
+    assert final["answer"] == "暂无依据"
+    assert len(retriever.retrieval_calls) == 1
+    assert model.chat_calls == []
+
+
+@pytest.mark.parametrize("question", ["出差", "它怎么申请？"])
+def test_lightweight_pipeline_separates_expired_topic_without_model_overhead(monkeypatch, question):
+    final, model, retriever = _run_reference_async_chat(
+        monkeypatch, answer="当前回答 [ID:0]", kbinfos=_make_reference_kbinfos(),
+        messages=[
+            {"role": "user", "content": "Wi-Fi", "created_at": 1000},
+            {"role": "assistant", "content": "旧网络话题"},
+            {"role": "user", "content": question, "created_at": 5000},
+        ],
+        refine_multiturn=True, prompt_config_overrides={"lightweight_qa": True},
+    )
+    if question == "出差":
+        assert len(model.chat_calls) == 1
+        assert retriever.retrieval_calls[0][0][0] == "出差"
+        assert "旧网络话题" not in str(model.chat_calls)
+    else:
+        assert final["answer"] != "当前回答 [ID:0]"
+        assert final["reference"]["chunks"] == []
+        assert retriever.retrieval_calls == []
+        assert model.chat_calls == []
