@@ -19,6 +19,7 @@ export interface PromptConfig {
   send_pdf_reference_images?: boolean;
   keyword: boolean;
   refine_multiturn: boolean;
+  lightweight_qa?: boolean;
   use_kg: boolean;
   reasoning?: boolean;
   cross_languages?: Array<string>;

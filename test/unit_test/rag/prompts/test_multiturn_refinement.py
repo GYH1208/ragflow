@@ -27,6 +27,7 @@ from rag.prompts.multiturn import (
         (1000, "nan", False),
         (1000, "inf", False),
         (1000, True, False),
+        (1000, 10**400, False),
         (2801, 1000, False),
     ],
 )
@@ -55,6 +56,15 @@ def test_active_history_removes_old_topic_but_keeps_recent_followup():
         {"role": "user", "content": "平台认证", "created_at": 5020},
     ]
     assert multiturn.select_active_messages(messages) == messages[2:]
+
+
+def test_backwards_timestamp_does_not_create_a_false_idle_gap():
+    messages = [
+        {"role": "user", "content": "借用证照", "created_at": 5000},
+        {"role": "user", "content": "更正用途", "created_at": 1000},
+        {"role": "user", "content": "它怎么申请？", "created_at": 5010},
+    ]
+    assert multiturn.select_active_messages(messages) == messages
 
 
 @pytest.mark.asyncio

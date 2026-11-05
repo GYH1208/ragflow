@@ -76,6 +76,8 @@ def _message_timestamp(value: object) -> float | None:
         return None
     try:
         stamp = float(value)
+    except OverflowError:
+        return None
     except ValueError:
         try:
             parsed = datetime.datetime.fromisoformat(value)
@@ -105,7 +107,8 @@ def select_active_messages(
             and current_time - previous_time > idle_seconds
         ):
             start = index
-        previous_time = current_time
+        if current_time is None or previous_time is None or current_time >= previous_time:
+            previous_time = current_time
     return messages[start:]
 
 

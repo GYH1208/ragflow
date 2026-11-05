@@ -74,3 +74,38 @@ describe('chat setting PDF reference image schema', () => {
     ).toBe(false);
   });
 });
+
+describe('lightweight QA setting persistence', () => {
+  it.each([true, false])(
+    'retains %s through settings validation',
+    (enabled) => {
+      const { result } = renderHook(() => useChatSettingSchema());
+      const parsed = result.current.parse({
+        ...validValues,
+        prompt_config: {
+          ...validValues.prompt_config,
+          lightweight_qa: enabled,
+        },
+      });
+
+      expect(parsed.prompt_config).toHaveProperty('lightweight_qa', enabled);
+    },
+  );
+
+  it('keeps old chats disabled and rejects string flags', () => {
+    const { result } = renderHook(() => useChatSettingSchema());
+
+    expect(result.current.parse(validValues).prompt_config).not.toHaveProperty(
+      'lightweight_qa',
+    );
+    expect(
+      result.current.safeParse({
+        ...validValues,
+        prompt_config: {
+          ...validValues.prompt_config,
+          lightweight_qa: 'false',
+        },
+      }).success,
+    ).toBe(false);
+  });
+});

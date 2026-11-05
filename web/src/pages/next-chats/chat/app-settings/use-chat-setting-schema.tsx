@@ -25,6 +25,7 @@ export function useChatSettingSchema() {
     prologue: z.string().optional(),
     system: z.string().min(1, { message: t('systemMessage') }),
     refine_multiturn: z.boolean(),
+    lightweight_qa: z.boolean().optional(),
     use_kg: z.boolean(),
     parameters: z
       .array(

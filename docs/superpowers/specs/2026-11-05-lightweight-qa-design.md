@@ -8,8 +8,9 @@ branch, with easy rollback. Their primary constraint is response speed.
 Keep the existing chat and enterprise-channel entrypoints. Add an opt-in
 `prompt_config.lightweight_qa` boolean (only JSON `true` enables it). No database
 migration, new dependency, production configuration change, or deployment.
-Missing/false retains the original path. The trial is backend-only and is
-enabled through the existing chat update API; a UI control is deferred.
+Missing/false retains the original path. The trial is enabled through the existing
+chat update API; the frontend schema preserves the optional flag during saves,
+but a visible UI control is deferred.
 
 Alternatives discussed: prompt/configuration changes only; an incremental
 bounded agent in the current chat pipeline (selected); full Agent workflow

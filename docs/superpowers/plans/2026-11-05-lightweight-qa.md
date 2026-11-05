@@ -32,10 +32,10 @@
 
 **Interfaces:** Extend `refine_multiturn_question(..., *, lightweight=False)`; keep the default contract. `select_active_messages(messages, idle_seconds=1800)` returns the latest contiguous conversation without mutating input.
 
-- [ ] Add failing tests for expired/fresh/missing/invalid/ISO/millisecond timestamps, old gaps within history, backwards clocks, and expired references.
-- [ ] Run focused pytest and confirm failures concern missing behavior.
-- [ ] Implement history selection and optional prompt guidance; write final-answer guidance.
-- [ ] Run refinement tests and commit.
+- [x] Add failing tests for expired/fresh/missing/invalid/ISO/millisecond timestamps, old gaps within history, backwards clocks, and expired references.
+- [x] Run focused pytest and confirm failures concern missing behavior.
+- [x] Implement history selection and optional prompt guidance; write final-answer guidance.
+- [x] Run refinement tests and commit.
 
 ## Task 2: Bounded retry and pipeline integration
 
@@ -43,11 +43,11 @@
 
 **Interfaces:** `retry_empty_retrieval(initial, *, primary_query, fallback_query, retrieve, timeout_seconds=2, executor=None)` returns original or successful result. `retrieve` is an async callable run in an isolated worker loop. Executor owns its threads; tests use scoped executors.
 
-- [ ] Add failing tests for fast-path/identical-query skip, successful single retry, empty/error/timeout, cancellation, capacity under blocking work, and scope-preserving pipeline calls.
-- [ ] Implement a no-queue two-worker executor and retry helper; keep capacity until actual worker completion.
-- [ ] Integrate opt-in context/generation guidance and retry before TOC/children; skip TOC only after an attempted retry.
-- [ ] Verify streaming/nonstreaming, exact FAQ, disabled flag, no-knowledge, scoped documents, and existing channel regressions.
-- [ ] Write activation/rollback and evaluation instructions. Commit implementation and tests.
+- [x] Add failing tests for fast-path/identical-query skip, successful single retry, empty/error/timeout, cancellation, capacity under blocking work, and scope-preserving pipeline calls.
+- [x] Implement a no-queue two-worker executor and retry helper; keep capacity until actual worker completion.
+- [x] Integrate opt-in context/generation guidance and retry before TOC/children; skip TOC only after an attempted retry.
+- [x] Verify streaming/nonstreaming, exact FAQ, disabled flag, no-knowledge, scoped documents, and existing channel regressions.
+- [x] Write activation/rollback and evaluation instructions. Commit implementation and tests.
 
 ## Verification
 
@@ -55,6 +55,26 @@ Use `/home/qaadmin/ragflow/.venv/bin/python -m pytest` from the worktree with
 `PYTHONPATH=.`. The environment emits a Polars CPU-feature RuntimeWarning on
 import; use `-W ignore::RuntimeWarning` for these tests, without modifying
 installed packages. Baseline: 129 relevant tests passed in 13.95 seconds.
-Run affected service/prompt/channel tests and Ruff; run the repository's bare
-pytest command once and report any collection/environment limitations. Never
-run integration tests that mutate production services to chase unrelated failures.
+Run affected service/prompt/channel tests and Ruff. Full integration fixtures
+delete datasets/chats and configure providers, so use full collection only in
+this environment and record the limitation; do not mutate production services.
+
+## Verification results
+
+- Focused refinement/pipeline/worker/channel regression tests: 168 passed.
+- Adjacent SQL/evidence/message-timestamp regression tests: 20 passed.
+- Settings schema preservation: 5 frontend tests passed, ESLint/Prettier clean.
+- New Python files pass full Ruff; touched existing files add no diagnostics
+  relative to the base revision. Fatal syntax/name checks and diff whitespace pass.
+- Full collection stops on missing `ZHIPU_AI_API_KEY` in test configuration;
+  no full-suite pass is claimed.
+- No live model quality or latency benchmark has been performed. Rollout remains
+  off, on the isolated branch, pending comparison with historical cases.
+
+## Review follow-up
+
+Preserve `lightweight_qa` as an optional boolean in the frontend settings schema
+and shared type so a normal settings save does not silently disable it. Repaired
+two timestamp edge cases after red regressions. See
+`docs/superpowers/reviews/2026-11-05-lightweight-qa.md` for final results and the
+combined-run cleanup warning reproduced on unmodified main.
