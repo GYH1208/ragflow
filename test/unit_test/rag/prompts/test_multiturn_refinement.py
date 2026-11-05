@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 
 import pytest
 
@@ -11,6 +12,73 @@ from rag.prompts.multiturn import (
     refine_multiturn_question,
     select_refinement_messages,
 )
+
+
+@pytest.mark.parametrize(
+    ("previous_time", "current_time", "expired"),
+    [
+        (1000, 2800, False),
+        (1000, 2801, True),
+        (1790000000000, 1790001801000, True),
+        ("2026-11-04T10:00:00+08:00", "2026-11-04T10:31:00+08:00", True),
+        ("2026-11-04T10:00:00", "2026-11-04T10:31:00", False),
+        (None, 2801, False),
+        ("invalid", 2801, False),
+        (1000, "nan", False),
+        (1000, "inf", False),
+        (1000, True, False),
+        (2801, 1000, False),
+    ],
+)
+def test_active_history_uses_only_reliable_forward_time_gaps(
+    previous_time, current_time, expired,
+):
+    messages = [
+        {"role": "user", "content": "Wi-Fi连接", "created_at": previous_time},
+        {"role": "assistant", "content": "旧网络话题"},
+        {"role": "user", "content": "出差", "created_at": current_time},
+    ]
+    before = deepcopy(messages)
+
+    selected = multiturn.select_active_messages(messages)
+
+    assert selected == (messages[-1:] if expired else messages)
+    assert messages == before
+
+
+def test_active_history_removes_old_topic_but_keeps_recent_followup():
+    messages = [
+        {"role": "user", "content": "Wi-Fi", "created_at": 1000},
+        {"role": "assistant", "content": "旧话题"},
+        {"role": "user", "content": "借用证照", "created_at": 5000},
+        {"role": "assistant", "content": "请确认用途"},
+        {"role": "user", "content": "平台认证", "created_at": 5020},
+    ]
+    assert multiturn.select_active_messages(messages) == messages[2:]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("question", ["出差", "它怎么申请？"])
+async def test_expired_history_needs_no_model_and_dangling_reference_clarifies(question):
+    class NoModelCalls:
+        async def async_chat(self, *args, **kwargs):
+            pytest.fail("expired history should not call the refinement model")
+
+    decision = await refine_multiturn_question(
+        NoModelCalls(),
+        [
+            {"role": "user", "content": "Wi-Fi", "created_at": 1000},
+            {"role": "assistant", "content": "旧话题"},
+            {"role": "user", "content": question, "created_at": 5000},
+        ],
+        lightweight=True,
+    )
+    if question == "出差":
+        assert decision.action is RefinementAction.USE_ORIGINAL
+        assert decision.question == "出差"
+    else:
+        assert decision.action is RefinementAction.CLARIFY
+        assert decision.clarification_question
 
 
 def test_normalize_message_content_keeps_only_text_blocks():

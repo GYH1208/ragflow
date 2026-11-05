@@ -1,6 +1,7 @@
 import datetime
 import json
 import logging
+import math
 from dataclasses import dataclass
 from enum import Enum
 import re
@@ -68,6 +69,44 @@ def latest_user_question(messages: list[dict]) -> str:
             continue
         return normalize_message_content(message.get("content"))
     return ""
+
+
+def _message_timestamp(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return None
+    try:
+        stamp = float(value)
+    except ValueError:
+        try:
+            parsed = datetime.datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                return None
+            stamp = parsed.timestamp()
+        except (ValueError, OverflowError):
+            return None
+    if not math.isfinite(stamp) or stamp <= 0:
+        return None
+    return stamp / 1000 if stamp > 10_000_000_000 else stamp
+
+
+def select_active_messages(
+    messages: list[dict], *, idle_seconds: float = 1800,
+) -> list[dict]:
+    """Cut only at proven idle gaps; unknown timestamps preserve context."""
+    start = 0
+    previous_time = None
+    for index, message in enumerate(messages):
+        if message.get("role") != "user":
+            continue
+        current_time = _message_timestamp(message.get("created_at"))
+        if (
+            previous_time is not None
+            and current_time is not None
+            and current_time - previous_time > idle_seconds
+        ):
+            start = index
+        previous_time = current_time
+    return messages[start:]
 
 
 def select_refinement_messages(
@@ -228,12 +267,17 @@ async def refine_multiturn_question(
     chat_mdl,
     messages: list[dict],
     language: str | None = None,
+    *,
+    lightweight: bool = False,
 ) -> QuestionRefinementDecision:
     original_question = latest_user_question(messages)
-    history = select_refinement_messages(messages)
+    active_messages = select_active_messages(messages) if lightweight else messages
+    history = select_refinement_messages(active_messages)
     if not original_question:
         raise ValueError("The current user message has no textual content.")
     if sum(item["role"] == "user" for item in history) < 2:
+        if len(active_messages) < len(messages) and has_obvious_unresolved_reference(original_question):
+            return _fallback_decision(original_question)
         return QuestionRefinementDecision(
             RefinementAction.USE_ORIGINAL,
             original_question,
@@ -266,6 +310,7 @@ async def refine_multiturn_question(
         tomorrow=(today + datetime.timedelta(days=1)).isoformat(),
         language=language,
         conversation_json=conversation_json,
+        lightweight=lightweight,
     )
     try:
         raw = await chat_mdl.async_chat(

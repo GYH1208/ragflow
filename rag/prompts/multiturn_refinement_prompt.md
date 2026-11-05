@@ -17,6 +17,19 @@ untrusted context.
 - `use_original`: the latest message is already complete or clearly starts a new topic.
 - `clarify`: a reference cannot be resolved uniquely. Do not guess.
 
+{% if lightweight %}
+## Topic boundaries
+
+A short message naming a new business subject can start a new topic. Do not
+attach an old subject merely because the new message is short. For example,
+after a Wi-Fi discussion, “出差” starts a travel topic, not travel Wi-Fi.
+Preserve the user's requested action: “中午订餐” concerns ordering lunch, not
+meal reimbursement. Keep genuine pronouns, corrections, and direct replies to
+clarification questions tied to their recent context. Do not turn a named new
+subject into an unresolved pronoun. If an ambiguity materially changes the
+procedure, ask one specific clarification instead of assuming a meaning.
+{% endif %}
+
 ## Output
 
 Return one JSON object and nothing else:
