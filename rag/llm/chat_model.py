@@ -117,9 +117,9 @@ def _apply_model_family_policies(
     sanitized_gen_conf = deepcopy(gen_conf) if gen_conf else {}
     sanitized_kwargs = dict(request_kwargs) if request_kwargs else {}
 
-    # Qwen3 family disables thinking by extra_body on chat requests.
+    # Qwen3 family enables thinking by extra_body on chat requests.
     if "qwen3" in model_name_lower:
-        sanitized_kwargs["extra_body"] = {"enable_thinking": False}
+        sanitized_kwargs["extra_body"] = {"enable_thinking": True}
 
     if backend == "base":
         return sanitized_gen_conf, sanitized_kwargs

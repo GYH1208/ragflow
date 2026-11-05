@@ -10,9 +10,9 @@ class _ConcreteLiteLLM(LiteLLMBase):
     pass
 
 
-def _make_qwen_model():
+def _make_qwen_model(model_name):
     model = _ConcreteLiteLLM.__new__(_ConcreteLiteLLM)
-    model.model_name = "dashscope/qwen3.5-flash"
+    model.model_name = model_name
     model.provider = SupportedLiteLLMProvider.Tongyi_Qianwen
     model.api_key = "test-key"
     model.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -33,7 +33,9 @@ def _make_deepseek_model():
 
 
 @pytest.mark.asyncio
-async def test_qwen_stream_disables_thinking_in_provider_request(monkeypatch):
+@pytest.mark.parametrize("model_name", ["dashscope/qwen3.5-flash", "dashscope/qwen3.7-flash"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_qwen_chat_enables_thinking_in_provider_request(monkeypatch, model_name, stream):
     captured_request = {}
 
     async def empty_stream():
@@ -42,21 +44,22 @@ async def test_qwen_stream_disables_thinking_in_provider_request(monkeypatch):
 
     async def fake_acompletion(**kwargs):
         captured_request.update(kwargs)
-        return empty_stream()
+        return empty_stream() if stream else SimpleNamespace(choices=[])
 
     monkeypatch.setattr("rag.llm.chat_model.litellm.acompletion", fake_acompletion)
 
-    chunks = [
-        chunk
-        async for chunk in _make_qwen_model().async_chat_streamly(
-            None,
-            [{"role": "user", "content": "hello"}],
-            {"temperature": 0.2},
-        )
-    ]
+    model = _make_qwen_model(model_name)
+    history = [{"role": "user", "content": "hello"}]
+    gen_conf = {"temperature": 0.2}
+    if stream:
+        chunks = [chunk async for chunk in model.async_chat_streamly(None, history, gen_conf)]
+        assert chunks == [0]
+    else:
+        assert await model.async_chat(None, history, gen_conf) == ("", 0)
 
-    assert chunks == [0]
-    assert captured_request["extra_body"] == {"enable_thinking": False}
+    assert captured_request["model"] == model_name
+    assert captured_request.get("stream", False) is stream
+    assert captured_request["extra_body"] == {"enable_thinking": True}
 
 
 @pytest.mark.asyncio
