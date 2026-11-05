@@ -38,5 +38,17 @@
 
 - [x] Document WorkBuddy download/checksum/present flow, deployment routing and capability limits; replace stale cache advice.
 - [x] Run focused backend image authorization tests plus MCP suite and Ruff/diff checks.
-- [ ] Obtain whole-branch review, address important findings, commit on feature branch.
-- [ ] Report implementation, validation and remaining deployment/client steps.
+- [x] Obtain whole-branch review, address important findings, commit on feature branch.
+- [x] Report implementation, validation and remaining deployment/client steps.
+
+## Final validation
+
+- Whole-branch review identified a proxy-prefix middleware mismatch; reproduced with
+  `/prefix` and `/mcp-gateway`, then fixed using Starlette route-path normalization.
+- Concurrent callers now use distinct image bytes and an asynchronous backend;
+  tests verify each caller's native image, downloaded bytes, MIME type and SHA-256.
+- MCP suite plus backend retrieval/image authorization tests: **196 passed**.
+- New test file passes Ruff lint and formatting; server fatal checks and diff checks pass.
+  Full server lint retains the 45 pre-existing findings.
+- Deployment and WorkBuddy desktop acceptance remain pending; follow
+  `docs/guides/workbuddy-image-download.md`. Main and production were preserved.

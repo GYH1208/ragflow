@@ -41,6 +41,7 @@ import click
 import httpx
 import mcp.types as types
 from mcp.server.lowlevel import Server
+from starlette._utils import get_route_path
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse, Response
@@ -1738,7 +1739,7 @@ def create_starlette_app():
                     await self.app(scope, receive, send)
                     return
 
-                path = scope["path"]
+                path = get_route_path(scope)
                 if path.startswith(("/mcp/catalog-download/", "/mcp/image-download/")) and scope["method"] in ("GET", "HEAD"):
                     await self.app(scope, receive, send)
                     return

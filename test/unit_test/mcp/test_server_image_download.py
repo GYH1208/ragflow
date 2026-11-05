@@ -27,15 +27,19 @@ def server(monkeypatch):
     return module
 
 
-def connect(server, monkeypatch, *, body=None, mime="image/png", status=200):
+def connect(server, monkeypatch, *, body=None, mime="image/png", status=200, bodies_by_actor=None):
     data = _image() if body is None else body
     requests = []
 
-    def backend(request):
+    async def backend(request):
         requests.append(request)
         assert request.url.path == "/api/v1/datasets/kb-a/documents/doc-a/chunks/chunk-a/image"
         if request.headers.get("x-oneid-access-token") == "denied-user":
             return httpx.Response(403, json={"code": 403, "message": "Access denied"})
+        if bodies_by_actor is not None:
+            await asyncio.sleep(0)
+            image, image_mime = bodies_by_actor[request.headers["x-oneid-access-token"]]
+            return httpx.Response(status, content=image, headers={"Content-Type": image_mime})
         return httpx.Response(status, content=data, headers={"Content-Type": mime})
 
     async def get_client(self):
@@ -47,11 +51,11 @@ def connect(server, monkeypatch, *, body=None, mime="image/png", status=200):
     return data, requests
 
 
-async def call(client, actor="employee-a", auth_mode="workbuddy"):
+async def call(client, actor="employee-a", auth_mode="workbuddy", path="/mcp"):
     headers = {"accept": "application/json, text/event-stream"}
     headers.update({"x-oneid-access-token": actor} if auth_mode == "workbuddy" else {"authorization": f"Bearer {actor}"})
     response = await client.post(
-        "/mcp",
+        path,
         headers=headers,
         json={
             "jsonrpc": "2.0",
@@ -156,6 +160,21 @@ async def test_image_download_uses_configured_public_prefix_and_api_key(server, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("root_path", ["/prefix", "/mcp-gateway"])
+async def test_proxy_root_path_preserves_download_and_tool_auth(server, monkeypatch, root_path):
+    data, _ = connect(server, monkeypatch)
+    app = server.create_starlette_app()
+    transport = httpx.ASGITransport(app=app, root_path=root_path)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(transport=transport, base_url="http://mcp.test") as client:
+        info = metadata(await call(client, path=f"{root_path}/mcp"))
+        assert info["download_url"].startswith(f"http://mcp.test{root_path}/mcp/image-download/")
+        download = await client.get(info["download_url"])
+        assert download.status_code == 200 and download.content == data
+        assert (await client.head(info["download_url"])).status_code == 200
+        assert (await client.post(f"{root_path}/mcp")).status_code == 401
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("public_url", ["ftp://private.test/mcp", "https://user:secret@private.test/mcp", "https://private.test/mcp?token=secret"])
 async def test_invalid_public_url_preserves_native_image_without_exposing_configuration(server, monkeypatch, public_url):
     connect(server, monkeypatch)
@@ -189,14 +208,20 @@ def test_image_download_tokens_redacted_in_access_logs(server):
 
 @pytest.mark.asyncio
 async def test_parallel_callers_have_distinct_links_and_request_credentials(server, monkeypatch):
-    _, requests = connect(server, monkeypatch)
+    bodies = {"employee-a": (_image("PNG"), "image/png"), "employee-b": (_image("JPEG"), "image/jpeg")}
+    _, requests = connect(server, monkeypatch, bodies_by_actor=bodies)
     async with _client_for(server) as client:
         results = await asyncio.gather(call(client, actor="employee-a"), call(client, actor="employee-b"))
         links = [metadata(result)["download_url"] for result in results]
         assert links[0] != links[1]
         assert {request.headers["x-oneid-access-token"] for request in requests} == {"employee-a", "employee-b"}
-        for link in links:
-            assert (await client.get(link)).status_code == 200
+        for result, (data, mime) in zip(results, bodies.values(), strict=True):
+            info = metadata(result)
+            assert base64.b64decode(result["content"][1]["data"]) == data
+            assert info["sha256"] == hashlib.sha256(data).hexdigest()
+            assert info["mime_type"] == mime
+            download = await client.get(info["download_url"])
+            assert download.status_code == 200 and download.content == data
 
 
 def test_sse_needs_explicit_public_endpoint(server, monkeypatch):
