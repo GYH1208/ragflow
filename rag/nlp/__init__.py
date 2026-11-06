@@ -330,9 +330,13 @@ def tokenize_chunks(chunks, doc, eng, pdf_parser=None, child_delimiters_pattern=
 def doc_tokenize_chunks_with_images(chunks, doc, eng, child_delimiters_pattern=None, batch_size=10):
     res = []
     for ii, ck in enumerate(chunks):
-        text = ck.get("context_above", "") + ck.get("text") + ck.get("context_below", "")
+        text = ck.get("context_above", "") + (ck.get("text") or "") + ck.get("context_below", "")
         if len(text.strip()) == 0:
-            continue
+            if not ck.get("image"):
+                continue
+            # Keep undescribed images embeddable and give each a distinct chunk ID,
+            # which the upload pipeline derives from the text and document ID.
+            text = f"[Image {ii + 1}: no text description available.]" if eng else f"[图片 {ii + 1}：暂无文字描述]"
         logging.debug("-- {}".format(ck))
         d = copy.deepcopy(doc)
         if ck.get("image"):
