@@ -363,15 +363,17 @@ export function FileUploader(props: FileUploaderProps) {
                       : t('knowledgeDetails.uploadTitle'))}
                 </p>
 
-                <p className="text-sm text-text-disabled">
-                  {description ||
-                    (isFolderMode
-                      ? t(
-                          'knowledgeDetails.uploadDescription',
-                          'Select a folder to upload all files inside',
-                        )
-                      : t('knowledgeDetails.uploadDescription'))}
-                </p>
+                {description !== null && (
+                  <p className="text-sm text-text-disabled">
+                    {description ||
+                      (isFolderMode
+                        ? t(
+                            'knowledgeDetails.uploadDescription',
+                            'Select a folder to upload all files inside',
+                          )
+                        : t('knowledgeDetails.uploadDescription'))}
+                  </p>
+                )}
               </div>
             )}
           </div>

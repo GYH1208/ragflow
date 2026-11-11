@@ -170,11 +170,7 @@ function UploadForm({
                 field.onChange(files);
                 handleFilesChange(files);
               }}
-              description={
-                backgroundUpload
-                  ? t('fileManager.backgroundUploadHint')
-                  : undefined
-              }
+              description={backgroundUpload ? null : undefined}
               accept={{}}
               data-testid="dataset-upload-dropzone"
             />
