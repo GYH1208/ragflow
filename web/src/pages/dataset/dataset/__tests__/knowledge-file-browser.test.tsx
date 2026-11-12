@@ -139,6 +139,13 @@ jest.mock('../knowledge-entry-action-cell', () => ({
   KnowledgeEntryActionCell: () => <div>actions</div>,
 }));
 
+jest.mock('../generate-button/generate', () => ({
+  __esModule: true,
+  default: ({ disabled }: { disabled?: boolean }) => (
+    <button disabled={disabled}>knowledgeDetails.generate</button>
+  ),
+}));
+
 // jsdom does not apply Tailwind breakpoints, so both responsive layouts exist.
 test.each([
   ['mobile', 0],

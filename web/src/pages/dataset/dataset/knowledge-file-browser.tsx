@@ -50,6 +50,7 @@ import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router';
 import { toast } from 'sonner';
 import { useKnowledgeBaseContext } from '../contexts/knowledge-base-context';
+import Generate from './generate-button/generate';
 import { KnowledgeEntryActionCell } from './knowledge-entry-action-cell';
 import { KnowledgeFileBreadcrumb } from './knowledge-file-breadcrumb';
 import { KnowledgeMoveDialog } from './knowledge-move-dialog';
@@ -214,6 +215,7 @@ export function KnowledgeFileBrowser() {
             </p>
           </div>
           <div className="flex w-full gap-2 sm:w-auto">
+            <Generate disabled={!((knowledgeBase?.chunk_count ?? 0) > 0)} />
             <Button
               className="min-w-0 flex-1 sm:flex-none"
               variant="outline"
