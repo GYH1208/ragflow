@@ -1097,6 +1097,26 @@ class FileCommitItem(DataBaseModel):
         )
 
 
+class QAWriteback(DataBaseModel):
+    """Durable identity, prepared result and completion marker for HTTP ingestion."""
+
+    id = CharField(max_length=64, primary_key=True)
+    tenant_id = CharField(max_length=32, null=False)
+    dataset_id = CharField(max_length=32, null=False)
+    document_id = CharField(max_length=32, null=False, index=True)
+    source_system = CharField(max_length=64, null=False)
+    external_id = CharField(max_length=128, null=False)
+    request_hash = CharField(max_length=64, null=False)
+    chunk_id = CharField(max_length=32, null=False)
+    prepared = JSONField(default=dict)
+    completed = BooleanField(default=False)
+    lease_owner = CharField(max_length=32, default="")
+    lease_until = BigIntegerField(default=0)
+
+    class Meta:
+        db_table = "qa_writeback"
+
+
 class Task(DataBaseModel):
     id = CharField(max_length=32, primary_key=True)
     doc_id = CharField(max_length=32, null=False, index=True)
