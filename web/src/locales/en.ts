@@ -1156,6 +1156,10 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
       apiKeyCancel: 'Cancel',
       apiKeyNameAndKey: 'Name / key',
       apiKeyScope: 'Dataset scope',
+      apiKeyAllDatasets: 'All accessible datasets',
+      apiKeySelectedDatasets: 'Selected datasets',
+      apiKeyFullAccessScopedHelp:
+        'This key can read and write selected datasets, including uploads and Q&A. Account, key and global resource management are unavailable.',
       apiKeyDatasetCount: '{{count}} knowledge bases',
       apiKeyStatus: 'Status',
       apiKeyUsage: 'Usage',

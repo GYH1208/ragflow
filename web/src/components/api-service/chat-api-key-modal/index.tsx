@@ -18,12 +18,12 @@ import {
 } from '@/components/ui/table';
 import { useTranslate } from '@/hooks/common-hooks';
 import { useFetchKnowledgeList } from '@/hooks/use-knowledge-request';
+import { IModalProps } from '@/interfaces/common';
 import type { IToken } from '@/interfaces/database/chat';
 import type {
   ICreateAPIKeyRequest,
   IUpdateAPIKeyFields,
 } from '@/interfaces/request/system';
-import { IModalProps } from '@/interfaces/common';
 import { formatDate } from '@/utils/date';
 import { Pencil, Power, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
@@ -47,7 +47,9 @@ const tokenStatus = (token: IToken) => {
   return 'active';
 };
 
-const ChatApiKeyModal = ({ hideModal }: IModalProps<any> & {
+const ChatApiKeyModal = ({
+  hideModal,
+}: IModalProps<any> & {
   dialogId?: string;
   idKey: string;
 }) => {
@@ -86,9 +88,9 @@ const ChatApiKeyModal = ({ hideModal }: IModalProps<any> & {
       const updateValues: IUpdateAPIKeyFields = {
         name: values.name,
         enabled: values.enabled,
+        allowed_dataset_ids: values.allowed_dataset_ids,
       };
       if (tokenType(editingToken) === 'retrieval') {
-        updateValues.allowed_dataset_ids = values.allowed_dataset_ids;
         updateValues.expires_in_days = values.expires_in_days;
       }
       const succeeded = await updateToken(editingToken.token, updateValues);
@@ -97,9 +99,9 @@ const ChatApiKeyModal = ({ hideModal }: IModalProps<any> & {
       const createValues: ICreateAPIKeyRequest = {
         name: values.name,
         key_type: values.key_type,
+        allowed_dataset_ids: values.allowed_dataset_ids,
       };
       if (values.key_type === 'retrieval') {
-        createValues.allowed_dataset_ids = values.allowed_dataset_ids;
         createValues.expires_in_days = values.expires_in_days;
       }
       const succeeded = await createToken(createValues);
@@ -110,8 +112,14 @@ const ChatApiKeyModal = ({ hideModal }: IModalProps<any> & {
   };
 
   const renderScope = (token: IToken) => {
-    if (!isCurrentToken(token) || tokenType(token) === 'full_access') {
-      return '—';
+    if (!isCurrentToken(token)) {
+      return t('apiKeyAllDatasets');
+    }
+    if (
+      tokenType(token) === 'full_access' &&
+      !token.allowed_dataset_ids.length
+    ) {
+      return t('apiKeyAllDatasets');
     }
     return (
       <div className="space-y-1">
@@ -232,7 +240,12 @@ const ChatApiKeyModal = ({ hideModal }: IModalProps<any> & {
                               </div>
                               {type === 'full_access' && (
                                 <p className="mt-2 text-xs text-state-warning">
-                                  {t('apiKeyFullAccessWarning')}
+                                  {t(
+                                    isCurrentToken(token) &&
+                                      token.allowed_dataset_ids.length
+                                      ? 'apiKeyFullAccessScopedHelp'
+                                      : 'apiKeyFullAccessWarning',
+                                  )}
                                 </p>
                               )}
                             </TableCell>

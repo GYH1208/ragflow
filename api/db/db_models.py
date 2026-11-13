@@ -1192,6 +1192,7 @@ class APIToken(DataBaseModel):
     name = CharField(max_length=64, null=False, default="旧版 API Key")
     is_legacy = BooleanField(null=False, default=False)
     enabled = BooleanField(null=False, default=True)
+    allowed_dataset_ids = JSONField(null=False, default=list)
     total_calls = BigIntegerField(null=False, default=0)
     retrieval_calls = BigIntegerField(null=False, default=0)
     last_used_at = UTCDateTimeField(null=True)
@@ -1640,6 +1641,7 @@ def migrate_api_token_metadata(migrator):
     alter_db_add_column(migrator, "api_token", "name", CharField(max_length=64, null=False, default="旧版 API Key"))
     alter_db_add_column(migrator, "api_token", "is_legacy", BooleanField(null=False, default=True))
     alter_db_add_column(migrator, "api_token", "enabled", BooleanField(null=False, default=True))
+    alter_db_add_column(migrator, "api_token", "allowed_dataset_ids", JSONField(null=False, default=list))
     alter_db_add_column(migrator, "api_token", "total_calls", BigIntegerField(null=False, default=0))
     alter_db_add_column(migrator, "api_token", "retrieval_calls", BigIntegerField(null=False, default=0))
     alter_db_add_column(

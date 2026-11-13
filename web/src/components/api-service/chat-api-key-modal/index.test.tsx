@@ -165,7 +165,9 @@ beforeAll(() => {
   HTMLElement.prototype.hasPointerCapture = jest.fn();
   HTMLElement.prototype.releasePointerCapture = jest.fn();
   ChatApiKeyModal = jest.requireActual('./index').default;
-  TooltipProvider = jest.requireActual('@/components/ui/tooltip').TooltipProvider;
+  TooltipProvider = jest.requireActual(
+    '@/components/ui/tooltip',
+  ).TooltipProvider;
   const backendModule = jest.requireActual(
     '../chat-overview-modal/backend-service-api',
   );
@@ -257,13 +259,43 @@ describe('ChatApiKeyModal', () => {
 
     const fullAccessRow = screen.getByText('Admin CLI').closest('tr');
     expect(fullAccessRow).not.toBeNull();
-    expect(within(fullAccessRow!).getAllByText('—')).toHaveLength(2);
+    expect(within(fullAccessRow!).getAllByText('—')).toHaveLength(1);
+    expect(
+      within(fullAccessRow!).getByText('All accessible datasets'),
+    ).toBeInTheDocument();
 
     expect(
       within(fullAccessRow!).getByRole('button', {
         name: 'Copy ragflow-full',
       }),
     ).toBeEnabled();
+  });
+
+  it('shows and edits selected datasets for a full-access key', async () => {
+    const scoped = {
+      ...tokenList[1],
+      name: 'Scoped FDE',
+      allowed_dataset_ids: ['dataset-1'],
+    };
+    hookState.tokenList = [scoped] as any;
+    renderModal();
+    const row = screen.getByText('Scoped FDE').closest('tr')!;
+    expect(within(row).getByText('Product docs')).toBeInTheDocument();
+    expect(
+      within(row).queryByText('All accessible datasets'),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      within(row).getByRole('button', { name: 'Edit Scoped FDE' }),
+    );
+    expect(screen.getByLabelText('Dataset scope')).toHaveValue('selected');
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() =>
+      expect(updateToken).toHaveBeenCalledWith('ragflow-full', {
+        name: 'Scoped FDE',
+        enabled: true,
+        allowed_dataset_ids: ['dataset-1'],
+      }),
+    );
   });
 
   it('opens create/edit forms and sends exact create and update payloads', async () => {
@@ -276,12 +308,16 @@ describe('ChatApiKeyModal', () => {
     fireEvent.change(screen.getByLabelText('Access type'), {
       target: { value: 'full_access' },
     });
+    fireEvent.change(screen.getByLabelText('Dataset scope'), {
+      target: { value: 'all' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
 
     await waitFor(() =>
       expect(createToken).toHaveBeenCalledWith({
         name: 'Full automation',
         key_type: 'full_access',
+        allowed_dataset_ids: [],
       }),
     );
 
@@ -367,6 +403,9 @@ describe('ChatApiKeyModal', () => {
     });
     fireEvent.change(screen.getByLabelText('Access type'), {
       target: { value: 'full_access' },
+    });
+    fireEvent.change(screen.getByLabelText('Dataset scope'), {
+      target: { value: 'all' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
 
@@ -499,20 +538,25 @@ describe('API key management visibility', () => {
     ['owner', false],
     ['admin', false],
     ['member', true],
-  ])('shows key management for %s or superuser identities', (role, isSuperuser) => {
-    renderWithProviders(
-      <BackendServiceApi
-        show={jest.fn()}
-        canManageKeys={canManageApiKeys(
-          { role },
-          { is_superuser: isSuperuser },
-        )}
-      />,
-    );
+  ])(
+    'shows key management for %s or superuser identities',
+    (role, isSuperuser) => {
+      renderWithProviders(
+        <BackendServiceApi
+          show={jest.fn()}
+          canManageKeys={canManageApiKeys(
+            { role },
+            { is_superuser: isSuperuser },
+          )}
+        />,
+      );
 
-    expect(screen.getByText('RAGFlow API')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'API KEY' })).toBeInTheDocument();
-  });
+      expect(screen.getByText('RAGFlow API')).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: 'API KEY' }),
+      ).toBeInTheDocument();
+    },
+  );
 
   it('keeps API documentation visible but hides key management from members', () => {
     renderWithProviders(

@@ -363,9 +363,8 @@ class CreateAPIKeyReq(Base):
     @model_validator(mode="after")
     def validate_key_type_fields(self):
         if self.key_type == "full_access":
-            forbidden = {"allowed_dataset_ids", "expires_in_days"} & self.model_fields_set
-            if forbidden:
-                raise ValueError("Full-access API keys cannot define dataset scope or expiry")
+            if "expires_in_days" in self.model_fields_set:
+                raise ValueError("Full-access API keys cannot define expiry")
         elif not self.allowed_dataset_ids:
             raise ValueError("Retrieval API keys require at least one dataset")
         return self
@@ -391,8 +390,8 @@ class UpdateAPIKeyReq(Base):
             raise ValueError("At least one API key field must be updated")
         if "name" in self.model_fields_set and self.name is None:
             raise ValueError("API key name cannot be null")
-        if "allowed_dataset_ids" in self.model_fields_set and not self.allowed_dataset_ids:
-            raise ValueError("Retrieval API keys require at least one dataset")
+        if "allowed_dataset_ids" in self.model_fields_set and self.allowed_dataset_ids is None:
+            raise ValueError("Dataset scope must be a list")
         if "enabled" in self.model_fields_set and self.enabled is None:
             raise ValueError("API key enabled state cannot be null")
         return self

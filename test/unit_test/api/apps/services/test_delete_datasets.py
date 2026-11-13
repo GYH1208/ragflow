@@ -15,7 +15,8 @@
 #
 """Regression tests for delete_datasets() in dataset_api_service."""
 
-import importlib.util
+import ast
+import logging
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -64,7 +65,7 @@ def _load_delete_datasets_module(monkeypatch, *, f2d_rows, file_filter_delete):
     _stub(
         monkeypatch,
         "api.db.services.file_service",
-        FileService=SimpleNamespace(filter_delete=file_filter_delete),
+        FileService=SimpleNamespace(filter_delete=file_filter_delete, get_or_create_kb_root=lambda *args: {"id": "kb-root"}),
     )
     _stub(
         monkeypatch,
@@ -120,7 +121,7 @@ def _load_delete_datasets_module(monkeypatch, *, f2d_rows, file_filter_delete):
         monkeypatch,
         "api.db.db_models",
         DB=SimpleNamespace(),
-        File=SimpleNamespace(source_type="source_type", id="id", type="type", name="name"),
+        File=SimpleNamespace(source_type="source_type", id="id", type="type", name="name", tenant_id="tenant_id"),
     )
     _stub(
         monkeypatch,
@@ -139,10 +140,21 @@ def _load_delete_datasets_module(monkeypatch, *, f2d_rows, file_filter_delete):
 
     repo_root = Path(__file__).resolve().parents[5]
     module_path = repo_root / "api" / "apps" / "services" / "dataset_api_service.py"
-    spec = importlib.util.spec_from_file_location("test_delete_datasets_module", module_path)
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, "test_delete_datasets_module", module)
-    spec.loader.exec_module(module)
+    module = ModuleType("test_delete_datasets_module")
+    for dependency in (
+        "api.db.services.document_service",
+        "api.db.services.file2document_service",
+        "api.db.services.file_service",
+        "api.db.services.knowledgebase_service",
+        "api.db.db_models",
+        "common.constants",
+    ):
+        module.__dict__.update({key: value for key, value in vars(sys.modules[dependency]).items() if not key.startswith("__")})
+    module.settings = sys.modules["common.settings"]
+    module.logging = logging
+    tree = ast.parse(module_path.read_text())
+    node = next(node for node in tree.body if getattr(node, "name", None) == "delete_datasets")
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(module_path), "exec"), module.__dict__)  # noqa: S102 - trusted project function, isolated dependencies
     return module, f2d_delete
 
 

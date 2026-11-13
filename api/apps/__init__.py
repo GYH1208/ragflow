@@ -223,6 +223,9 @@ def _load_user(auth_types=None):
         try:
             objs = APIToken.query(beta=auth_token)
             if objs:
+                # Beta aliases cannot bypass a full key's dataset restrictions.
+                if getattr(objs[0], "allowed_dataset_ids", []) != []:
+                    return None
                 user = UserService.query(id=objs[0].tenant_id, status=StatusEnum.VALID.value)
                 if user:
                     g.auth_type = AUTH_BETA
@@ -352,6 +355,14 @@ def login_required(func: Callable[P, Awaitable[T]] = None, auth_types=None, api_
                     code=RetCode.FORBIDDEN,
                     message="API key is not allowed to access this route.",
                 ), RetCode.FORBIDDEN
+            if (
+                api_key_context is not None
+                and api_key_context.key_type is APIKeyType.FULL_ACCESS
+                and getattr(api_key_context, "allowed_dataset_ids", None) is not None
+            ):
+                from api.apps.full_key_scope import require_full_key_scope
+
+                await require_full_key_scope()
             return await current_app.ensure_async(func)(*args, **kwargs)
 
         return wrapper

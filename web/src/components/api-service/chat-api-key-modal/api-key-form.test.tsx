@@ -51,7 +51,10 @@ beforeEach(() => {
   });
 });
 
-const fillNameAndType = (name: string, keyType: 'full_access' | 'retrieval') => {
+const fillNameAndType = (
+  name: string,
+  keyType: 'full_access' | 'retrieval',
+) => {
   fireEvent.change(screen.getByLabelText('Key name'), {
     target: { value: name },
   });
@@ -138,7 +141,7 @@ describe('ApiKeyForm', () => {
     });
   });
 
-  it('clears retrieval scope and expiry when switched to full access and warns about privilege', () => {
+  it('preserves selected datasets when switched from retrieval to full access', () => {
     const onSubmit = jest.fn();
     render(<ApiKeyForm onSubmit={onSubmit} />);
     fillNameAndType('Automation', 'retrieval');
@@ -148,23 +151,20 @@ describe('ApiKeyForm', () => {
       target: { value: 'full_access' },
     });
 
-    expect(screen.queryByLabelText('Datasets')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('Expiry')).not.toBeInTheDocument();
     expect(
-      screen.getByText(
-        'Full-access keys are plaintext administrator credentials with broad API privileges. Never distribute them to employees or configure them in WorkBuddy.',
-      ),
+      screen.getByRole('button', { name: 'Datasets' }),
     ).toBeInTheDocument();
-
+    expect(screen.queryByLabelText('Expiry')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
     expect(onSubmit).toHaveBeenCalledWith({
       name: 'Automation',
       key_type: 'full_access',
+      allowed_dataset_ids: ['dataset-1'],
       enabled: true,
     });
   });
 
-  it('locks the type while editing and limits full-access edits to name and enabled', () => {
+  it('locks the type while editing and preserves unrestricted full-key scope', () => {
     const onSubmit = jest.fn();
     render(
       <ApiKeyForm
@@ -190,6 +190,7 @@ describe('ApiKeyForm', () => {
     );
 
     expect(screen.getByLabelText('Access type')).toBeDisabled();
+    expect(screen.getByLabelText('Dataset scope')).toHaveValue('all');
     expect(screen.queryByLabelText('Datasets')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Expiry')).not.toBeInTheDocument();
 
@@ -201,7 +202,47 @@ describe('ApiKeyForm', () => {
 
     expect(onSubmit).toHaveBeenCalledWith({
       name: 'Production renamed',
+      allowed_dataset_ids: [],
       enabled: false,
+    });
+  });
+
+  it('requires selected datasets for new full keys and sends their scope', () => {
+    const onSubmit = jest.fn();
+    render(<ApiKeyForm onSubmit={onSubmit} />);
+    fillNameAndType('Scoped FDE', 'full_access');
+    expect(screen.getByLabelText('Dataset scope')).toHaveValue('selected');
+    fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(
+      screen.getByText('Select at least one dataset.'),
+    ).toBeInTheDocument();
+    selectDataset('Product docs');
+    fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
+    expect(onSubmit).toHaveBeenCalledWith({
+      name: 'Scoped FDE',
+      key_type: 'full_access',
+      allowed_dataset_ids: ['dataset-1'],
+      enabled: true,
+    });
+  });
+
+  it('requires an explicit all-datasets selection to create an unrestricted full key', () => {
+    const onSubmit = jest.fn();
+    render(<ApiKeyForm onSubmit={onSubmit} />);
+    fillNameAndType('Unrestricted', 'full_access');
+    fireEvent.change(screen.getByLabelText('Dataset scope'), {
+      target: { value: 'all' },
+    });
+    expect(
+      screen.queryByRole('button', { name: 'Datasets' }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
+    expect(onSubmit).toHaveBeenCalledWith({
+      name: 'Unrestricted',
+      key_type: 'full_access',
+      allowed_dataset_ids: [],
+      enabled: true,
     });
   });
 

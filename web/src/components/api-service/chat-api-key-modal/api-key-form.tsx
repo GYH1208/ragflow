@@ -40,11 +40,12 @@ const ApiKeyForm = ({ token, loading, onCancel, onSubmit }: Props) => {
   const [name, setName] = useState(token && 'name' in token ? token.name : '');
   const [keyType, setKeyType] = useState<FormKeyType>(initialType);
   const [datasetIds, setDatasetIds] = useState<string[]>(
-    token && 'allowed_dataset_ids' in token
-      ? token.allowed_dataset_ids
-      : [],
+    token && 'allowed_dataset_ids' in token ? token.allowed_dataset_ids : [],
   );
   const [expiry, setExpiry] = useState<ExpirySelection>(token ? '' : '90');
+  const [scope, setScope] = useState<'all' | 'selected'>(
+    token && !datasetIds.length ? 'all' : 'selected',
+  );
   const [enabled, setEnabled] = useState(token?.enabled !== false);
   const [errors, setErrors] = useState<{
     name?: string;
@@ -64,10 +65,6 @@ const ApiKeyForm = ({ token, loading, onCancel, onSubmit }: Props) => {
   const handleTypeChange = (value: string) => {
     const nextType = value as FormKeyType;
     setKeyType(nextType);
-    if (nextType === 'full_access') {
-      setDatasetIds([]);
-      setExpiry('90');
-    }
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -82,7 +79,11 @@ const ApiKeyForm = ({ token, loading, onCancel, onSubmit }: Props) => {
     if (!keyType) {
       nextErrors.keyType = t('apiKeyTypeRequired');
     }
-    if (keyType === 'retrieval' && datasetIds.length === 0) {
+    if (
+      (keyType === 'retrieval' ||
+        (keyType === 'full_access' && scope === 'selected')) &&
+      datasetIds.length === 0
+    ) {
       nextErrors.datasets = t('apiKeyDatasetRequired');
     }
     setErrors(nextErrors);
@@ -94,13 +95,12 @@ const ApiKeyForm = ({ token, loading, onCancel, onSubmit }: Props) => {
     if (!editing) {
       values.key_type = keyType;
     }
+    values.allowed_dataset_ids =
+      keyType === 'retrieval' || scope === 'selected' ? datasetIds : [];
     if (keyType === 'retrieval') {
-      values.allowed_dataset_ids = datasetIds;
       if (!editing || expiry) {
         values.expires_in_days =
-          expiry === 'forever'
-            ? null
-            : (Number(expiry) as APIKeyExpiryDays);
+          expiry === 'forever' ? null : (Number(expiry) as APIKeyExpiryDays);
       }
     }
     void onSubmit(values);
@@ -115,7 +115,9 @@ const ApiKeyForm = ({ token, loading, onCancel, onSubmit }: Props) => {
           value={name}
           onChange={(event) => setName(event.target.value)}
         />
-        {errors.name && <p className="text-sm text-state-error">{errors.name}</p>}
+        {errors.name && (
+          <p className="text-sm text-state-error">{errors.name}</p>
+        )}
       </div>
 
       <div className="space-y-2">
@@ -136,62 +138,82 @@ const ApiKeyForm = ({ token, loading, onCancel, onSubmit }: Props) => {
         )}
       </div>
 
+      {keyType === 'full_access' && (
+        <div className="space-y-2">
+          <Label htmlFor="api-key-scope">{t('apiKeyScope')}</Label>
+          <select
+            id="api-key-scope"
+            className="h-8 w-full rounded-md border border-border-button bg-bg-input px-3 text-sm"
+            value={scope}
+            onChange={(event) =>
+              setScope(event.target.value as 'all' | 'selected')
+            }
+          >
+            <option value="selected">{t('apiKeySelectedDatasets')}</option>
+            <option value="all">{t('apiKeyAllDatasets')}</option>
+          </select>
+        </div>
+      )}
+
+      {(keyType === 'retrieval' ||
+        (keyType === 'full_access' && scope === 'selected')) && (
+        <div className="space-y-2">
+          <Label htmlFor="api-key-datasets">{t('apiKeyDatasets')}</Label>
+          <MultiSelect
+            id="api-key-datasets"
+            aria-label={t('apiKeyDatasets')}
+            options={knowledgeOptions}
+            defaultValue={datasetIds}
+            onValueChange={setDatasetIds}
+            placeholder={t('apiKeySelectDatasets')}
+            disabled={knowledgeLoading}
+            maxCount={3}
+            modalPopover
+          />
+          {errors.datasets && (
+            <p className="text-sm text-state-error">{errors.datasets}</p>
+          )}
+        </div>
+      )}
       {keyType === 'retrieval' && (
-        <>
-          <div className="space-y-2">
-            <Label htmlFor="api-key-datasets">{t('apiKeyDatasets')}</Label>
-            <MultiSelect
-              id="api-key-datasets"
-              aria-label={t('apiKeyDatasets')}
-              options={knowledgeOptions}
-              defaultValue={datasetIds}
-              onValueChange={setDatasetIds}
-              placeholder={t('apiKeySelectDatasets')}
-              disabled={knowledgeLoading}
-              maxCount={3}
-              modalPopover
-            />
-            {errors.datasets && (
-              <p className="text-sm text-state-error">{errors.datasets}</p>
+        <div className="space-y-2">
+          <Label htmlFor="api-key-expiry">{t('apiKeyExpiry')}</Label>
+          <select
+            id="api-key-expiry"
+            className="h-8 w-full rounded-md border border-border-button bg-bg-input px-3 text-sm"
+            value={expiry}
+            onChange={(event) =>
+              setExpiry(event.target.value as ExpirySelection)
+            }
+          >
+            {editing && (
+              <option value="">
+                {t('apiKeyKeepCurrentExpiry', {
+                  expiry:
+                    token && 'expires_at' in token && token.expires_at !== null
+                      ? formatDate(token.expires_at)
+                      : t('apiKeyNeverExpires'),
+                })}
+              </option>
             )}
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="api-key-expiry">{t('apiKeyExpiry')}</Label>
-            <select
-              id="api-key-expiry"
-              className="h-8 w-full rounded-md border border-border-button bg-bg-input px-3 text-sm"
-              value={expiry}
-              onChange={(event) =>
-                setExpiry(event.target.value as ExpirySelection)
-              }
-            >
-              {editing && (
-                <option value="">
-                  {t('apiKeyKeepCurrentExpiry', {
-                    expiry:
-                      token &&
-                      'expires_at' in token &&
-                      token.expires_at !== null
-                        ? formatDate(token.expires_at)
-                        : t('apiKeyNeverExpires'),
-                  })}
-                </option>
-              )}
-              {expiryOptions.map((value) => (
-                <option key={value} value={value}>
-                  {value === 'forever'
-                    ? t('apiKeyNeverExpires')
-                    : t('apiKeyExpiryDays', { days: value })}
-                </option>
-              ))}
-            </select>
-          </div>
-        </>
+            {expiryOptions.map((value) => (
+              <option key={value} value={value}>
+                {value === 'forever'
+                  ? t('apiKeyNeverExpires')
+                  : t('apiKeyExpiryDays', { days: value })}
+              </option>
+            ))}
+          </select>
+        </div>
       )}
 
       {keyType === 'full_access' && (
         <p className="rounded-md bg-state-warning/10 p-3 text-sm text-state-warning">
-          {t('apiKeyFullAccessWarning')}
+          {t(
+            scope === 'selected'
+              ? 'apiKeyFullAccessScopedHelp'
+              : 'apiKeyFullAccessWarning',
+          )}
         </p>
       )}
 

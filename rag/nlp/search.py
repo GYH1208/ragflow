@@ -950,6 +950,17 @@ class Dealer:
         if not chunks:
             chunks = []
 
+        def binding(chunk):
+            datasets = chunk.get("kb_id")
+            if isinstance(datasets, str):
+                datasets = [datasets]
+            if not isinstance(datasets, (list, tuple)) or not datasets or any(not isinstance(value, str) or not value for value in datasets):
+                return None
+            doc_id = chunk.get("doc_id")
+            if not isinstance(doc_id, str) or not doc_id:
+                return None
+            return frozenset(datasets), doc_id
+
         vector_size = 1024
         for id, cks in mom_chunks.items():
             chunk = self.dataStore.get(id, idx_nms[0], [ck["kb_id"] for ck in cks])
@@ -958,6 +969,13 @@ class Dealer:
                     "Parent chunk '%s' not found in the index; falling back to %d child chunk(s).",
                     id, len(cks),
                 )
+                chunks.extend(cks)
+                continue
+            parent_binding = binding(chunk)
+            if parent_binding is None or any(binding(child) != parent_binding for child in cks):
+                # ES/OpenSearch ID lookups do not enforce the dataset filter.
+                # Parent IDs can also collide across documents with identical text.
+                logging.getLogger(__name__).warning("Parent chunk '%s' has a different dataset/document binding; keeping child chunks.", id)
                 chunks.extend(cks)
                 continue
             d = {

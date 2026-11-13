@@ -351,6 +351,7 @@ async def delete_datasets(tenant_id: str, ids: list = None, delete_all: bool = F
     errors = []
     success_count = 0
     for kb_id, kb in kb_id_instance_pairs:
+        kb_root = FileService.get_or_create_kb_root(kb_id, kb.tenant_id)
         for doc in DocumentService.query(kb_id=kb_id):
             if not DocumentService.remove_document(doc, tenant_id):
                 errors.append(f"Remove document '{doc.id}' error for dataset '{kb_id}'")
@@ -361,6 +362,7 @@ async def delete_datasets(tenant_id: str, ids: list = None, delete_all: bool = F
                     [
                         File.source_type == FileSource.KNOWLEDGEBASE,
                         File.id == f2d[0].file_id,
+                        File.tenant_id == kb.tenant_id,
                     ]
                 )
             else:
@@ -374,7 +376,12 @@ async def delete_datasets(tenant_id: str, ids: list = None, delete_all: bool = F
                     kb_id,
                 )
             File2DocumentService.delete_by_document_id(doc.id)
-        FileService.filter_delete([File.source_type == FileSource.KNOWLEDGEBASE, File.type == "folder", File.name == kb.name])
+        FileService.filter_delete([
+            File.source_type == FileSource.KNOWLEDGEBASE,
+            File.type == "folder",
+            File.id == kb_root["id"],
+            File.tenant_id == kb.tenant_id,
+        ])
 
         # Drop index for this dataset
         try:

@@ -1054,6 +1054,10 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取实体和关系
       apiKeyCancel: '取消',
       apiKeyNameAndKey: '名称 / 密钥',
       apiKeyScope: '知识库范围',
+      apiKeyAllDatasets: '全部可访问的知识库',
+      apiKeySelectedDatasets: '指定知识库',
+      apiKeyFullAccessScopedHelp:
+        '此密钥可读写指定知识库，包括上传文件和回写 Q&A。不能用于账号、密钥和全局资源管理。',
       apiKeyDatasetCount: '共 {{count}} 个知识库',
       apiKeyStatus: '状态',
       apiKeyUsage: '调用统计',

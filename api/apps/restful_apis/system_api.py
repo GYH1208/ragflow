@@ -86,7 +86,7 @@ def _serialize_api_key(record, key_type):
         "name": data.get("name", "旧版 API Key"),
         "key_type": key_type.value,
         "legacy": bool(data.get("is_legacy", False)) if key_type is APIKeyType.FULL_ACCESS else False,
-        "allowed_dataset_ids": list(data.get("allowed_dataset_ids") or []) if key_type is APIKeyType.RETRIEVAL else [],
+        "allowed_dataset_ids": list(data.get("allowed_dataset_ids") or []),
         "expires_at": data.get("expires_at") if key_type is APIKeyType.RETRIEVAL else None,
         "enabled": bool(data.get("enabled", True)),
         "total_calls": data.get("total_calls", 0),
@@ -439,7 +439,7 @@ async def new_token():
 
     try:
         key_type = APIKeyType(req["key_type"])
-        if key_type is APIKeyType.RETRIEVAL and not _datasets_belong_to_tenant(req["allowed_dataset_ids"], tenant_id):
+        if not _datasets_belong_to_tenant(req.get("allowed_dataset_ids", []), tenant_id):
             return _management_error(RetCode.BAD_REQUEST, "Every selected dataset must be valid and belong to the managed tenant.")
 
         now = datetime.now(timezone.utc)
@@ -461,6 +461,7 @@ async def new_token():
             obj.update(
                 beta=generate_confirmation_token().replace("ragflow-", "")[:32],
                 is_legacy=False,
+                allowed_dataset_ids=req.get("allowed_dataset_ids", []),
             )
             saved = APITokenService.save(**obj)
         else:
@@ -545,8 +546,10 @@ async def update_token():
         else:
             return _management_error(RetCode.NOT_FOUND, "API key not found.")
 
-        if key_type is APIKeyType.FULL_ACCESS and ({"allowed_dataset_ids", "expires_in_days"} & req.keys()):
-            return _management_error(RetCode.BAD_REQUEST, "Full-access API keys cannot define dataset scope or expiry.")
+        if key_type is APIKeyType.FULL_ACCESS and "expires_in_days" in req:
+            return _management_error(RetCode.BAD_REQUEST, "Full-access API keys cannot define expiry.")
+        if key_type is APIKeyType.RETRIEVAL and "allowed_dataset_ids" in req and not req["allowed_dataset_ids"]:
+            return _management_error(RetCode.BAD_REQUEST, "Retrieval API keys require at least one dataset.")
         if "allowed_dataset_ids" in req and not _datasets_belong_to_tenant(req["allowed_dataset_ids"], tenant_id):
             return _management_error(RetCode.BAD_REQUEST, "Every selected dataset must be valid and belong to the managed tenant.")
 

@@ -98,12 +98,15 @@ def resolve_api_key(token: str, now: datetime | None = None) -> APIKeyContext | 
     full_record = _first_record(APIToken, token)
     if full_record is None or not _is_enabled(full_record):
         return None
+    allowlist = _validated_allowlist(full_record)
+    if allowlist is None:
+        return None
     return APIKeyContext(
         key_type=APIKeyType.FULL_ACCESS,
         tenant_id=full_record.tenant_id,
         token=token,
         record=full_record,
-        allowed_dataset_ids=None,
+        allowed_dataset_ids=allowlist or None,
     )
 
 
@@ -149,7 +152,7 @@ def allowed_dataset_ids() -> frozenset[str] | None:
     if employee is not None:
         return employee.allowed_dataset_ids
     context = _current_context()
-    if context is None or context.key_type is APIKeyType.FULL_ACCESS:
+    if context is None:
         return None
     return context.allowed_dataset_ids
 
