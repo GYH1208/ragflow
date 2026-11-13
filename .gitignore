@@ -244,3 +244,6 @@ bin/*
 .marscode/
 graphify-out/
 .worktrees/
+
+# Local HTTP API handoff document
+/docs/references/http_knowledge_read_api.md
