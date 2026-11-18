@@ -693,6 +693,7 @@ def set_logger_level():
 
 # New management routes share the existing superadmin guard and response envelope.
 from admin.server.workbuddy_service import WorkBuddyAdminService as WBAdmin
+from api.db.services.center_dataset_service import CenterHierarchyConflict
 from api.db.services.center_dataset_service import CenterDatasetService as WBCenters
 from api.db.services.workbuddy_employee_service import WorkBuddyEmployeeService as WBEmployees
 import os
@@ -715,6 +716,8 @@ def _wb_page():
 def _wb_response(operation):
     try:
         return success_response(operation())
+    except CenterHierarchyConflict as exc:
+        return error_response(str(exc), 400, {"reason": "center_hierarchy_conflict"})
     except (ValueError,TypeError):
         return error_response('Invalid request or unavailable WorkBuddy resource',400)
     except Exception:
@@ -785,4 +788,22 @@ def workbuddy_center_datasets(center_id):
         else:
             ids=WBCenters.allowed_datasets(enterprise,center_id)
         return {'dataset_ids':sorted(ids)}
+    return _wb_response(run)
+
+
+@admin_bp.route("/workbuddy/enterprise/datasets", methods=["GET", "PUT"])
+@login_required
+@check_admin_auth
+def workbuddy_enterprise_datasets():
+    def run():
+        enterprise = _wb_enterprise()
+        if request.method == "PUT":
+            body = request.get_json(silent=True)
+            if not isinstance(body, dict):
+                raise ValueError("Invalid dataset grants")
+            ids = WBCenters.replace_enterprise_grants(enterprise, body.get("dataset_ids"), current_user.id)
+        else:
+            ids = WBCenters.enterprise_datasets(enterprise)
+        return {"dataset_ids": sorted(ids)}
+
     return _wb_response(run)

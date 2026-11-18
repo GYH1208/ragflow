@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from flask import Flask
 from flask_login import LoginManager, UserMixin
-from test.unit_test.api.db.services.test_workbuddy_employee_service import employee_db, profile
+from test.unit_test.api.db.services.test_workbuddy_employee_service import employee_db as employee_db, profile as profile  # noqa: PLC0414
 from test.unit_test.api.db.services.test_center_dataset_service import setup_center, add_kb
 from api.db import db_models as m
 
@@ -53,6 +53,8 @@ def admin_client(monkeypatch, employee_db):
         ("get", "/datasets", None),
         ("get", "/centers/2/datasets", None),
         ("put", "/centers/2/datasets", {"dataset_ids": []}),
+        ("get", "/enterprise/datasets", None),
+        ("put", "/enterprise/datasets", {"dataset_ids": []}),
     ],
 )
 def test_all_workbuddy_admin_routes_require_superadmin(admin_client, method, path, body):
@@ -84,6 +86,31 @@ def test_bad_replacement_does_not_partially_update(admin_client, employee_db, pr
     assert admin_client.put(url, json={"dataset_ids": ["kb-a"]}, headers=headers).status_code == 200
     assert admin_client.put(url, json={"dataset_ids": ["missing"]}, headers=headers).status_code == 400
     assert S.allowed_datasets("123", "2") == frozenset({"kb-a"})
+
+
+def test_company_grants_are_configurable_before_any_department_is_synced(admin_client):
+    add_kb("kb-shared")
+    url = "/api/v1/admin/workbuddy/enterprise/datasets"
+    headers = {"test-role": "admin"}
+    response = admin_client.get(url, headers=headers)
+    assert response.status_code == 200
+    assert response.json["data"] == {"dataset_ids": []}
+    assert admin_client.put(url, json={"dataset_ids": ["kb-shared"]}, headers=headers).status_code == 200
+    assert admin_client.put(url, json={"dataset_ids": ["missing"]}, headers=headers).status_code == 400
+    assert admin_client.get(url, headers=headers).json["data"] == {"dataset_ids": ["kb-shared"]}
+    assert admin_client.put(url, json={"dataset_ids": []}, headers=headers).status_code == 200
+    assert admin_client.get(url, headers=headers).json["data"] == {"dataset_ids": []}
+    assert m.EnterpriseDepartment.select().count() == 0
+
+
+def test_marking_company_root_explains_the_hierarchy_conflict(admin_client, profile):
+    setup_center(profile)
+    url = "/api/v1/admin/workbuddy/departments/1/center"
+    response = admin_client.put(url, json={"enabled": True}, headers={"test-role": "admin"})
+    assert response.status_code == 400
+    assert response.json["data"] == {"reason": "center_hierarchy_conflict"}
+    assert not m.EnterpriseDepartment.get(department_id="1").is_center
+    assert m.EnterpriseDepartment.get(department_id="2").is_center
 
 
 def test_legacy_password_promotion_delete_and_key_creation_reject_employees(monkeypatch, employee_db, profile):

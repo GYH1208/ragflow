@@ -1,13 +1,20 @@
-"""Department IDs and server-managed center grants; empty always means deny."""
+"""Department IDs and server-managed WorkBuddy dataset grants."""
 
 from datetime import UTC, datetime
 
 from peewee import SqliteDatabase
 
+from api.db.db_models import DB, Knowledgebase
 from api.db.db_models import CenterDatasetGrant as G
 from api.db.db_models import EnterpriseDepartment as D
-from api.db.db_models import Knowledgebase
 from common.misc_utils import get_uuid
+
+# OneID department IDs are numeric. This reserved grant key needs no department row.
+_ENTERPRISE_SCOPE = "__enterprise__"
+
+
+class CenterHierarchyConflict(ValueError):
+    pass
 
 
 class CenterDatasetService:
@@ -51,7 +58,7 @@ class CenterDatasetService:
                 branch = ancestors(department_id)
                 for other in nodes.values():
                     if other.department_id != department_id and other.is_center and (other.department_id in branch or department_id in ancestors(other.department_id)):
-                        raise ValueError("Ancestor and descendant cannot both be centers")
+                        raise CenterHierarchyConflict("Ancestor and descendant cannot both be centers")
             D.update(is_center=enabled, updated_by=actor_id).where(D.id == row.id).execute()
 
     @staticmethod
@@ -68,31 +75,53 @@ class CenterDatasetService:
 
     @classmethod
     def replace_grants(cls, enterprise_id, center_id, dataset_ids, actor_id):
+        with D._meta.database.atomic():
+            centers = cls._departments(enterprise_id, lock=True)
+            if center_id == _ENTERPRISE_SCOPE or not any(c.department_id == center_id and c.is_center for c in centers):
+                raise ValueError("Center not found in this enterprise")
+            return cls._replace_scope_grants(enterprise_id, center_id, dataset_ids, actor_id)
+
+    @classmethod
+    def replace_enterprise_grants(cls, enterprise_id, dataset_ids, actor_id):
+        database = G._meta.database
+        with DB.lock("workbuddy_enterprise_grants", db=database), database.atomic():
+            return cls._replace_scope_grants(enterprise_id, _ENTERPRISE_SCOPE, dataset_ids, actor_id)
+
+    @staticmethod
+    def _replace_scope_grants(enterprise_id, scope_id, dataset_ids, actor_id):
         if not isinstance(dataset_ids, list) or len(dataset_ids) > 1000 or any(not isinstance(x, str) or not x or len(x) > 32 for x in dataset_ids):
             raise ValueError("dataset_ids must be a list of valid IDs")
         requested = set(dataset_ids)
-        with D._meta.database.atomic():
-            centers = cls._departments(enterprise_id, lock=True)
-            if not any(c.department_id == center_id and c.is_center for c in centers):
-                raise ValueError("Center not found in this enterprise")
-            valid = {k.id for k in Knowledgebase.select(Knowledgebase.id).where(Knowledgebase.id.in_(requested) & (Knowledgebase.status == "1"))} if requested else set()
-            if requested != valid:
-                raise ValueError("One or more datasets are unavailable")
-            G.update(enabled=False, updated_by=actor_id).where((G.enterprise_id == enterprise_id) & (G.center_department_id == center_id)).execute()
-            for dataset_id in sorted(requested):
-                row, _ = G.get_or_create(
-                    enterprise_id=enterprise_id, center_department_id=center_id, dataset_id=dataset_id, defaults={"id": get_uuid(), "created_by": actor_id, "updated_by": actor_id}
-                )
-                G.update(enabled=True, scope="knowledge:retrieve", updated_by=actor_id).where(G.id == row.id).execute()
+        valid = {k.id for k in Knowledgebase.select().where(Knowledgebase.id.in_(requested) & (Knowledgebase.status == "1"))} if requested else set()
+        if requested != valid:
+            raise ValueError("One or more datasets are unavailable")
+        G.update(enabled=False, updated_by=actor_id).where((G.enterprise_id == enterprise_id) & (G.center_department_id == scope_id)).execute()
+        for dataset_id in sorted(requested):
+            row, _ = G.get_or_create(
+                enterprise_id=enterprise_id, center_department_id=scope_id, dataset_id=dataset_id, defaults={"id": get_uuid(), "created_by": actor_id, "updated_by": actor_id}
+            )
+            G.update(enabled=True, scope="knowledge:retrieve", updated_by=actor_id).where(G.id == row.id).execute()
         return frozenset(requested)
 
-    @staticmethod
-    def allowed_datasets(enterprise_id, center_id):
-        if center_id is None or not D.select().where((D.enterprise_id == enterprise_id) & (D.department_id == center_id) & D.is_center).exists():
+    @classmethod
+    def allowed_datasets(cls, enterprise_id, center_id):
+        if center_id in (None, _ENTERPRISE_SCOPE) or not D.select().where((D.enterprise_id == enterprise_id) & (D.department_id == center_id) & D.is_center).exists():
             return frozenset()
+        return cls._scope_datasets(enterprise_id, center_id)
+
+    @classmethod
+    def enterprise_datasets(cls, enterprise_id):
+        return cls._scope_datasets(enterprise_id, _ENTERPRISE_SCOPE)
+
+    @classmethod
+    def employee_datasets(cls, enterprise_id, center_id):
+        return cls.enterprise_datasets(enterprise_id) | cls.allowed_datasets(enterprise_id, center_id)
+
+    @staticmethod
+    def _scope_datasets(enterprise_id, scope_id):
         query = (
             G.select(G.dataset_id)
-            .join(Knowledgebase, on=(G.dataset_id == Knowledgebase.id))
-            .where((G.enterprise_id == enterprise_id) & (G.center_department_id == center_id) & G.enabled & (G.scope == "knowledge:retrieve") & (Knowledgebase.status == "1"))
+            .join(Knowledgebase, on=(Knowledgebase.id == G.dataset_id))
+            .where((G.enterprise_id == enterprise_id) & (G.center_department_id == scope_id) & G.enabled & (G.scope == "knowledge:retrieve") & (Knowledgebase.status == "1"))
         )
         return frozenset(g.dataset_id for g in query)

@@ -4,6 +4,8 @@ import pytest
 from quart import Quart, g
 from werkzeug.datastructures import Headers
 from api.auth.workbuddy.types import WorkBuddyAccessContext, WorkBuddyAuthenticationError
+from test.unit_test.api.db.services.test_center_dataset_service import add_kb, setup_center
+from test.unit_test.api.db.services.test_workbuddy_employee_service import employee_db as employee_db, profile as profile  # noqa: PLC0414
 
 
 @pytest.fixture
@@ -122,6 +124,47 @@ def test_local_disable_grant_revocation_and_move_apply_next_request(monkeypatch)
         with pytest.raises(Forbidden):
             _sync_context(profile)
         assert m.User.get_by_id(user.id).is_active == "0"
+
+
+def test_company_grants_apply_without_a_center_and_combine_with_center_grants(employee_db, profile, monkeypatch):
+    from contextlib import nullcontext
+    from dataclasses import replace
+
+    from werkzeug.exceptions import Forbidden
+
+    from api.apps.workbuddy_auth import _sync_context
+    from api.db.services.workbuddy_employee_service import WorkBuddyEmployeeService as Employees
+
+    monkeypatch.setattr(employee_db, "connection_context", nullcontext)
+    centers = setup_center(profile)
+    add_kb("kb-center")
+    shared = add_kb("kb-shared")
+    add_kb("kb-foreign")
+    centers.replace_grants("123", "2", ["kb-center"], "admin")
+    centers.replace_enterprise_grants("123", ["kb-shared"], "admin")
+    centers.replace_enterprise_grants("456", ["kb-foreign"], "admin")
+
+    _, with_center = _sync_context(profile)
+    assert with_center.allowed_dataset_ids == frozenset({"kb-center", "kb-shared"})
+    no_center_profile = replace(profile, paths=())
+    user, no_center = _sync_context(no_center_profile)
+    assert no_center.center_id is None
+    assert no_center.allowed_dataset_ids == frozenset({"kb-shared"})
+    assert centers.allowed_datasets("123", "2") == frozenset({"kb-center"})
+
+    shared.status = "0"
+    shared.save(only=[type(shared).status])
+    assert _sync_context(no_center_profile)[1].allowed_dataset_ids == frozenset()
+    shared.status = "1"
+    shared.save(only=[type(shared).status])
+    centers.replace_enterprise_grants("123", [], "admin")
+    assert _sync_context(profile)[1].allowed_dataset_ids == frozenset({"kb-center"})
+    assert _sync_context(no_center_profile)[1].allowed_dataset_ids == frozenset()
+
+    centers.replace_enterprise_grants("123", ["kb-shared"], "admin")
+    Employees.set_enabled(user.id, False, "admin")
+    with pytest.raises(Forbidden):
+        _sync_context(no_center_profile)
 
 
 @pytest.mark.parametrize("ticket", ["valid", "invalid"])

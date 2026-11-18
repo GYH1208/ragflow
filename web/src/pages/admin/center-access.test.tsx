@@ -10,7 +10,9 @@ jest.mock('@/services/admin-service', () => ({
   listWorkBuddyDepartments: jest.fn(),
   listWorkBuddyDatasets: jest.fn(),
   getWorkBuddyCenterDatasets: jest.fn(),
+  getWorkBuddyEnterpriseDatasets: jest.fn(),
   replaceWorkBuddyCenterDatasets: jest.fn(),
+  replaceWorkBuddyEnterpriseDatasets: jest.fn(),
   setWorkBuddyCenter: jest.fn(),
 }));
 function mount() {
@@ -45,11 +47,17 @@ beforeEach(() => {
   (service.replaceWorkBuddyCenterDatasets as jest.Mock).mockResolvedValue({
     dataset_ids: [],
   });
+  (service.getWorkBuddyEnterpriseDatasets as jest.Mock).mockResolvedValue({
+    dataset_ids: [],
+  });
+  (service.replaceWorkBuddyEnterpriseDatasets as jest.Mock).mockResolvedValue({
+    dataset_ids: ['kb-a'],
+  });
 });
 test('saving_center_replaces_complete_list_including_empty', async () => {
   mount();
   await screen.findByRole('option', { name: /后勤服务中心/ });
-  fireEvent.change(screen.getByLabelText('admin.workbuddy.center'), {
+  fireEvent.change(screen.getByLabelText('admin.workbuddy.scope'), {
     target: { value: '2' },
   });
   const check = await screen.findByRole('checkbox', { name: /研发结构案例库/ });
@@ -69,7 +77,7 @@ test('failed_save_does_not_show_success', async () => {
   );
   mount();
   await screen.findByRole('option', { name: /后勤服务中心/ });
-  fireEvent.change(screen.getByLabelText('admin.workbuddy.center'), {
+  fireEvent.change(screen.getByLabelText('admin.workbuddy.scope'), {
     target: { value: '2' },
   });
   const check = await screen.findByRole('checkbox');
@@ -100,4 +108,47 @@ test('same_named_centers_show_their_distinct_department_ids', async () => {
   expect(
     screen.getByRole('option', { name: 'Shared center (4)' }),
   ).toBeInTheDocument();
+});
+
+test('saves company-wide grants without selecting or redefining a center', async () => {
+  (service.listWorkBuddyCenters as jest.Mock).mockResolvedValue([]);
+  mount();
+  const company = await screen.findByRole<HTMLOptionElement>('option', {
+    name: 'admin.workbuddy.enterprise',
+  });
+  fireEvent.change(screen.getByLabelText('admin.workbuddy.scope'), {
+    target: { value: company.value },
+  });
+  const dataset = await screen.findByRole('checkbox', {
+    name: /研发结构案例库/,
+  });
+  expect(dataset).not.toBeChecked();
+  fireEvent.click(dataset);
+  fireEvent.click(screen.getByRole('button', { name: 'admin.workbuddy.save' }));
+  expect(await screen.findByText('admin.workbuddy.saved')).toBeInTheDocument();
+  expect(service.replaceWorkBuddyEnterpriseDatasets).toHaveBeenCalledWith([
+    'kb-a',
+  ]);
+  expect(service.replaceWorkBuddyCenterDatasets).not.toHaveBeenCalled();
+});
+
+test('reports the organization conflict when the company root is marked as a center', async () => {
+  (service.listWorkBuddyDepartments as jest.Mock).mockResolvedValue([
+    { department_id: '1', name: '公司', parent_id: null, is_center: false },
+  ]);
+  (service.setWorkBuddyCenter as jest.Mock).mockRejectedValue(
+    Object.assign(new Error('Request failed'), {
+      isAxiosError: true,
+      response: { data: { data: { reason: 'center_hierarchy_conflict' } } },
+    }),
+  );
+  mount();
+  await screen.findByRole('option', { name: '公司 (1)' });
+  fireEvent.change(screen.getByLabelText('admin.workbuddy.organization'), {
+    target: { value: '1' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'admin.workbuddy.mark' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'admin.workbuddy.centerHierarchyError',
+  );
 });

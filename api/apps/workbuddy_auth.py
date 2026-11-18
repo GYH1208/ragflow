@@ -27,7 +27,7 @@ def _sync_context(profile):
         if user.is_active != "1" or user.status != "1":
             raise Forbidden("Employee account is disabled")
         center = Centers.resolve_center(profile.enterprise_id, profile.paths)
-        context = WorkBuddyAccessContext(user.id, profile.enterprise_id, center, Centers.allowed_datasets(profile.enterprise_id, center))
+        context = WorkBuddyAccessContext(user.id, profile.enterprise_id, center, Centers.employee_datasets(profile.enterprise_id, center))
         return user, context
 
 

@@ -55,7 +55,7 @@ class WorkBuddyAdminService:
         data = cls._employee(row)
         paths = tuple(DepartmentPath(p["department_id"], p["is_main"], p["complete"], tuple(DepartmentNode(**n) for n in p["hierarchy"])) for p in row.department_paths)
         center = Centers.resolve_center(enterprise_id, paths)
-        data["allowed_dataset_ids"] = sorted(Centers.allowed_datasets(enterprise_id, center)) if data["enabled"] else []
+        data["allowed_dataset_ids"] = sorted(Centers.employee_datasets(enterprise_id, center)) if data["enabled"] else []
         return data
 
     @staticmethod

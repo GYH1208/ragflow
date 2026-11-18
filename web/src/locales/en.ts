@@ -3236,10 +3236,10 @@ Important structured information may include: names, dates, locations, events, k
         localAccounts: 'Local / historical accounts',
         employees: 'WorkBuddy employees',
         employeeHint:
-          'Accounts are created after verified first access. Employees can retrieve only datasets granted to their center.',
-        centerAccess: 'Center dataset access',
+          'Accounts are created after verified first access. Employees can retrieve company-wide datasets and datasets granted to their center.',
+        centerAccess: 'Dataset access',
         centerHint:
-          'Assign datasets to a center. Employees inherit access through their primary department.',
+          'Grant access company-wide or to a center. Employees inherit center access through their primary department.',
         centerDefinition: 'Center definitions',
         syncedOnly:
           'Only synchronized departments appear here. Employee connections update their department paths.',
@@ -3249,6 +3249,10 @@ Important structured information may include: names, dates, locations, events, k
         unmark: 'Remove center designation',
         centerConflict:
           'An ancestor and descendant cannot both be centers in the same department path.',
+        centerHierarchyError:
+          'A department above or below this node is already marked as a center. Choose “Entire company” below for company-wide access.',
+        scope: 'Access scope',
+        enterprise: 'Entire company',
         center: 'Center',
         department: 'Primary department',
         path: 'Department path',
@@ -3279,9 +3283,11 @@ Important structured information may include: names, dates, locations, events, k
         total: 'Total',
         previous: 'Previous',
         next: 'Next',
-        discard: 'Discard unsaved grants and switch center?',
+        discard: 'Discard unsaved changes and switch access scope?',
         emptyDenies:
-          'Only selected datasets are accessible. Saving an empty list revokes all dataset access for this center.',
+          'These read-only grants apply to this center. Save an empty list to revoke its grants.',
+        enterpriseHint:
+          'All verified WorkBuddy employees in this company can read the selected datasets. Save an empty list to revoke company-wide grants.',
         searchDatasets: 'Search datasets',
         selectedElsewhere: 'Selected outside the current page or filter',
         remove: 'Remove',

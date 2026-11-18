@@ -401,3 +401,16 @@ export const replaceWorkBuddyCenterDatasets = (
       { dataset_ids },
     ),
   );
+export const getWorkBuddyEnterpriseDatasets = () =>
+  workBuddyData(
+    request.get<ResponseData<{ dataset_ids: string[] }>>(
+      `${workBuddyBase}/enterprise/datasets`,
+    ),
+  );
+export const replaceWorkBuddyEnterpriseDatasets = (dataset_ids: string[]) =>
+  workBuddyData(
+    request.put<ResponseData<{ dataset_ids: string[] }>>(
+      `${workBuddyBase}/enterprise/datasets`,
+      { dataset_ids },
+    ),
+  );

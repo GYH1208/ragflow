@@ -3,21 +3,26 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import {
   getWorkBuddyCenterDatasets,
+  getWorkBuddyEnterpriseDatasets,
   listWorkBuddyCenters,
   listWorkBuddyDatasets,
   listWorkBuddyDepartments,
   replaceWorkBuddyCenterDatasets,
+  replaceWorkBuddyEnterpriseDatasets,
   setWorkBuddyCenter,
 } from '@/services/admin-service';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { isAxiosError } from 'axios';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+
+const enterpriseScope = 'enterprise';
 
 export default function CenterAccess() {
   const { t } = useTranslation();
   const label = (key: string) => t(`admin.workbuddy.${key}`);
   const cache = useQueryClient();
-  const [center, setCenter] = useState('');
+  const [scope, setScope] = useState('');
   const [department, setDepartment] = useState('');
   const [q, setQ] = useState('');
   const [page, setPage] = useState(1);
@@ -37,24 +42,28 @@ export default function CenterAccess() {
     queryFn: () => listWorkBuddyDatasets({ q, page, page_size: 30 }),
   });
   const grants = useQuery({
-    queryKey: ['admin/workbuddy/grants', center],
+    queryKey: ['admin/workbuddy/grants', scope],
     queryFn: async () => ({
-      center,
-      ...(await getWorkBuddyCenterDatasets(center)),
+      scope,
+      ...(await (scope === enterpriseScope
+        ? getWorkBuddyEnterpriseDatasets()
+        : getWorkBuddyCenterDatasets(scope))),
     }),
-    enabled: !!center,
+    enabled: !!scope,
   });
   useEffect(() => {
-    if (grants.data?.center === center && !dirty)
+    if (grants.data?.scope === scope && !dirty)
       setSelected(grants.data.dataset_ids);
-  }, [grants.data, center, dirty]);
+  }, [grants.data, scope, dirty]);
   const save = useMutation({
-    mutationFn: ({ id, ids }: { id: string; ids: string[] }) =>
-      replaceWorkBuddyCenterDatasets(id, ids),
-    onSuccess: (_data, variables) => {
-      cache.setQueryData(['admin/workbuddy/grants', variables.id], {
-        center: variables.id,
-        dataset_ids: variables.ids,
+    mutationFn: ({ scope, ids }: { scope: string; ids: string[] }) =>
+      scope === enterpriseScope
+        ? replaceWorkBuddyEnterpriseDatasets(ids)
+        : replaceWorkBuddyCenterDatasets(scope, ids),
+    onSuccess: (data, variables) => {
+      cache.setQueryData(['admin/workbuddy/grants', variables.scope], {
+        scope: variables.scope,
+        dataset_ids: data.dataset_ids,
       });
       setDirty(false);
       setSaved(true);
@@ -66,16 +75,18 @@ export default function CenterAccess() {
     onSuccess: (_data, variables) => {
       cache.invalidateQueries({ queryKey: ['admin/workbuddy/centers'] });
       cache.invalidateQueries({ queryKey: ['admin/workbuddy/departments'] });
-      if (!variables.value && center === variables.id) {
-        setCenter('');
+      if (!variables.value && scope === variables.id) {
+        setScope('');
         setSelected([]);
         setDirty(false);
+        setSaved(false);
+        save.reset();
       }
     },
   });
-  const changeCenter = (value: string) => {
+  const changeScope = (value: string) => {
     if (dirty && !window.confirm(label('discard'))) return;
-    setCenter(value);
+    setScope(value);
     setSelected([]);
     setDirty(false);
     setSaved(false);
@@ -83,7 +94,10 @@ export default function CenterAccess() {
   };
   const node = departments.data?.find((d) => d.department_id === department);
   const visibleIds = new Set(datasets.data?.items.map((d) => d.id));
-  const loaded = grants.data?.center === center && !grants.isError;
+  const loaded = grants.data?.scope === scope && !grants.isError;
+  const hierarchyConflict =
+    isAxiosError<{ data?: { reason?: string } }>(mark.error) &&
+    mark.error.response?.data?.data?.reason === 'center_hierarchy_conflict';
   return (
     <Card className="h-full overflow-auto bg-transparent shadow-none">
       <CardHeader>
@@ -101,7 +115,10 @@ export default function CenterAccess() {
                 className="rounded border bg-bg-base p-2"
                 value={department}
                 disabled={mark.isPending || save.isPending}
-                onChange={(e) => setDepartment(e.target.value)}
+                onChange={(e) => {
+                  setDepartment(e.target.value);
+                  mark.reset();
+                }}
               >
                 <option value="">{label('choose')}</option>
                 {departments.data?.map((d) => (
@@ -128,16 +145,22 @@ export default function CenterAccess() {
           <p className="text-sm text-text-secondary">
             {label('centerConflict')}
           </p>
+          {mark.isError && (
+            <p role="alert">
+              {label(hierarchyConflict ? 'centerHierarchyError' : 'failed')}
+            </p>
+          )}
         </section>
         <label className="flex flex-wrap items-center gap-3">
-          {label('center')}
+          {label('scope')}
           <select
             className="rounded border bg-bg-base p-2"
-            value={center}
+            value={scope}
             disabled={save.isPending || mark.isPending}
-            onChange={(e) => changeCenter(e.target.value)}
+            onChange={(e) => changeScope(e.target.value)}
           >
             <option value="">{label('choose')}</option>
+            <option value={enterpriseScope}>{label('enterprise')}</option>
             {centers.data?.map((c) => (
               <option key={c.department_id} value={c.department_id}>
                 {c.name} ({c.department_id})
@@ -149,13 +172,14 @@ export default function CenterAccess() {
           departments.isError ||
           datasets.isError ||
           grants.isError ||
-          save.isError ||
-          mark.isError) && <p role="alert">{label('failed')}</p>}
-        {center && (
+          save.isError) && <p role="alert">{label('failed')}</p>}
+        {scope && (
           <section className="space-y-4">
             <h2>{label('allowedDatasets')}</h2>
             <p className="text-sm text-text-secondary">
-              {label('emptyDenies')}
+              {label(
+                scope === enterpriseScope ? 'enterpriseHint' : 'emptyDenies',
+              )}
             </p>
             <Input
               className="max-w-sm"
@@ -248,7 +272,7 @@ export default function CenterAccess() {
               disabled={!loaded || !dirty || save.isPending}
               onClick={() => {
                 setSaved(false);
-                save.mutate({ id: center, ids: [...selected] });
+                save.mutate({ scope, ids: [...selected] });
               }}
             >
               {label('save')}
